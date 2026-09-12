@@ -8,6 +8,7 @@ members = [
     "crates/florui",
     "crates/florui-conformance",
     "crates/florui-build",
+    "crates/florui-style",
     "examples/florui-example-app",
 ]
 

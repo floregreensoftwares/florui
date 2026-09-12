@@ -1055,6 +1055,13 @@ name = "florui-primitives"
 version = "0.1.0"
 
 [[package]]
+name = "florui-style"
+version = "0.1.0"
+dependencies = [
+ "florui",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
