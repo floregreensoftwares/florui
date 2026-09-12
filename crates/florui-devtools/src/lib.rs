@@ -7,5 +7,6 @@ pub mod capture;
 pub mod color;
 pub mod diagnostics;
 pub mod fixture;
+pub mod inspector;
 pub mod preview;
 pub mod scene;
