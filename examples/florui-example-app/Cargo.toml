@@ -14,9 +14,11 @@ path = "src/main.rs"
 
 [dependencies]
 florui = { path = "../../crates/florui" }
-florui-devtools = { path = "../../crates/florui-devtools" }
+
+[dev-dependencies]
 florui-style = { path = "../../crates/florui-style" }
 florui-layout = { path = "../../crates/florui-layout" }
+florui-paint = { path = "../../crates/florui-paint" }
 taffy = "0.14"
 
 [build-dependencies]

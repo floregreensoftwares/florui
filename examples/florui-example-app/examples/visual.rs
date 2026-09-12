@@ -1,10 +1,9 @@
 //! Renders this app's actual `Card` component through the real
-//! style+layout pipeline (`florui-style` cascade, `florui-layout`'s Taffy
-//! block layout) and paints every node at its real computed position and
-//! size via `florui_devtools::layout_capture` — no window, no fixed-margin
-//! stand-in. Run with: `cargo run --example visual -p florui-example-app`
+//! style+layout+paint pipeline (`florui-style` cascade, `florui-layout`'s
+//! Taffy block layout, `florui-paint`'s background-rectangle painter) — no
+//! window, no fixed-margin stand-in. Run with:
+//! `cargo run --example visual -p florui-example-app`
 
-use florui_devtools::layout_capture;
 use florui_example_app::components::card::{Card, CardProps};
 use florui_style::{Arena, InteractionState, Rgba};
 use taffy::prelude::*;
@@ -27,7 +26,7 @@ fn main() {
         .expect("layout should not fail for explicitly sized nodes");
 
     let path = std::env::temp_dir().join("florui-example-app-card.png");
-    layout_capture::paint_to_png(
+    florui_paint::paint_to_png(
         &path,
         400,
         260,
