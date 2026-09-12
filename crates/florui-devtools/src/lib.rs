@@ -6,6 +6,7 @@
 pub mod capture;
 pub mod color;
 pub mod diagnostics;
+pub mod element_scene;
 pub mod fixture;
 pub mod inspector;
 pub mod preview;

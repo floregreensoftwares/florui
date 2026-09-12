@@ -9,6 +9,7 @@ publish = false
 name = "florui_devtools"
 
 [dependencies]
+florui = { path = "../florui" }
 winit = "0.30.13"
 softbuffer = "0.4.8"
 notify = "8.2.0"
