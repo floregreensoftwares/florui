@@ -6,6 +6,7 @@ members = [
     "crates/florui-primitives",
     "crates/florui-macros",
     "crates/florui",
+    "crates/florui-conformance",
 ]
 
 [workspace.package]

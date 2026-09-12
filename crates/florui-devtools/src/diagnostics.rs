@@ -97,6 +97,21 @@ fn dim(text: &str) -> String {
     paint(DIM, text)
 }
 
+/// Green text, for a command's success/pass output (e.g. `florui compare`).
+pub fn success(text: &str) -> String {
+    paint(GREEN, text)
+}
+
+/// Bold red text, for a command's failure output.
+pub fn failure(text: &str) -> String {
+    paint(RED_BOLD, text)
+}
+
+/// Dimmed text, for secondary detail alongside a success/failure line.
+pub fn dim_text(text: &str) -> String {
+    dim(text)
+}
+
 fn elapsed_label(epoch: Instant) -> String {
     format!("[{:>10.3?}]", epoch.elapsed())
 }
@@ -172,5 +187,16 @@ mod tests {
         let a = ElementId::next();
         let b = ElementId::next();
         assert_ne!(a, b);
+    }
+
+    /// Doesn't assert colored vs. plain output directly: `NO_COLOR` is
+    /// process-global and tests run in parallel, so asserting on a specific
+    /// state would be flaky depending on what's set in the ambient
+    /// environment. The text itself must survive either way.
+    #[test]
+    fn public_formatters_preserve_their_text() {
+        assert!(success("ok").contains("ok"));
+        assert!(failure("boom").contains("boom"));
+        assert!(dim_text("detail").contains("detail"));
     }
 }

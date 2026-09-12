@@ -1,0 +1,19 @@
+[package]
+name = "florui-conformance"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "florui_conformance"
+
+[dependencies]
+chromiumoxide = "0.9.1"
+florui-devtools = { path = "../florui-devtools" }
+futures = "0.3.34"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
+url = "2.5.8"
