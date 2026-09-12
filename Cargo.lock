@@ -518,6 +518,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "florui"
+version = "0.1.0"
+dependencies = [
+ "florui-macros",
+]
+
+[[package]]
 name = "florui-cli"
 version = "0.1.0"
 dependencies = [
@@ -533,6 +540,17 @@ dependencies = [
  "notify",
  "softbuffer",
  "winit",
+]
+
+[[package]]
+name = "florui-macros"
+version = "0.1.0"
+dependencies = [
+ "florui",
+ "florui-primitives",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

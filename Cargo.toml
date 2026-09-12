@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/florui-devtools", "crates/florui-cli", "crates/florui-primitives"]
+members = [
+    "crates/florui-devtools",
+    "crates/florui-cli",
+    "crates/florui-primitives",
+    "crates/florui-macros",
+    "crates/florui",
+]
 
 [workspace.package]
 edition = "2024"
