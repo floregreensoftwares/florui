@@ -17,4 +17,19 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: cargo test --workspace --doc
+      - name: Cache pinned Chrome for Testing
+        uses: actions/cache@v4
+        with:
+          path: .tools/chromium
+          key: chromium-${{ hashFiles('crates/florui-conformance/chromium-pin.json') }}
+      - name: Fetch pinned Chrome for Testing
+        shell: pwsh
+        run: ./scripts/fetch-chromium.ps1
+      - name: Run Chromium-dependent conformance tests
+        shell: pwsh
+        run: |
+          $pin = Get-Content -Raw crates/florui-conformance/chromium-pin.json | ConvertFrom-Json
+          $chrome = Resolve-Path ".tools/chromium/$($pin.version)/chrome-win64/chrome.exe"
+          $env:FLORUI_CHROMIUM_TEST = $chrome.Path
+          cargo test -p florui-conformance -- --ignored
 

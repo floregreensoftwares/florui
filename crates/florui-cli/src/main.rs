@@ -103,12 +103,34 @@ fn run_compare(
     headed: bool,
     keep_profile: bool,
 ) -> ExitCode {
-    let Some(chromium) = chromium else {
-        eprintln!("{}", failure("no Chromium binary configured"));
-        eprintln!("pass --chromium <path> or set FLORUI_CHROMIUM, e.g.:");
-        eprintln!(r#"  --chromium "C:\Program Files\Google\Chrome\Application\chrome.exe""#);
-        eprintln!(r#"  --chromium "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe""#);
-        return ExitCode::FAILURE;
+    let chromium = match chromium {
+        Some(chromium) => chromium,
+        None => {
+            let pinned = florui_conformance::pin::default_executable_path();
+            if pinned.exists() {
+                println!(
+                    "{}",
+                    dim_text(&format!(
+                        "using pinned Chromium {} at {}",
+                        florui_conformance::pin::pin().version,
+                        pinned.display()
+                    ))
+                );
+                pinned
+            } else {
+                eprintln!("{}", failure("no Chromium binary configured"));
+                eprintln!(
+                    "run scripts/fetch-chromium.ps1 to fetch the pinned build, or pass --chromium <path> / set FLORUI_CHROMIUM, e.g.:"
+                );
+                eprintln!(
+                    r#"  --chromium "C:\Program Files\Google\Chrome\Application\chrome.exe""#
+                );
+                eprintln!(
+                    r#"  --chromium "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe""#
+                );
+                return ExitCode::FAILURE;
+            }
+        }
     };
 
     let fixture = match load_reference_fixture(&fixture_path) {

@@ -7,6 +7,7 @@
 
 pub mod driver;
 pub mod geometry;
+pub mod pin;
 pub mod pixels;
 pub mod reference_fixture;
 pub mod report;
