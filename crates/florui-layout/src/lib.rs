@@ -11,6 +11,13 @@
 //! properties in `florui-style` (`display`, `flex-*`, `grid-*`) before
 //! there is anything real to translate for them.
 //!
+//! `width`/`height` are content-box, explicitly, since that is real CSS's
+//! actual default (before any reset stylesheet opts into border-box) —
+//! Taffy's own default is border-box and silently relying on that would
+//! make an explicit size shrink to fit its own padding instead of the
+//! padding adding to it. `florui-style` has no `box-sizing` property to
+//! override this yet.
+//!
 //! A leaf node (no element children) with its own direct text is measured
 //! via [`florui_text`] — real shaping, not a guess — and that intrinsic
 //! size is used wherever the node's own `width`/`height` don't already
@@ -181,6 +188,11 @@ fn to_taffy_style(style: Option<&ComputedStyle>) -> taffy::Style {
 
     taffy::Style {
         display: Display::Block,
+        // Real CSS's actual default (before any reset stylesheet opts into
+        // border-box) is content-box: padding adds to a declared width/
+        // height rather than being carved out of it. Taffy's own default is
+        // border-box, so this must be set explicitly to match.
+        box_sizing: BoxSizing::ContentBox,
         size: Size {
             width: to_dimension(style.width),
             height: to_dimension(style.height),
@@ -258,6 +270,28 @@ mod tests {
         let node = arena.roots()[0];
         assert_eq!(layouts[&node].width, 200.0);
         assert_eq!(layouts[&node].height, 100.0);
+    }
+
+    /// Real CSS's actual default is content-box: padding adds to a
+    /// declared width/height rather than being carved out of it. Taffy's
+    /// own default is border-box, where this same stylesheet would render
+    /// at exactly 200x100 with zero content-box room left over.
+    #[test]
+    fn padding_adds_to_an_explicit_size_instead_of_shrinking_its_content_box() {
+        let tree: Element = view! { <div class="card" /> };
+        let (arena, layouts) = layout_for(
+            &tree,
+            ".card { width: 200px; height: 100px; padding-top: 20px; padding-left: 10px; }",
+        );
+        let node = arena.roots()[0];
+        assert_eq!(
+            layouts[&node].width, 210.0,
+            "200 declared + 10 padding-left"
+        );
+        assert_eq!(
+            layouts[&node].height, 120.0,
+            "100 declared + 20 padding-top"
+        );
     }
 
     #[test]
