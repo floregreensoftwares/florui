@@ -1023,6 +1023,7 @@ dependencies = [
  "egui-winit",
  "florui",
  "florui-layout",
+ "florui-paint",
  "florui-style",
  "image",
  "notify",
@@ -1039,8 +1040,8 @@ version = "0.1.0"
 dependencies = [
  "florui",
  "florui-build",
- "florui-devtools",
  "florui-layout",
+ "florui-paint",
  "florui-style",
  "taffy",
 ]
@@ -1064,6 +1065,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "florui-paint"
+version = "0.1.0"
+dependencies = [
+ "florui",
+ "florui-layout",
+ "florui-style",
+ "image",
+ "taffy",
 ]
 
 [[package]]
