@@ -1034,6 +1034,7 @@ version = "0.1.0"
 dependencies = [
  "florui",
  "florui-build",
+ "florui-devtools",
 ]
 
 [[package]]

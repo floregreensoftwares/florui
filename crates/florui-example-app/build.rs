@@ -5,7 +5,9 @@
 fn main() {
     let package_root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let package_name = std::env::var("CARGO_PKG_NAME").unwrap();
-    let crate_root = package_root.join("src/main.rs");
+    // Components live in the library target; that is where the actual
+    // module graph (and every stylesheet! declaration) is reachable from.
+    let crate_root = package_root.join("src/lib.rs");
 
     let result = florui_build::collect_stylesheets(
         &package_name,

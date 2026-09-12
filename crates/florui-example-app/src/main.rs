@@ -3,14 +3,13 @@
 //! declared stylesheet across the module graph in deterministic cascade
 //! order — proving that pipeline against actual `cargo build`, not just
 //! the `florui-build` crate's own unit tests.
+//!
+//! Components live in the library target (`src/lib.rs`), which is also
+//! where `build.rs` roots its module-graph walk; this binary is a thin
+//! entry point over it. See `examples/visual.rs` for a rendered capture of
+//! the same tree.
 
-mod components;
-
-use florui::prelude::*;
-
-use components::card::{Card, CardProps};
-
-stylesheet!("./app.css");
+use florui_example_app::components::card::{Card, CardProps};
 
 include!(concat!(env!("OUT_DIR"), "/florui_stylesheets.rs"));
 

@@ -1,15 +1,17 @@
 //! Reads a `florui::Element` tree down to the same two-color scene the
 //! preview renderer already knows how to paint: the root's own background
-//! and, if it has one, its first child's.
+//! and, among its direct children, the first one that declares a
+//! background of its own.
 //!
 //! There is no CSS cascade or selector matching anywhere yet, so this does
 //! not read a class or a stylesheet — only a literal HTML `style` attribute
 //! directly on the element, e.g. `style="background-color: #1e1e22;"`, the
 //! same way a browser reads an inline style before any author stylesheet.
-//! Layout does not exist either: children past the first, and nesting past
-//! one level, are read but not shown, matching the single inset rectangle
-//! [`crate::scene`] already draws — this bridges what `view!` builds to
-//! what the renderer can currently display, not the other way around.
+//! Layout does not exist either: only direct children are considered (not
+//! grandchildren), and only one of them is ever shown, matching the single
+//! inset rectangle [`crate::scene`] already draws — this bridges what
+//! `view!` builds to what the renderer can currently display, not the
+//! other way around.
 
 use florui::{Element, ElementNode};
 
@@ -22,21 +24,27 @@ pub struct Scene {
     pub element: Option<Rgba>,
 }
 
-/// Reads `root`'s own background and its first child's, falling back to
-/// `fallback` for the canvas when the root declares no background.
+/// Reads `root`'s own background and its first styled child's, falling
+/// back to `fallback` for the canvas when the root declares no background.
 pub fn from_element(root: &Element, fallback: Rgba) -> Scene {
     Scene {
         canvas: background_color(root).unwrap_or(fallback),
-        element: first_child(root).and_then(background_color),
+        element: first_styled_child(root).and_then(background_color),
     }
 }
 
-fn first_child(element: &Element) -> Option<&Element> {
-    match element {
-        Element::Node(ElementNode { children, .. }) => children.first(),
-        Element::Fragment(children) => children.first(),
-        Element::Text(_) => None,
-    }
+/// The first direct child that declares its own background, skipping
+/// earlier children that declare none (e.g. plain text or an unstyled
+/// heading) — still one level deep only, not a real tree search.
+fn first_styled_child(element: &Element) -> Option<&Element> {
+    let children = match element {
+        Element::Node(ElementNode { children, .. }) => children,
+        Element::Fragment(children) => children,
+        Element::Text(_) => return None,
+    };
+    children
+        .iter()
+        .find(|child| background_color(child).is_some())
 }
 
 fn background_color(element: &Element) -> Option<Rgba> {
@@ -74,7 +82,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_first_childs_background() {
+    fn reads_the_first_styled_childs_background() {
         let tree: Element = view! {
             <div style="background-color: #1e1e22;">
                 <div style="background-color: #b42828;" />
@@ -86,6 +94,18 @@ mod tests {
     }
 
     #[test]
+    fn skips_earlier_children_that_declare_no_background() {
+        let tree: Element = view! {
+            <div style="background-color: #1e1e22;">
+                <h2>{"Title"}</h2>
+                <div style="background-color: #42734f;" />
+            </div>
+        };
+        let scene = from_element(&tree, FALLBACK);
+        assert_eq!(scene.element, Some(Rgba::opaque(0x42, 0x73, 0x4f)));
+    }
+
+    #[test]
     fn falls_back_when_the_root_has_no_style() {
         let tree: Element = view! { <div /> };
         let scene = from_element(&tree, FALLBACK);
@@ -94,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn ignores_children_past_the_first() {
+    fn ignores_children_past_the_first_styled_one() {
         let tree: Element = view! {
             <div style="background-color: #1e1e22;">
                 <div style="background-color: #b42828;" />

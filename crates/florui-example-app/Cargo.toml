@@ -5,12 +5,16 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[lib]
+name = "florui_example_app"
+
 [[bin]]
 name = "florui-example-app"
 path = "src/main.rs"
 
 [dependencies]
 florui = { path = "../florui" }
+florui-devtools = { path = "../florui-devtools" }
 
 [build-dependencies]
 florui-build = { path = "../florui-build" }
