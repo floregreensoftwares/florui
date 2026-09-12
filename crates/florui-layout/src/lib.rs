@@ -11,10 +11,11 @@
 //! properties in `florui-style` (`display`, `flex-*`, `grid-*`) before
 //! there is anything real to translate for them.
 //!
-//! There is no intrinsic (content-based) sizing: nothing here measures
-//! text, since no text-shaping engine exists yet. A node with no explicit
-//! `width`/`height` lays out at `0x0` rather than guessing a size from
-//! content that was never actually measured.
+//! A leaf node (no element children) with its own direct text is measured
+//! via [`florui_text`] — real shaping, not a guess — and that intrinsic
+//! size is used wherever the node's own `width`/`height` don't already
+//! settle it. A leaf with no text still lays out at `0x0` when it has no
+//! explicit size, since there is nothing to measure it from.
 //!
 //! Taffy positions are relative to the parent's content box, matching
 //! Taffy's own convention; see [`absolute_position`] to accumulate them
@@ -23,6 +24,7 @@
 use std::collections::HashMap;
 
 use florui_style::{Arena, ComputedStyle, NodeId};
+use taffy::compute_leaf_layout;
 use taffy::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -49,6 +51,14 @@ impl std::error::Error for LayoutError {
     }
 }
 
+/// The one embedded font this crate measures leaf text with — see
+/// [`florui_text`]'s own scope notes for what "measure" does and doesn't
+/// cover yet (no rasterization, no wrapping, one font).
+struct TextContext {
+    text: String,
+    font_size: f32,
+}
+
 /// Computes block-layout geometry for every node in `arena`, using
 /// `styles` for sizing/spacing. `available` is the space the layout root
 /// itself is given (e.g. the preview window's content area).
@@ -57,7 +67,7 @@ pub fn compute_layout(
     styles: &HashMap<NodeId, ComputedStyle>,
     available: Size<AvailableSpace>,
 ) -> Result<HashMap<NodeId, BoxLayout>, LayoutError> {
-    let mut tree: TaffyTree<()> = TaffyTree::new();
+    let mut tree: TaffyTree<TextContext> = TaffyTree::new();
     let mut taffy_ids: HashMap<NodeId, taffy::NodeId> = HashMap::new();
 
     for &root in arena.roots() {
@@ -78,8 +88,20 @@ pub fn compute_layout(
         )
         .map_err(LayoutError)?;
 
-    tree.compute_layout(synthetic_root, available)
-        .map_err(LayoutError)?;
+    let mut font = florui_text::Font::load_embedded();
+    tree.compute_layout_with_measure(
+        synthetic_root,
+        available,
+        |inputs, _node_id, context, style| {
+            compute_leaf_layout(
+                inputs,
+                style,
+                |_, _| 0.0,
+                |_, _| measure(&mut font, context),
+            )
+        },
+    )
+    .map_err(LayoutError)?;
 
     let mut result = HashMap::with_capacity(taffy_ids.len());
     for (&node_id, &tid) in &taffy_ids {
@@ -97,21 +119,54 @@ pub fn compute_layout(
     Ok(result)
 }
 
+/// A leaf with no text measures at `0x0` — `compute_leaf_layout` only
+/// falls back to this for an axis that neither the node's own style nor
+/// its parent's known dimensions already settled.
+fn measure(font: &mut florui_text::Font, context: Option<&mut TextContext>) -> Size<f32> {
+    match context {
+        Some(context) => {
+            let metrics = font.measure(&context.text, context.font_size);
+            Size {
+                width: metrics.width,
+                height: metrics.height,
+            }
+        }
+        None => Size::ZERO,
+    }
+}
+
 fn build_node(
     arena: &Arena,
     styles: &HashMap<NodeId, ComputedStyle>,
     node: NodeId,
-    tree: &mut TaffyTree<()>,
+    tree: &mut TaffyTree<TextContext>,
     taffy_ids: &mut HashMap<NodeId, taffy::NodeId>,
 ) -> Result<taffy::NodeId, taffy::TaffyError> {
-    let children: Vec<taffy::NodeId> = arena
-        .children(node)
-        .iter()
-        .map(|&child| build_node(arena, styles, child, tree, taffy_ids))
-        .collect::<Result<_, _>>()?;
-
     let style = to_taffy_style(styles.get(&node));
-    let id = tree.new_with_children(style, &children)?;
+    let arena_children = arena.children(node);
+
+    let id = if arena_children.is_empty() {
+        let text = arena.text_content(node);
+        if text.is_empty() {
+            tree.new_leaf(style)?
+        } else {
+            let font_size = styles.get(&node).map_or(16.0, |s| s.font_size);
+            tree.new_leaf_with_context(
+                style,
+                TextContext {
+                    text: text.to_string(),
+                    font_size,
+                },
+            )?
+        }
+    } else {
+        let children: Vec<taffy::NodeId> = arena_children
+            .iter()
+            .map(|&child| build_node(arena, styles, child, tree, taffy_ids))
+            .collect::<Result<_, _>>()?;
+        tree.new_with_children(style, &children)?
+    };
+
     taffy_ids.insert(node, id);
     Ok(id)
 }
@@ -285,5 +340,63 @@ mod tests {
         let leaf = arena.children(inner)[0];
 
         assert_eq!(absolute_position(&arena, &layouts, leaf), (15.0, 15.0));
+    }
+
+    /// Taffy rounds final layout to whole pixels by default, so a value
+    /// measured by `florui_text` (which does not round) is compared with a
+    /// sub-pixel tolerance rather than for exact equality.
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 1.0,
+            "expected {actual} to be within 1px of {expected}"
+        );
+    }
+
+    #[test]
+    fn a_text_bearing_leaf_with_no_explicit_size_gets_its_measured_intrinsic_size() {
+        let tree: Element = view! { <h2>{"Hi"}</h2> };
+        let (arena, layouts) = layout_for(&tree, "");
+        let node = arena.roots()[0];
+
+        let expected = florui_text::Font::load_embedded().measure("Hi", 16.0);
+        assert_close(layouts[&node].width, expected.width);
+        assert_close(layouts[&node].height, expected.height);
+        assert!(expected.width > 0.0, "the font actually measured something");
+    }
+
+    #[test]
+    fn an_explicit_size_overrides_measured_text_size() {
+        let tree: Element = view! { <h2 class="title">{"Hi"}</h2> };
+        let (arena, layouts) = layout_for(&tree, ".title { width: 300px; height: 50px; }");
+        let node = arena.roots()[0];
+        assert_eq!(layouts[&node].width, 300.0);
+        assert_eq!(layouts[&node].height, 50.0);
+    }
+
+    #[test]
+    fn font_size_changes_the_measured_text_size() {
+        let tree: Element = view! { <h2 class="big">{"Hi"}</h2> };
+        let (arena, layouts) = layout_for(&tree, ".big { font-size: 40px; }");
+        let node = arena.roots()[0];
+
+        let expected = florui_text::Font::load_embedded().measure("Hi", 40.0);
+        assert_close(layouts[&node].width, expected.width);
+        assert_close(layouts[&node].height, expected.height);
+    }
+
+    #[test]
+    fn nested_text_is_measured_on_its_own_node_not_the_ancestor() {
+        let tree: Element = view! {
+            <div>
+                <span>{"Hi"}</span>
+            </div>
+        };
+        let (arena, layouts) = layout_for(&tree, "");
+        let card = arena.roots()[0];
+        let span = arena.children(card)[0];
+
+        let expected = florui_text::Font::load_embedded().measure("Hi", 16.0);
+        assert_close(layouts[&span].width, expected.width);
+        assert_close(layouts[&span].height, expected.height);
     }
 }
