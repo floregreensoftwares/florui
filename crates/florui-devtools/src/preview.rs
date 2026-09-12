@@ -8,6 +8,10 @@
 //! pixels directly for the preview, deferring any GPU backend decision for
 //! the *production* render path to later (the inspector window uses `wgpu`,
 //! but that is a devtools-only concern — see [`crate::inspector`]).
+//!
+//! `App` owning the `winit::event_loop::EventLoop` here is this crate acting
+//! as a desktop host, not a core-engine requirement: a future core engine
+//! crate must stay usable under a different host that owns its own loop.
 
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};

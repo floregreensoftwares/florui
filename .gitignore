@@ -2,3 +2,5 @@
 tmp
 # Rust build artifacts
 **/target/
+# Vendored, pinned tooling (fetched by scripts/fetch-chromium.ps1)
+/.tools/
