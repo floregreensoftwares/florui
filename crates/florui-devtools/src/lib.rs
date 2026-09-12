@@ -1,13 +1,13 @@
 //! Development-only tooling for Florui: a minimal native preview host, CSS
-//! hot reload, structured diagnostics, and offscreen capture. None of this
-//! is the real style/layout/paint engine; it exists to validate the
-//! edit-and-see loop before that engine exists.
+//! hot reload, structured diagnostics, and offscreen capture.
 //!
 //! This crate is a *host*, not the core: it owns the window and event loop
-//! the way a desktop shell would. When the core engine crate exists, it must
-//! stay usable without this crate — window ownership, event-loop control,
-//! and swapchain presentation belong here or in whatever embeds the engine
-//! instead, never baked into mounting or hook scheduling.
+//! the way a desktop shell would. Real style ([`florui_style`]) and layout
+//! ([`florui_layout`]) now exist as separate crates this one bridges into
+//! pixels via [`layout_capture`]; [`element_scene`] and [`scene`] remain
+//! the older fixed-margin stand-in from before either existed, kept for
+//! what still only reads a literal inline `style=` attribute with no
+//! layout at all.
 
 pub mod capture;
 pub mod color;
@@ -16,5 +16,6 @@ pub mod element_preview;
 pub mod element_scene;
 pub mod fixture;
 pub mod inspector;
+pub mod layout_capture;
 pub mod preview;
 pub mod scene;
