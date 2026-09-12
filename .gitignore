@@ -1,0 +1,4 @@
+.git
+tmp
+# Rust build artifacts
+**/target/
