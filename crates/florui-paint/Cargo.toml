@@ -11,7 +11,10 @@ name = "florui_paint"
 [dependencies]
 florui-layout = { path = "../florui-layout" }
 florui-style = { path = "../florui-style" }
-image = { version = "0.25", default-features = false, features = ["png"] }
+florui-text = { path = "../florui-text" }
+png = "0.17"
+skrifa = "0.44"
+tiny-skia = "0.11"
 
 [dev-dependencies]
 florui = { path = "../florui" }
