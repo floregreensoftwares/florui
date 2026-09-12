@@ -6,15 +6,15 @@ use crate::color::parse_hex_color;
 use crate::error::StyleError;
 use crate::selector::Selector;
 use crate::selector_parse::parse_selector_list;
-use crate::value::{Property, Value};
+use crate::value::{Property, Value, ValueKind};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Declaration {
     pub property: Property,
     pub value: Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Rule {
     pub selector: Selector,
     pub declarations: Vec<Declaration>,
@@ -81,20 +81,36 @@ fn parse_declaration(text: &str) -> Result<Declaration, StyleError> {
         None => value_text,
     };
 
-    let value = match value_text {
-        "inherit" => Value::Inherit,
-        "initial" => Value::Initial,
-        other => {
-            parse_hex_color(other)
-                .map(Value::Color)
-                .map_err(|_| StyleError::InvalidValue {
-                    property: name.to_string(),
-                    value: other.to_string(),
-                })?
-        }
-    };
+    let value =
+        match value_text {
+            "inherit" => Value::Inherit,
+            "initial" => Value::Initial,
+            "auto" if property.value_kind() == ValueKind::LengthOrAuto => Value::Auto,
+            other => match property.value_kind() {
+                ValueKind::Color => parse_hex_color(other).map(Value::Color).map_err(|_| {
+                    StyleError::InvalidValue {
+                        property: name.to_string(),
+                        value: other.to_string(),
+                    }
+                })?,
+                ValueKind::Length | ValueKind::LengthOrAuto => parse_length(other)
+                    .map(Value::Length)
+                    .ok_or_else(|| StyleError::InvalidValue {
+                        property: name.to_string(),
+                        value: other.to_string(),
+                    })?,
+            },
+        };
 
     Ok(Declaration { property, value })
+}
+
+/// `Npx` or the unitless `0` CSS allows for lengths.
+fn parse_length(text: &str) -> Option<f32> {
+    if text == "0" {
+        return Some(0.0);
+    }
+    text.strip_suffix("px")?.parse().ok()
 }
 
 /// Strips `/* ... */` comments. Not CSS-string-aware (our value grammar
@@ -172,5 +188,43 @@ mod tests {
         let rules = parse_stylesheet(".a { color: inherit; background-color: initial; }").unwrap();
         assert_eq!(rules[0].declarations[0].value, Value::Inherit);
         assert_eq!(rules[0].declarations[1].value, Value::Initial);
+    }
+
+    #[test]
+    fn parses_pixel_lengths_for_layout_properties() {
+        let rules = parse_stylesheet(".a { width: 200px; margin-top: 0; }").unwrap();
+        assert_eq!(
+            rules[0].declarations[0],
+            Declaration {
+                property: Property::Width,
+                value: Value::Length(200.0)
+            }
+        );
+        assert_eq!(
+            rules[0].declarations[1],
+            Declaration {
+                property: Property::MarginTop,
+                value: Value::Length(0.0)
+            }
+        );
+    }
+
+    #[test]
+    fn accepts_auto_for_width_height_and_margin_but_not_padding() {
+        let rules = parse_stylesheet(".a { width: auto; margin-left: auto; }").unwrap();
+        assert_eq!(rules[0].declarations[0].value, Value::Auto);
+        assert_eq!(rules[0].declarations[1].value, Value::Auto);
+
+        assert!(parse_stylesheet(".a { padding-left: auto; }").is_err());
+    }
+
+    #[test]
+    fn rejects_a_color_value_for_a_length_property() {
+        assert!(parse_stylesheet(".a { width: #ff0000; }").is_err());
+    }
+
+    #[test]
+    fn rejects_a_length_without_a_unit() {
+        assert!(parse_stylesheet(".a { width: 10; }").is_err());
     }
 }

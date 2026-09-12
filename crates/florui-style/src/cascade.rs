@@ -12,10 +12,28 @@ use crate::stylesheet_parse::Rule;
 use crate::tree::{Arena, NodeId};
 use crate::value::{Property, Value};
 
+/// One edge's value on each of the four sides of the box, in that order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Edges<T> {
+    pub top: T,
+    pub right: T,
+    pub bottom: T,
+    pub left: T,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ComputedStyle {
     pub background_color: Rgba,
     pub color: Rgba,
+    /// `None` means `auto`.
+    pub width: Option<f32>,
+    /// `None` means `auto`.
+    pub height: Option<f32>,
+    /// Each edge is `None` for an explicit `auto` (enabling the usual
+    /// auto-margin centering behavior), `Some(0.0)` when nothing set it.
+    pub margin: Edges<Option<f32>>,
+    /// Always a concrete value; real CSS padding has no `auto`.
+    pub padding: Edges<f32>,
 }
 
 pub fn compute(
@@ -52,43 +70,130 @@ fn resolve_style(
     node: NodeId,
     parent: Option<&ComputedStyle>,
 ) -> ComputedStyle {
-    ComputedStyle {
-        background_color: resolve_property(
+    let color = |property, initial, parent_value: fn(&ComputedStyle) -> Rgba| {
+        resolve(
             arena,
             rules,
             state,
             node,
             parent,
-            Property::BackgroundColor,
-            |s| s.background_color,
-        ),
-        color: resolve_property(arena, rules, state, node, parent, Property::Color, |s| {
-            s.color
+            property,
+            property.inherits(),
+            initial,
+            as_color,
+            parent_value,
+        )
+    };
+    let size = |property, parent_value: fn(&ComputedStyle) -> Option<f32>| {
+        resolve(
+            arena,
+            rules,
+            state,
+            node,
+            parent,
+            property,
+            false,
+            None,
+            as_optional_length,
+            parent_value,
+        )
+    };
+    let margin_edge = |property, parent_value: fn(&ComputedStyle) -> Option<f32>| {
+        resolve(
+            arena,
+            rules,
+            state,
+            node,
+            parent,
+            property,
+            false,
+            Some(0.0),
+            as_optional_length,
+            parent_value,
+        )
+    };
+    let padding_edge = |property, parent_value: fn(&ComputedStyle) -> f32| {
+        resolve(
+            arena,
+            rules,
+            state,
+            node,
+            parent,
+            property,
+            false,
+            0.0,
+            as_length,
+            parent_value,
+        )
+    };
+
+    ComputedStyle {
+        background_color: color(Property::BackgroundColor, Rgba::TRANSPARENT, |s| {
+            s.background_color
         }),
+        color: color(Property::Color, Rgba::opaque(0, 0, 0), |s| s.color),
+        width: size(Property::Width, |s| s.width),
+        height: size(Property::Height, |s| s.height),
+        margin: Edges {
+            top: margin_edge(Property::MarginTop, |s| s.margin.top),
+            right: margin_edge(Property::MarginRight, |s| s.margin.right),
+            bottom: margin_edge(Property::MarginBottom, |s| s.margin.bottom),
+            left: margin_edge(Property::MarginLeft, |s| s.margin.left),
+        },
+        padding: Edges {
+            top: padding_edge(Property::PaddingTop, |s| s.padding.top),
+            right: padding_edge(Property::PaddingRight, |s| s.padding.right),
+            bottom: padding_edge(Property::PaddingBottom, |s| s.padding.bottom),
+            left: padding_edge(Property::PaddingLeft, |s| s.padding.left),
+        },
     }
 }
 
-fn resolve_property(
+fn as_color(value: Value) -> Rgba {
+    match value {
+        Value::Color(color) => color,
+        other => unreachable!("a color property never resolves a non-color value: {other:?}"),
+    }
+}
+
+fn as_optional_length(value: Value) -> Option<f32> {
+    match value {
+        Value::Length(length) => Some(length),
+        Value::Auto => None,
+        other => unreachable!("a length-or-auto property never resolves {other:?}"),
+    }
+}
+
+fn as_length(value: Value) -> f32 {
+    match value {
+        Value::Length(length) => length,
+        other => unreachable!("a length-only property never resolves {other:?}"),
+    }
+}
+
+/// Resolves one property to its used value `T`: the winning declaration's
+/// value if any (honoring explicit `initial`/`inherit` keywords), else
+/// this property's own default (inherited from the parent, or `initial`).
+#[allow(clippy::too_many_arguments)]
+fn resolve<T: Copy>(
     arena: &Arena,
     rules: &[Rule],
     state: &InteractionState,
     node: NodeId,
     parent: Option<&ComputedStyle>,
     property: Property,
-    parent_value: impl Fn(&ComputedStyle) -> Rgba,
-) -> Rgba {
-    let inherited = || {
-        parent
-            .map(&parent_value)
-            .unwrap_or_else(|| property.initial())
-    };
-
+    inherits_by_default: bool,
+    initial: T,
+    to_value: impl Fn(Value) -> T,
+    parent_value: impl Fn(&ComputedStyle) -> T,
+) -> T {
+    let inherited = || parent.map(&parent_value).unwrap_or(initial);
     match winning_value(arena, rules, state, node, property) {
-        Some(Value::Color(color)) => color,
-        Some(Value::Initial) => property.initial(),
+        Some(Value::Initial) => initial,
         Some(Value::Inherit) => inherited(),
-        None if property.inherits() => inherited(),
-        None => property.initial(),
+        Some(other) => to_value(other),
+        None if inherits_by_default => inherited(),
+        None => initial,
     }
 }
 
@@ -263,5 +368,66 @@ mod tests {
         let node = arena.roots()[0];
         assert_eq!(computed[&node].background_color, Rgba::TRANSPARENT);
         assert_eq!(computed[&node].color, Rgba::opaque(0, 0, 0));
+    }
+
+    #[test]
+    fn width_and_height_default_to_auto() {
+        let tree: Element = view! { <div /> };
+        let (arena, computed) = styles(&tree, "", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].width, None);
+        assert_eq!(computed[&node].height, None);
+    }
+
+    #[test]
+    fn explicit_size_and_box_model_resolve_correctly() {
+        let tree: Element = view! { <div class="card" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".card { width: 200px; height: 100px; padding-top: 8px; margin-left: 4px; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        let style = computed[&node];
+        assert_eq!(style.width, Some(200.0));
+        assert_eq!(style.height, Some(100.0));
+        assert_eq!(style.padding.top, 8.0);
+        assert_eq!(style.padding.left, 0.0, "unset padding edges default to 0");
+        assert_eq!(style.margin.left, Some(4.0));
+        assert_eq!(
+            style.margin.top,
+            Some(0.0),
+            "unset margin edges default to 0, not auto"
+        );
+    }
+
+    #[test]
+    fn explicit_auto_margin_is_distinguishable_from_unset() {
+        let tree: Element = view! { <div class="centered" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".centered { margin-left: auto; margin-right: auto; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].margin.left, None);
+        assert_eq!(computed[&node].margin.right, None);
+    }
+
+    #[test]
+    fn size_and_box_properties_do_not_inherit() {
+        let tree: Element = view! {
+            <div class="card">
+                <span>{"x"}</span>
+            </div>
+        };
+        let (arena, computed) = styles(
+            &tree,
+            ".card { width: 200px; padding-top: 8px; }",
+            &InteractionState::new(),
+        );
+        let span = arena.find(|a, id| a.tag(id) == "span").unwrap();
+        assert_eq!(computed[&span].width, None);
+        assert_eq!(computed[&span].padding.top, 0.0);
     }
 }

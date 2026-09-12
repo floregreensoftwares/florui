@@ -15,16 +15,19 @@
 //!   `:focus`, `:active`.
 //! - Real specificity ((id, class+pseudo-class, type) counts) and real
 //!   cascade order (specificity first, then source order).
-//! - Exactly two properties: `background-color` (does not inherit) and
-//!   `color` (inherits) — chosen because they need no text/layout engine
-//!   to have an observable, testable used value. Both understand the
-//!   `inherit` and `initial` keywords.
+//! - Nine properties: `background-color`/`color` (colors; `color`
+//!   inherits, `background-color` doesn't), `width`/`height` (pixel
+//!   lengths or `auto`, initial `auto`, never inherit), and the four
+//!   `margin-*`/`padding-*` longhands (pixel lengths; margin also accepts
+//!   `auto` for centering, padding does not; initial `0`; never inherit).
+//!   All nine understand the `inherit`/`initial` keywords.
 //!
 //! Explicitly not supported, and rejected with a named error rather than
 //! silently accepted or silently mismatched: attribute selectors, child
 //! (`>`) and sibling (`+`/`~`) combinators, `:not()`/structural/other
-//! pseudo-classes, the universal selector, any property besides the two
-//! above, `!important`, and CSS `@`-rules.
+//! pseudo-classes, the universal selector, any property besides the nine
+//! above (including shorthand `margin`/`padding`), percentages, `!important`,
+//! and CSS `@`-rules.
 //!
 //! `:hover`/`:focus`/`:active` are matched against an
 //! [`InteractionState`](interaction::InteractionState) the caller builds
@@ -42,7 +45,7 @@ mod stylesheet_parse;
 mod tree;
 mod value;
 
-pub use cascade::{ComputedStyle, compute};
+pub use cascade::{ComputedStyle, Edges, compute};
 pub use color::{ColorParseError, Rgba, parse_hex_color};
 pub use error::StyleError;
 pub use interaction::InteractionState;
@@ -52,7 +55,7 @@ pub use selector::{
 pub use selector_parse::parse_selector_list;
 pub use stylesheet_parse::{Declaration, Rule, parse_stylesheet};
 pub use tree::{Arena, NodeId};
-pub use value::{Property, Value};
+pub use value::{Property, Value, ValueKind};
 
 #[cfg(test)]
 mod integration_tests {
