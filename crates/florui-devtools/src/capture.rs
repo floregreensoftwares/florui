@@ -34,8 +34,8 @@ impl std::error::Error for CaptureError {
 
 /// Renders `width` x `height` physical pixels and writes them as a PNG.
 ///
-/// The caller records viewport size and DPR alongside the file, per the
-/// conformance fixture contract; this function only produces the pixels.
+/// The caller is responsible for recording viewport size and DPR alongside
+/// the file; this function only produces the pixels.
 pub fn capture_to_png(
     path: &Path,
     width: u32,
