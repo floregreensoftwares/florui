@@ -20,6 +20,9 @@ florui-style = { path = "../../crates/florui-style" }
 florui-layout = { path = "../../crates/florui-layout" }
 florui-paint = { path = "../../crates/florui-paint" }
 taffy = "0.14"
+winit = "0.30.13"
+softbuffer = "0.4.8"
+notify = "8.2.0"
 
 [build-dependencies]
 florui-build = { path = "../../crates/florui-build" }

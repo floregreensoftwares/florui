@@ -1043,7 +1043,10 @@ dependencies = [
  "florui-layout",
  "florui-paint",
  "florui-style",
+ "notify",
+ "softbuffer",
  "taffy",
+ "winit",
 ]
 
 [[package]]
