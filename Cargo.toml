@@ -10,6 +10,7 @@ members = [
     "crates/florui-build",
     "crates/florui-style",
     "crates/florui-layout",
+    "crates/florui-text",
     "examples/florui-example-app",
 ]
 

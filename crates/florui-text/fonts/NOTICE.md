@@ -1,0 +1,3 @@
+`FiraMono-Medium.ttf` is copied from the [Fira Mono](https://github.com/mozilla/Fira) project (Mozilla Foundation and Telefónica S.A.), licensed under the SIL Open Font License 1.1 — see `FiraMono-LICENSE` in this directory. Obtained via the `cosmic-text` crate's bundled test fonts (also OFL-licensed, same file), not modified.
+
+Pinned as this crate's one embedded font deliberately: a monospace font gives every glyph the same advance width, so measurement tests can assert exact expected values instead of tolerating font-specific shaping quirks. This is not a statement about what florui's eventual default UI font should be.
