@@ -1,7 +1,7 @@
 //! Bootstrap hex-color parsing for the native preview host.
 //!
 //! This is not the CSS color grammar (no named colors, `rgb()`, alpha, or
-//! error recovery per the CSS spec). Replace it once real style computation
+//! CSS's own error-recovery rules). Replace it once real style computation
 //! exists.
 
 use std::fmt;

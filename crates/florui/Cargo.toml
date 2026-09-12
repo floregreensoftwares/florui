@@ -1,0 +1,12 @@
+[package]
+name = "florui"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "florui"
+
+[dependencies]
+florui-macros = { path = "../florui-macros" }
