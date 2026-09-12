@@ -15,14 +15,17 @@
 //! it exists), one size, one plain unstyled run of text, measured
 //! unwrapped (no max-width, no line breaking, no multi-line, no rich/mixed
 //! styling within a run). [`measure`] answers exactly one question: how
-//! wide and tall is this text if nothing constrains its width. Actual
-//! wrapping at a given available width, and turning shaped glyphs into
-//! rendered pixels, are separate, not-yet-built concerns — this only
-//! measures.
+//! wide and tall is this text if nothing constrains its width.
+//! [`Font::shape`] answers a different question: which glyphs, from which
+//! font, at which pen positions — the input a rasterizer needs, without
+//! this crate doing any rasterizing itself. Actual wrapping at a given
+//! available width is a separate, not-yet-built concern.
 
 use std::sync::Arc;
 
-use parley::{FontContext, FontFamily, LayoutContext, StyleProperty};
+use parley::{
+    FontContext, FontData, FontFamily, LayoutContext, PositionedLayoutItem, StyleProperty,
+};
 use peniko::Blob;
 
 /// Fira Mono (SIL Open Font License 1.1) — see `fonts/NOTICE.md` for
@@ -34,6 +37,36 @@ pub struct TextMetrics {
     /// The width of the text with no wrapping applied.
     pub width: f32,
     /// The height of the (single, unwrapped) line.
+    pub height: f32,
+}
+
+/// One glyph, positioned relative to the text's own top-left origin
+/// (y-down, baseline already accounted for) — everything a rasterizer
+/// needs to place it, but no outline data: that lives in the font itself,
+/// keyed by [`ShapedGlyph::id`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShapedGlyph {
+    pub id: u32,
+    pub x: f32,
+    pub y: f32,
+}
+
+/// A sequence of glyphs sharing one font and size — Parley may itemize a
+/// single call to [`Font::shape`] into more than one run (script/bidi
+/// boundaries, or a fallback font substituted for a codepoint this crate's
+/// one embedded font doesn't cover), so each run carries its own font
+/// rather than assuming the caller's requested one.
+#[derive(Debug, Clone)]
+pub struct ShapedRun {
+    pub font: FontData,
+    pub font_size: f32,
+    pub glyphs: Vec<ShapedGlyph>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShapedText {
+    pub runs: Vec<ShapedRun>,
+    pub width: f32,
     pub height: f32,
 }
 
@@ -101,6 +134,61 @@ impl Font {
             };
         }
 
+        let layout = self.layout(text, font_size);
+        TextMetrics {
+            width: layout.width(),
+            height: layout.height(),
+        }
+    }
+
+    /// Shapes `text` at `font_size` into paintable glyphs — same
+    /// unwrapped, single-line, single-run-per-font layout as [`measure`],
+    /// but exposing glyph ids and pen positions instead of just overall
+    /// width/height.
+    pub fn shape(&mut self, text: &str, font_size: f32) -> ShapedText {
+        if text.is_empty() {
+            return ShapedText {
+                runs: Vec::new(),
+                width: 0.0,
+                height: 0.0,
+            };
+        }
+
+        let layout = self.layout(text, font_size);
+        let mut runs = Vec::new();
+        for line in layout.lines() {
+            for item in line.items() {
+                let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                    continue;
+                };
+                let run = glyph_run.run();
+                let glyphs = glyph_run
+                    .positioned_glyphs()
+                    .map(|glyph| ShapedGlyph {
+                        id: glyph.id,
+                        x: glyph.x,
+                        y: glyph.y,
+                    })
+                    .collect();
+                runs.push(ShapedRun {
+                    font: run.font().clone(),
+                    font_size: run.font_size(),
+                    glyphs,
+                });
+            }
+        }
+
+        ShapedText {
+            runs,
+            width: layout.width(),
+            height: layout.height(),
+        }
+    }
+
+    /// Builds and line-breaks (as a single unwrapped line) a Parley layout
+    /// for `text` at `font_size` — the scratch-state setup [`measure`] and
+    /// [`shape`] both need before reading anything back out of it.
+    fn layout(&mut self, text: &str, font_size: f32) -> parley::Layout<[u8; 4]> {
         let mut builder = self
             .layout_cx
             .ranged_builder(&mut self.font_cx, text, 1.0, true);
@@ -110,11 +198,7 @@ impl Font {
         )));
         let mut layout = builder.build(text);
         layout.break_all_lines(None);
-
-        TextMetrics {
-            width: layout.width(),
-            height: layout.height(),
-        }
+        layout
     }
 }
 
@@ -182,5 +266,46 @@ mod tests {
         // proportional one, where it would need to assert inequality
         // instead.
         assert_eq!(dots.width, wide.width);
+    }
+
+    #[test]
+    fn shape_produces_one_glyph_per_character_in_source_order() {
+        let mut font = Font::load_embedded();
+        let shaped = font.shape("AB", 16.0);
+        assert_eq!(shaped.runs.len(), 1, "one plain run, one font, one style");
+        assert_eq!(shaped.runs[0].glyphs.len(), 2);
+    }
+
+    #[test]
+    fn shape_advances_each_glyph_by_the_monospace_width() {
+        let mut font = Font::load_embedded();
+        let shaped = font.shape("AA", 16.0);
+        let glyphs = &shaped.runs[0].glyphs;
+        let advance = glyphs[1].x - glyphs[0].x;
+        assert_eq!(
+            advance,
+            font.measure("A", 16.0).width,
+            "a monospace font's per-glyph advance equals a single character's measured width"
+        );
+        assert_eq!(
+            glyphs[0].y, glyphs[1].y,
+            "glyphs on the same unwrapped line share a baseline"
+        );
+    }
+
+    #[test]
+    fn shape_reports_the_run_actually_used_not_just_the_requested_size() {
+        let mut font = Font::load_embedded();
+        let shaped = font.shape("A", 24.0);
+        assert_eq!(shaped.runs[0].font_size, 24.0);
+    }
+
+    #[test]
+    fn empty_text_shapes_to_no_runs() {
+        let mut font = Font::load_embedded();
+        let shaped = font.shape("", 16.0);
+        assert!(shaped.runs.is_empty());
+        assert_eq!(shaped.width, 0.0);
+        assert_eq!(shaped.height, 0.0);
     }
 }
