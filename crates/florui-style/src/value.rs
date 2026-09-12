@@ -29,6 +29,9 @@ pub enum Property {
     Width,
     /// Does not inherit; initial value is `auto`.
     Height,
+    /// Inherits; initial value is `16px` — real browsers' long-standing
+    /// default, not a CSS-mandated number. No `auto`.
+    FontSize,
     /// Does not inherit; initial value is `0`. `auto` enables the usual
     /// auto-margin centering behavior.
     MarginTop,
@@ -50,6 +53,7 @@ impl Property {
             "color" => Some(Property::Color),
             "width" => Some(Property::Width),
             "height" => Some(Property::Height),
+            "font-size" => Some(Property::FontSize),
             "margin-top" => Some(Property::MarginTop),
             "margin-right" => Some(Property::MarginRight),
             "margin-bottom" => Some(Property::MarginBottom),
@@ -75,11 +79,12 @@ impl Property {
             | Property::PaddingRight
             | Property::PaddingBottom
             | Property::PaddingLeft => ValueKind::Length,
+            Property::FontSize => ValueKind::Length,
         }
     }
 
     pub fn inherits(self) -> bool {
-        matches!(self, Property::Color)
+        matches!(self, Property::Color | Property::FontSize)
     }
 }
 
@@ -112,6 +117,7 @@ mod tests {
             ("height", Property::Height),
             ("margin-top", Property::MarginTop),
             ("padding-left", Property::PaddingLeft),
+            ("font-size", Property::FontSize),
         ] {
             assert_eq!(Property::parse(name), Some(property));
         }
@@ -125,6 +131,7 @@ mod tests {
         assert!(!Property::Width.inherits());
         assert!(!Property::MarginTop.inherits());
         assert!(!Property::PaddingTop.inherits());
+        assert!(Property::FontSize.inherits());
     }
 
     #[test]

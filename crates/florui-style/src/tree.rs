@@ -13,6 +13,9 @@ struct ArenaNode {
     tag: &'static str,
     classes: Vec<String>,
     id: Option<String>,
+    /// The node's own direct text, for text measurement — not inherited
+    /// from or propagated to any other node.
+    text: String,
     parent: Option<NodeId>,
     children: Vec<NodeId>,
 }
@@ -51,6 +54,7 @@ impl Arena {
             tag: node.tag,
             classes: class_list(&node.attrs),
             id: attr_value(&node.attrs, "id"),
+            text: collect_text(&node.children),
             parent,
             children: Vec::new(),
         });
@@ -87,6 +91,15 @@ impl Arena {
         self.nodes[id].id.as_deref()
     }
 
+    /// This node's own direct text, for measurement: its direct
+    /// [`Element::Text`] children concatenated in order, flattening
+    /// through any [`Element::Fragment`] child but not descending into a
+    /// child [`Element::Node`] — that child's text belongs to its own
+    /// `NodeId`, not its parent's.
+    pub fn text_content(&self, id: NodeId) -> &str {
+        &self.nodes[id].text
+    }
+
     /// Depth-first pre-order search across every root, for tests and
     /// callers that need to locate a node before marking it in an
     /// [`crate::InteractionState`].
@@ -121,6 +134,26 @@ fn attr_value(attrs: &[(String, String)], name: &str) -> Option<String> {
         .iter()
         .find(|(key, _)| key == name)
         .map(|(_, value)| value.clone())
+}
+
+fn collect_text(children: &[Element]) -> String {
+    let mut text = String::new();
+    for child in children {
+        append_text(child, &mut text);
+    }
+    text
+}
+
+fn append_text(element: &Element, out: &mut String) {
+    match element {
+        Element::Text(value) => out.push_str(value),
+        Element::Fragment(children) => {
+            for child in children {
+                append_text(child, out);
+            }
+        }
+        Element::Node(_) => {}
+    }
 }
 
 #[cfg(test)]
@@ -185,5 +218,51 @@ mod tests {
         let arena = Arena::build(&tree);
         let found = arena.find(|arena, id| arena.tag(id) == "button").unwrap();
         assert_eq!(arena.tag(found), "button");
+    }
+
+    #[test]
+    fn text_content_concatenates_direct_text_children() {
+        let tree: Element = view! { <h2>{"Hello"}</h2> };
+        let arena = Arena::build(&tree);
+        let h2 = arena.roots()[0];
+        assert_eq!(arena.text_content(h2), "Hello");
+    }
+
+    #[test]
+    fn text_content_is_empty_for_a_node_with_no_text_children() {
+        let tree: Element = view! {
+            <div>
+                <span>{"x"}</span>
+            </div>
+        };
+        let arena = Arena::build(&tree);
+        let div = arena.roots()[0];
+        assert_eq!(
+            arena.text_content(div),
+            "",
+            "the text belongs to the span, not its ancestor"
+        );
+    }
+
+    #[test]
+    fn text_content_flattens_through_a_fragment_but_skips_nested_nodes() {
+        let tree = Element::node(
+            "p",
+            vec![],
+            vec![Element::Fragment(vec![
+                Element::text("Hello, "),
+                Element::node("b", vec![], vec![Element::text("world")]),
+                Element::text("!"),
+            ])],
+        );
+        let arena = Arena::build(&tree);
+        let p = arena.roots()[0];
+        assert_eq!(
+            arena.text_content(p),
+            "Hello, !",
+            "the <b>'s own text belongs to its own node, not its parent's"
+        );
+        let b = arena.children(p)[0];
+        assert_eq!(arena.text_content(b), "world");
     }
 }

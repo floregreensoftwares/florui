@@ -34,6 +34,8 @@ pub struct ComputedStyle {
     pub margin: Edges<Option<f32>>,
     /// Always a concrete value; real CSS padding has no `auto`.
     pub padding: Edges<f32>,
+    /// Inherits; initial `16.0`.
+    pub font_size: f32,
 }
 
 pub fn compute(
@@ -146,6 +148,18 @@ fn resolve_style(
             bottom: padding_edge(Property::PaddingBottom, |s| s.padding.bottom),
             left: padding_edge(Property::PaddingLeft, |s| s.padding.left),
         },
+        font_size: resolve(
+            arena,
+            rules,
+            state,
+            node,
+            parent,
+            Property::FontSize,
+            true,
+            16.0,
+            as_length,
+            |s| s.font_size,
+        ),
     }
 }
 
@@ -429,5 +443,36 @@ mod tests {
         let span = arena.find(|a, id| a.tag(id) == "span").unwrap();
         assert_eq!(computed[&span].width, None);
         assert_eq!(computed[&span].padding.top, 0.0);
+    }
+
+    #[test]
+    fn font_size_inherits_but_an_explicit_value_overrides_it() {
+        let tree: Element = view! {
+            <div class="card">
+                <span>{"inherited"}</span>
+                <span class="big">{"overridden"}</span>
+            </div>
+        };
+        let (arena, computed) = styles(
+            &tree,
+            ".card { font-size: 24px; } .big { font-size: 32px; }",
+            &InteractionState::new(),
+        );
+        let card = arena.roots()[0];
+        assert_eq!(computed[&card].font_size, 24.0);
+
+        let mut spans = arena.children(card).iter().copied();
+        let plain = spans.next().unwrap();
+        let big = spans.next().unwrap();
+        assert_eq!(computed[&plain].font_size, 24.0);
+        assert_eq!(computed[&big].font_size, 32.0);
+    }
+
+    #[test]
+    fn font_size_defaults_to_sixteen_pixels() {
+        let tree: Element = view! { <div /> };
+        let (arena, computed) = styles(&tree, "", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].font_size, 16.0);
     }
 }

@@ -15,17 +15,18 @@
 //!   `:focus`, `:active`.
 //! - Real specificity ((id, class+pseudo-class, type) counts) and real
 //!   cascade order (specificity first, then source order).
-//! - Nine properties: `background-color`/`color` (colors; `color`
+//! - Ten properties: `background-color`/`color` (colors; `color`
 //!   inherits, `background-color` doesn't), `width`/`height` (pixel
-//!   lengths or `auto`, initial `auto`, never inherit), and the four
+//!   lengths or `auto`, initial `auto`, never inherit), `font-size` (pixel
+//!   length only, initial `16px`, inherits), and the four
 //!   `margin-*`/`padding-*` longhands (pixel lengths; margin also accepts
 //!   `auto` for centering, padding does not; initial `0`; never inherit).
-//!   All nine understand the `inherit`/`initial` keywords.
+//!   All ten understand the `inherit`/`initial` keywords.
 //!
 //! Explicitly not supported, and rejected with a named error rather than
 //! silently accepted or silently mismatched: attribute selectors, child
 //! (`>`) and sibling (`+`/`~`) combinators, `:not()`/structural/other
-//! pseudo-classes, the universal selector, any property besides the nine
+//! pseudo-classes, the universal selector, any property besides the ten
 //! above (including shorthand `margin`/`padding`), percentages, `!important`,
 //! and CSS `@`-rules.
 //!
