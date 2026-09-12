@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/florui-devtools"]
+members = ["crates/florui-devtools", "crates/florui-cli"]
 
 [workspace.package]
 edition = "2024"
