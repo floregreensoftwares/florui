@@ -45,9 +45,10 @@ pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// Generates a `pub const __FLORUI_STYLESHEET:` [`StylesheetSource`](../florui/struct.StylesheetSource.html)
 /// at the call site, embedding the file's contents at compile time. Only
-/// one `stylesheet!` per module is supported; automatically discovering
+/// one `stylesheet!` per module is supported. Automatically discovering
 /// every declaration across a crate's module graph, in the deterministic
-/// order the cascade needs, is not implemented yet.
+/// order the cascade needs, is a separate concern handled by the
+/// `florui-build` crate from a `build.rs`, not by this macro.
 ///
 /// Not runnable as a doctest — it needs a real sibling CSS file on disk,
 /// which a doctest does not have one of. See the integration tests in the

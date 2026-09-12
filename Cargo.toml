@@ -7,6 +7,8 @@ members = [
     "crates/florui-macros",
     "crates/florui",
     "crates/florui-conformance",
+    "crates/florui-build",
+    "crates/florui-example-app",
 ]
 
 [workspace.package]

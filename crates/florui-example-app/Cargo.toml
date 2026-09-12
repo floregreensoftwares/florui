@@ -1,0 +1,16 @@
+[package]
+name = "florui-example-app"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "florui-example-app"
+path = "src/main.rs"
+
+[dependencies]
+florui = { path = "../florui" }
+
+[build-dependencies]
+florui-build = { path = "../florui-build" }

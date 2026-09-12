@@ -1,0 +1,252 @@
+//! Walks a crate's module graph from its root file, in the deterministic
+//! order the cascade needs: for each module, its enabled child modules
+//! first (depth-first, source order), then that module's own
+//! `stylesheet!` declarations (source order) — so a component's own styles
+//! always precede the module that uses it.
+
+use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use syn::{Item, ItemMod};
+
+use crate::cfg;
+use crate::module_graph::{self, ModuleGraphError};
+use crate::scan::{self, ScanError};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectedStylesheet {
+    /// A reproducible identity: package name, the declaring file's
+    /// package-relative path, and the literal path as written. Two
+    /// declarations only share an identity if they are the exact same
+    /// `stylesheet!` call site.
+    pub id: String,
+    /// The declaring `.rs` file, relative to the package root.
+    pub declared_at: PathBuf,
+    /// The literal path argument, unresolved (for diagnostics).
+    pub literal_path: String,
+    /// The resolved, absolute path to the CSS file.
+    pub css_path: PathBuf,
+    pub css: String,
+}
+
+#[derive(Debug)]
+pub enum CollectError {
+    ModuleGraph(ModuleGraphError),
+    Scan {
+        file: PathBuf,
+        source: ScanError,
+    },
+    UnsupportedCfg {
+        module: String,
+        file: PathBuf,
+        message: String,
+    },
+    ReadCss {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    UnsupportedImport {
+        css_path: PathBuf,
+    },
+}
+
+impl std::fmt::Display for CollectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CollectError::ModuleGraph(err) => write!(f, "{err}"),
+            CollectError::Scan { file, source } => write!(f, "{}: {source}", file.display()),
+            CollectError::UnsupportedCfg {
+                module,
+                file,
+                message,
+            } => {
+                write!(f, "{}: module `{module}`: {message}", file.display())
+            }
+            CollectError::ReadCss { path, source } => {
+                write!(f, "could not read {}: {source}", path.display())
+            }
+            CollectError::UnsupportedImport { css_path } => write!(
+                f,
+                "{}: CSS @import is not supported yet; inline the rules instead",
+                css_path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CollectError {}
+
+impl From<ModuleGraphError> for CollectError {
+    fn from(err: ModuleGraphError) -> Self {
+        CollectError::ModuleGraph(err)
+    }
+}
+
+/// Every file visited while collecting, so a caller can tell Cargo to
+/// rerun the build script when any of them changes — "track Rust
+/// declarations, CSS ... as build inputs."
+#[derive(Debug, Default)]
+pub struct CollectResult {
+    pub stylesheets: Vec<CollectedStylesheet>,
+    pub visited_rust_files: Vec<PathBuf>,
+}
+
+/// Collects every enabled `stylesheet!` declaration reachable from
+/// `crate_root_file` (typically `src/lib.rs` or `src/main.rs`), in
+/// deterministic cascade order, deduplicated by identity (first occurrence
+/// wins; distinct files with identical content stay distinct).
+pub fn collect_stylesheets(
+    package_name: &str,
+    package_root: &Path,
+    crate_root_file: &Path,
+    is_feature_enabled: &dyn Fn(&str) -> bool,
+) -> Result<CollectResult, CollectError> {
+    let root_ast = module_graph::parse(crate_root_file)?;
+    let root_children_dir = crate_root_file
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let mut result = CollectResult {
+        stylesheets: Vec::new(),
+        visited_rust_files: vec![crate_root_file.to_path_buf()],
+    };
+    visit(
+        &root_ast.items,
+        crate_root_file,
+        &root_children_dir,
+        package_name,
+        package_root,
+        is_feature_enabled,
+        &mut result,
+    )?;
+
+    result.stylesheets = dedup(result.stylesheets);
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visit(
+    items: &[Item],
+    declaring_file: &Path,
+    children_dir: &Path,
+    package_name: &str,
+    package_root: &Path,
+    is_feature_enabled: &dyn Fn(&str) -> bool,
+    result: &mut CollectResult,
+) -> Result<(), CollectError> {
+    // Enabled child modules first, depth-first, in source order.
+    for item in items {
+        let Item::Mod(module) = item else { continue };
+        if !module_enabled(module, declaring_file, is_feature_enabled)? {
+            continue;
+        }
+
+        match &module.content {
+            Some((_, inline_items)) => {
+                let name = module.ident.to_string();
+                let inline_children_dir =
+                    module_graph::children_dir_for(declaring_file, children_dir, &name);
+                visit(
+                    inline_items,
+                    declaring_file,
+                    &inline_children_dir,
+                    package_name,
+                    package_root,
+                    is_feature_enabled,
+                    result,
+                )?;
+            }
+            None => {
+                let name = module.ident.to_string();
+                let child_file = module_graph::resolve_child_path(children_dir, module)?;
+                let child_children_dir =
+                    module_graph::children_dir_for(&child_file, children_dir, &name);
+                let child_ast = module_graph::parse(&child_file)?;
+                result.visited_rust_files.push(child_file.clone());
+                visit(
+                    &child_ast.items,
+                    &child_file,
+                    &child_children_dir,
+                    package_name,
+                    package_root,
+                    is_feature_enabled,
+                    result,
+                )?;
+            }
+        }
+    }
+
+    // Then this module's own declarations, in source order.
+    let invocations =
+        scan::find_stylesheet_invocations(items).map_err(|source| CollectError::Scan {
+            file: declaring_file.to_path_buf(),
+            source,
+        })?;
+    let declaring_dir = declaring_file.parent().unwrap_or_else(|| Path::new("."));
+    for invocation in invocations {
+        result.stylesheets.push(build_entry(
+            package_name,
+            package_root,
+            declaring_file,
+            declaring_dir,
+            &invocation.literal_path,
+        )?);
+    }
+
+    Ok(())
+}
+
+fn module_enabled(
+    module: &ItemMod,
+    declaring_file: &Path,
+    is_feature_enabled: &dyn Fn(&str) -> bool,
+) -> Result<bool, CollectError> {
+    cfg::module_enabled(&module.attrs, is_feature_enabled).map_err(|message| {
+        CollectError::UnsupportedCfg {
+            module: module.ident.to_string(),
+            file: declaring_file.to_path_buf(),
+            message,
+        }
+    })
+}
+
+fn build_entry(
+    package_name: &str,
+    package_root: &Path,
+    declaring_file: &Path,
+    declaring_dir: &Path,
+    literal_path: &str,
+) -> Result<CollectedStylesheet, CollectError> {
+    let css_path = declaring_dir.join(literal_path);
+    let css = fs::read_to_string(&css_path).map_err(|source| CollectError::ReadCss {
+        path: css_path.clone(),
+        source,
+    })?;
+    if css.to_ascii_lowercase().contains("@import") {
+        return Err(CollectError::UnsupportedImport { css_path });
+    }
+
+    let declared_at = declaring_file
+        .strip_prefix(package_root)
+        .unwrap_or(declaring_file)
+        .to_path_buf();
+    let id = format!("{package_name}:{}:{literal_path}", declared_at.display());
+
+    Ok(CollectedStylesheet {
+        id,
+        declared_at,
+        literal_path: literal_path.to_string(),
+        css_path,
+        css,
+    })
+}
+
+fn dedup(sources: Vec<CollectedStylesheet>) -> Vec<CollectedStylesheet> {
+    let mut seen = HashSet::new();
+    sources
+        .into_iter()
+        .filter(|s| seen.insert(s.id.clone()))
+        .collect()
+}

@@ -14,10 +14,14 @@
 //!
 //! Only one `stylesheet!` per module is supported for now: a second call
 //! in the same module fails with a duplicate-definition error rather than
-//! silently overwriting or merging the first. Discovering every
-//! `stylesheet!` declaration across a crate's module graph, in the
-//! deterministic cascade order the real feature needs, is not implemented
-//! here — see `florui::StylesheetSource`.
+//! silently overwriting or merging the first.
+//!
+//! This macro only ever produces one call site's own constant; it cannot
+//! see a crate's whole module tree to order or collect every declaration
+//! into a cascade. The `florui-build` crate does that separately, from a
+//! `build.rs`, by statically parsing the crate's source tree instead of
+//! expanding this macro — its own identity scheme is independent of the
+//! one computed here and the two are not expected to match.
 
 use proc_macro2::TokenStream;
 use quote::quote;

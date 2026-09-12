@@ -4,16 +4,15 @@
 //! reproducible canonical identity, compile-time embedding, and
 //! identity-based deduplication — each independently correct and tested.
 //!
-//! What is **not** solved here: automatically discovering every
-//! `stylesheet!` declaration across a crate's module graph in the
-//! deterministic, depth-first, source-order-respecting sequence the
-//! cascade needs. A proc macro cannot see a crate's whole module tree from
-//! a single invocation, and getting that collection order right needs real
-//! build-script/module-graph work this module does not attempt — it does
-//! not invent a substitute order to look more finished than it is. An
-//! application must currently gather the constants each `stylesheet!` call
-//! generates and order them itself; [`dedup`] only removes repeated
-//! identities from whatever order it is given.
+//! Automatically discovering every `stylesheet!` declaration across a
+//! crate's module graph, in the deterministic, depth-first,
+//! source-order-respecting sequence the cascade needs, is not this
+//! module's job either: a proc macro cannot see a crate's whole module
+//! tree from a single invocation. That collection lives in the separate
+//! `florui-build` crate, which statically parses a crate's own source
+//! tree from a `build.rs` instead. [`dedup`] here only removes repeated
+//! identities from whatever order it is given — `florui-build` is what
+//! decides that order.
 
 use std::collections::HashSet;
 

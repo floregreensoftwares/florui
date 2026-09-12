@@ -981,6 +981,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "florui-build"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "florui-cli"
 version = "0.1.0"
 dependencies = [
@@ -1018,6 +1026,14 @@ dependencies = [
  "softbuffer",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "florui-example-app"
+version = "0.1.0"
+dependencies = [
+ "florui",
+ "florui-build",
 ]
 
 [[package]]
