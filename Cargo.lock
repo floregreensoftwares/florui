@@ -996,6 +996,8 @@ dependencies = [
  "florui-conformance",
  "florui-devtools",
  "image",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
