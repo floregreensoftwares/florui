@@ -14,8 +14,15 @@
 //! provided value is looked up by type, not call position. A host learns
 //! about a [`Signal::set`] anywhere under its root either by polling
 //! [`DirtyFlag::get`] or, better, registering a [`DirtyFlag::on_mark`]
-//! callback to hear about it the instant it happens.
+//! callback to hear about it the instant it happens — [`batch`] coalesces
+//! that notification across every write in one synchronous unit of work
+//! (an event handler), rather than firing it once per [`Signal::set`].
+//! `Signal::get`'s read-after-write contract is always synchronous,
+//! batched or not: it returns whatever the most recent `set` stored,
+//! immediately — `batch` defers *notifying a host*, never the write or a
+//! subsequent read of it.
 
+mod batch;
 mod context;
 mod dirty;
 mod effect;
@@ -24,6 +31,7 @@ mod refs;
 mod scope;
 mod signal;
 
+pub use batch::batch;
 pub use context::{provide_context, use_context};
 pub use dirty::DirtyFlag;
 pub use effect::{Cleanup, use_effect};
