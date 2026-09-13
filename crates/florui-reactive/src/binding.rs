@@ -4,23 +4,49 @@
 //! never grants mutation rights; only a `Binding<T>` does, and even then
 //! the owner decides whether to actually accept a requested update.
 //!
+//! This type covers the *logical* read/write contract only: what the
+//! owner's value currently is, and how a requested change reaches the
+//! owner. It does not cover *visual* reconciliation of an editable
+//! control — see [`Self::get`]'s doc for exactly what "the owner rejected
+//! an update" guarantees and what it leaves to whatever control eventually
+//! reads a `Binding`, since that's a real, currently open question rather
+//! than something a `Binding` resolves on its own.
+//!
 //! Not addressed here (tracked gaps, not oversights): a real input
 //! control's own editing buffer (distinct from its committed value),
-//! commit timing, and IME composition all need an actual text-input
-//! widget, which doesn't exist in this engine yet. This module is the
-//! primitive that widget will read and write through, proven here with
-//! plain values rather than a real control.
+//! commit timing, IME composition, and selection preservation through a
+//! rejected edit all need an actual text-input widget, which doesn't
+//! exist in this engine yet. This module is the primitive that widget
+//! will read and write through, proven here with plain values rather than
+//! a real control.
 
 use std::rc::Rc;
 
 /// A read/write exchange for one value: [`Self::get`] reads the owner's
 /// current value, [`Self::request_update`] asks the owner to change it.
 /// The owner remains the source of truth and may reject a request outright
-/// (a value that fails validation, for example) — a rejection does not
-/// change anything a `Binding` can read; the next binding derived from the
-/// owner still reflects whatever it actually accepted, so a rejected edit
-/// reconciles automatically on the next read instead of needing a special
-/// case.
+/// (a value that fails validation, for example).
+///
+/// A `Binding` is a **snapshot**, captured once at construction — `get`
+/// does not re-read the owner live, so a `Binding` held past the render
+/// (or event handler) that created it keeps returning that original
+/// value forever, not whatever the owner holds by the time you call
+/// `get` later. A *fresh* `Binding`, derived again from the owner, is
+/// what reflects a change — which is exactly how a rejected
+/// `request_update` "reconciles": the next fresh `Binding` simply never
+/// picked up the rejected value in the first place, the same way it
+/// wouldn't pick up any other change nobody accepted. That's the whole
+/// logical-value guarantee this type makes.
+///
+/// It says nothing about what a real editable control does with that
+/// guarantee. If nothing the owner does on rejection causes a re-render
+/// (no accepted `Signal::set` happened, so nothing is marked dirty), no
+/// fresh `Binding` gets derived at all — and even where one is, a native
+/// widget that already echoed the rejected keystroke into its own visible
+/// text needs to actively resync its displayed content to match, or the
+/// rejection stays invisible. Neither half of that exists yet: there's no
+/// widget, and nothing here forces a re-render on rejection. A real
+/// control built on this type will need to solve both explicitly.
 pub struct Binding<T> {
     value: T,
     on_request: Rc<dyn Fn(T)>,
@@ -40,17 +66,19 @@ impl<T: Clone> Binding<T> {
         }
     }
 
-    /// The owner's value as of when this binding was created — not a live
-    /// subscription; a component re-derives its binding(s) every render
-    /// the same way it reads any other reactive value.
+    /// The owner's value as of when this binding was created — a
+    /// snapshot, not a live read; see the type-level doc for what that
+    /// means for a `Binding` held past its creating render.
     pub fn get(&self) -> T {
         self.value.clone()
     }
 
     /// Asks the owner to change its value to `value`. Does not itself
-    /// change anything this binding can read — see [`Self::get`]'s doc: a
-    /// rejected request leaves the owner's value, and so every binding
-    /// read afterward, unchanged.
+    /// change anything this binding can read, and does not by itself
+    /// cause anything to re-render — whether a rejection ever becomes
+    /// observable depends entirely on what `on_request` does, and, for a
+    /// real control, on that control resyncing its own display; see the
+    /// type-level doc.
     pub fn request_update(&self, value: T) {
         (self.on_request)(value);
     }
