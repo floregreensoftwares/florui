@@ -23,6 +23,7 @@
 //! recent `set` stored, immediately — `batch` defers *notifying a host*,
 //! never the write or a subsequent read of it.
 
+mod attachment;
 mod batch;
 pub mod blocking;
 mod context;
@@ -39,6 +40,7 @@ mod signal;
 pub mod testing;
 pub mod trace;
 
+pub use attachment::use_attachment;
 pub use batch::batch;
 pub use context::{provide_context, use_context};
 pub use dirty::DirtyFlag;

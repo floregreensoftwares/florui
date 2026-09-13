@@ -17,6 +17,12 @@ pub(crate) struct ScopeInner {
     pub(crate) dirty: DirtyFlag,
     pub(crate) context: RefCell<HashMap<TypeId, Box<dyn Any>>>,
     pub(crate) pending_effects: RefCell<Vec<PendingEffect>>,
+    /// Queued the same way `pending_effects` is, but kept separate so
+    /// [`crate::attachment`] can dispose its own slots in the reverse of
+    /// their declaration order on unmount — attachments.md's "clean up in
+    /// reverse order" — without changing plain effects' own (forward)
+    /// disposal order.
+    pub(crate) pending_attachments: RefCell<Vec<PendingAttachment>>,
     /// Child scopes addressed by [`Key`] instead of call position — see
     /// [`use_child_scope_keyed`]. Separate from `slots`: a keyed child's
     /// identity must survive its position changing between renders, which
@@ -32,16 +38,25 @@ pub(crate) struct ScopeInner {
 }
 
 impl Drop for ScopeInner {
-    /// Removing an identity disposes its hooks: every effect this scope
-    /// (and, as the field drop cascades into any stored child `Scope`,
-    /// every scope nested inside it) still owns runs its cleanup here.
+    /// Removing an identity disposes its hooks: every effect and
+    /// attachment this scope (and, as the field drop cascades into any
+    /// stored child `Scope`, every scope nested inside it) still owns runs
+    /// its cleanup here.
     fn drop(&mut self) {
         crate::effect::dispose(self);
+        crate::attachment::dispose(self);
     }
 }
 
 /// An effect queued during a render, to run once that render commits.
 pub(crate) struct PendingEffect {
+    pub(crate) index: usize,
+    pub(crate) run: Box<dyn FnOnce() -> Option<crate::effect::Cleanup>>,
+}
+
+/// An attachment queued during a render, to run once that render commits
+/// — see [`crate::attachment`].
+pub(crate) struct PendingAttachment {
     pub(crate) index: usize,
     pub(crate) run: Box<dyn FnOnce() -> Option<crate::effect::Cleanup>>,
 }
@@ -75,6 +90,7 @@ impl Scope {
                 dirty,
                 context: RefCell::new(HashMap::new()),
                 pending_effects: RefCell::new(Vec::new()),
+                pending_attachments: RefCell::new(Vec::new()),
                 keyed_children: RefCell::new(HashMap::new()),
                 keys_seen_this_render: RefCell::new(HashSet::new()),
             }),
@@ -109,6 +125,7 @@ impl Scope {
             .retain(|key, _| seen.contains(key));
         drop(seen);
         crate::effect::run_pending(&self.inner);
+        crate::attachment::run_pending(&self.inner);
         result
     }
 }
