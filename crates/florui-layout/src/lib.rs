@@ -248,6 +248,44 @@ pub fn absolute_position(
     (x, y)
 }
 
+/// The topmost node whose box contains `(x, y)` (both relative to the
+/// layout root, the same space [`absolute_position`] reports) — "topmost"
+/// meaning whichever one `florui_paint` would have painted last, since an
+/// overlap always resolves to the box on top. Real block layout has no
+/// overlapping siblings yet, so in practice this only matters for nested
+/// containment, but the rule generalizes to whatever layout produces.
+pub fn hit_test(
+    arena: &Arena,
+    layouts: &HashMap<NodeId, BoxLayout>,
+    x: f32,
+    y: f32,
+) -> Option<NodeId> {
+    let mut hit = None;
+    for &root in arena.roots() {
+        hit_test_node(arena, layouts, root, x, y, &mut hit);
+    }
+    hit
+}
+
+fn hit_test_node(
+    arena: &Arena,
+    layouts: &HashMap<NodeId, BoxLayout>,
+    node: NodeId,
+    x: f32,
+    y: f32,
+    hit: &mut Option<NodeId>,
+) {
+    if let Some(&layout) = layouts.get(&node) {
+        let (ax, ay) = absolute_position(arena, layouts, node);
+        if x >= ax && x < ax + layout.width && y >= ay && y < ay + layout.height {
+            hit.replace(node);
+        }
+    }
+    for &child in arena.children(node) {
+        hit_test_node(arena, layouts, child, x, y, hit);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use florui::prelude::*;
@@ -416,6 +454,40 @@ mod tests {
         let expected = florui_text::Font::load_embedded().measure("Hi", 40.0);
         assert_close(layouts[&node].width, expected.width);
         assert_close(layouts[&node].height, expected.height);
+    }
+
+    #[test]
+    fn hit_test_finds_the_deepest_node_containing_the_point() {
+        let tree: Element = view! {
+            <div class="card">
+                <div class="button" />
+            </div>
+        };
+        let (arena, layouts) = layout_for(
+            &tree,
+            "
+            .card { width: 100px; height: 60px; padding-top: 10px; padding-left: 10px; }
+            .button { width: 40px; height: 20px; }
+            ",
+        );
+        let card = arena.roots()[0];
+        let button = arena.children(card)[0];
+
+        assert_eq!(
+            hit_test(&arena, &layouts, 20.0, 20.0),
+            Some(button),
+            "(20, 20) is inside the button, nested inside the card"
+        );
+        assert_eq!(
+            hit_test(&arena, &layouts, 5.0, 5.0),
+            Some(card),
+            "(5, 5) is inside the card's padding, outside the button"
+        );
+        assert_eq!(
+            hit_test(&arena, &layouts, 200.0, 200.0),
+            None,
+            "outside every box"
+        );
     }
 
     #[test]
