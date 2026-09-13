@@ -16,3 +16,6 @@ mod desktop;
 
 #[cfg(feature = "desktop")]
 pub use desktop::{RunError, run};
+
+#[cfg(feature = "desktop")]
+pub mod dpi;
