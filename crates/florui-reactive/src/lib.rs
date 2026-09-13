@@ -37,6 +37,7 @@ mod resource;
 mod scope;
 mod signal;
 pub mod testing;
+pub mod trace;
 
 pub use batch::batch;
 pub use context::{provide_context, use_context};

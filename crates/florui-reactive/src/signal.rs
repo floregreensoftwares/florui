@@ -42,10 +42,13 @@ impl<T> Signal<T> {
     /// Writes a new value immediately, then marks the owning
     /// [`Scope`](crate::Scope) dirty — deferred to wake its host only
     /// once, alongside every other write in the same [`crate::batch`], if
-    /// one is in progress; otherwise immediately, same as always.
+    /// one is in progress; otherwise immediately, same as always. Also
+    /// records an [`crate::trace::UpdateTrace`] attributed to whichever
+    /// component is currently active — see [`crate::trace::with_component`].
     pub fn set(&self, value: T) {
         *self.value.borrow_mut() = value;
         self.dirty.mark();
+        crate::trace::record();
     }
 }
 

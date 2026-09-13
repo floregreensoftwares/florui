@@ -37,8 +37,13 @@ pub fn expand(component: ParsedComponent) -> TokenStream {
             // Every component gets its own persistent hook state, keyed to
             // this call site — requires an active `florui_reactive::Scope`
             // (see `Scope::render`) somewhere up the call stack, even for
-            // the outermost/root component.
-            ::florui::reactive::use_child_scope(move || #block)
+            // the outermost/root component. Wrapping in `trace::with_component`
+            // attributes any `Signal::set` this render (or an effect it
+            // queues) performs to this component's name — see
+            // `florui_reactive::trace`.
+            ::florui::reactive::trace::with_component(stringify!(#name), || {
+                ::florui::reactive::use_child_scope(move || #block)
+            })
         }
 
         #[doc(hidden)]
@@ -50,7 +55,9 @@ pub fn expand(component: ParsedComponent) -> TokenStream {
             let #props_ident { #(#field_names),* } = __props;
             // Same body as #name, but addressed by the caller's own key
             // instead of call position — see `use_child_scope_keyed`.
-            ::florui::reactive::use_child_scope_keyed(__key, move || #block)
+            ::florui::reactive::trace::with_component(stringify!(#name), || {
+                ::florui::reactive::use_child_scope_keyed(__key, move || #block)
+            })
         }
     }
 }

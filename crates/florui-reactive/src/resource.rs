@@ -179,6 +179,12 @@ where
     let (abortable, handle) = futures::future::abortable(fetch(key));
     abort_handle.set(Some(handle));
 
+    // The commit below usually lands well after this render — via a real
+    // async completion, outside any component's render call — so the
+    // trace it produces would otherwise be attributed to nothing. Capture
+    // whichever component started this fetch now, while it's still on the
+    // stack, and restore it around that later write.
+    let component = crate::trace::current_component();
     let state_for_task = state.clone();
     let generation_for_task = generation.clone();
     executor.spawn(Box::pin(async move {
@@ -188,11 +194,17 @@ where
         if let Ok(result) = abortable.await
             && generation_for_task.get() == my_generation
         {
-            let stale = state_for_task.get().data().cloned();
-            state_for_task.set(match result {
-                Ok(value) => Resource::Ready(value),
-                Err(error) => Resource::Failed { error, stale },
-            });
+            let commit = || {
+                let stale = state_for_task.get().data().cloned();
+                state_for_task.set(match result {
+                    Ok(value) => Resource::Ready(value),
+                    Err(error) => Resource::Failed { error, stale },
+                });
+            };
+            match component {
+                Some(component) => crate::trace::with_component(component, commit),
+                None => commit(),
+            }
         }
     }));
 
