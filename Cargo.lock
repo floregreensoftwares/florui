@@ -978,6 +978,7 @@ name = "florui"
 version = "0.1.0"
 dependencies = [
  "florui-macros",
+ "florui-reactive",
 ]
 
 [[package]]

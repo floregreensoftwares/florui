@@ -10,3 +10,4 @@ name = "florui"
 
 [dependencies]
 florui-macros = { path = "../florui-macros" }
+florui-reactive = { path = "../florui-reactive" }
