@@ -8,12 +8,19 @@ publish = false
 [lib]
 name = "florui_platform"
 
+[features]
+default = ["desktop"]
+# winit/softbuffer are only needed by the desktop host, not by the
+# window-independent UiRuntime — a mobile or game host driving UiRuntime
+# on its own shouldn't have to pull them in.
+desktop = ["dep:softbuffer", "dep:winit"]
+
 [dependencies]
 florui = { path = "../florui" }
 florui-layout = { path = "../florui-layout" }
 florui-paint = { path = "../florui-paint" }
 florui-reactive = { path = "../florui-reactive" }
 florui-style = { path = "../florui-style" }
-softbuffer = "0.4.8"
+softbuffer = { version = "0.4.8", optional = true }
 taffy = "0.14"
-winit = "0.30.13"
+winit = { version = "0.30.13", optional = true }
