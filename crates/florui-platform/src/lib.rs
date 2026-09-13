@@ -230,16 +230,33 @@ impl DesktopHost {
     }
 
     /// Updates `:hover` against the runtime's cached geometry — no
-    /// rebuild just to know what's under the cursor. Only re-renders (to
-    /// pick up any `:hover`-dependent style) when the hovered node
-    /// actually changed.
+    /// rebuild just to know what's under the cursor.
     fn handle_cursor_moved(&mut self, x: f64, y: f64) {
         self.last_cursor = (x, y);
+        let hit = self
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.hit_test(x as f32, y as f32));
+        self.set_hovered_and_redraw(hit);
+    }
+
+    /// The cursor leaving the window cancels any in-progress press (there
+    /// is nowhere left to release onto) and clears `:hover` — otherwise
+    /// whichever element was last under the cursor would stay visually
+    /// `:hover`ed even after the mouse has left the window entirely.
+    fn handle_cursor_left(&mut self) {
+        self.pressed = None;
+        self.set_hovered_and_redraw(None);
+    }
+
+    /// Applies a hover change and, only when it actually changed anything
+    /// (`:hover` can affect computed style), re-renders and requests a
+    /// repaint to pick that up.
+    fn set_hovered_and_redraw(&mut self, hit: Option<NodeId>) {
         let viewport = self.viewport_size();
         let Some(runtime) = &mut self.runtime else {
             return;
         };
-        let hit = runtime.hit_test(x as f32, y as f32);
         if !runtime.set_hovered(hit) {
             return;
         }
@@ -304,11 +321,20 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
             .root
             .take()
             .expect("resumed only builds the runtime once, guarded by self.window");
-        let runtime = UiRuntime::with_rules(self.rules.clone(), root, viewport);
+        let mut runtime = UiRuntime::with_rules(self.rules.clone(), root, viewport);
         let proxy = self.proxy.clone();
         runtime.dirty_flag().on_mark(move || {
             let _ = proxy.send_event(UserEvent::Dirty);
         });
+        // The waker above can only be registered after the runtime (and the
+        // first render its constructor already ran) exists — so an initial
+        // mount effect that itself calls `Signal::set` marks the flag with
+        // no waker listening yet, and that mark would otherwise be lost:
+        // nothing else re-checks it before the first paint.
+        if runtime.is_dirty() {
+            runtime.clear_dirty();
+            runtime.update(viewport);
+        }
 
         self.runtime = Some(runtime);
         self.window = Some(window);
@@ -333,7 +359,7 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
             WindowEvent::CursorMoved { position, .. } => {
                 self.handle_cursor_moved(position.x, position.y);
             }
-            WindowEvent::CursorLeft { .. } => self.pressed = None,
+            WindowEvent::CursorLeft { .. } => self.handle_cursor_left(),
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
