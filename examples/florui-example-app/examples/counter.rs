@@ -1,12 +1,13 @@
-//! A clickable counter, live: `+1` increments a real `use_signal` and
-//! re-renders through the actual style+layout+paint pipeline.
-//!
-//! `view!` has no click attribute yet, so this host hit-tests the button's
-//! real layout box itself (same technique `live.rs` uses for `:hover`) and
-//! passes the result in as a `should_increment` prop.
+//! A clickable counter, live: `+1` is a real `onclick` handler on the
+//! button, calling `Signal::set` directly — the host's only job is
+//! translating a real mouse click into "which node was that" via
+//! `florui_layout::hit_test`, then calling whatever handler it finds. The
+//! `Scope`'s dirty flag (not an external "was a click pending" flag)
+//! decides whether to repaint.
 //!
 //! `cargo run --example counter -p florui-example-app`
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::rc::Rc;
@@ -37,8 +38,7 @@ fn main() {
 
 struct App {
     scope: Scope,
-    /// Consumed by the next render, then cleared.
-    pending_click: bool,
+    dirty: Rc<Cell<bool>>,
     last_cursor: (f64, f64),
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
@@ -47,10 +47,10 @@ struct App {
 
 impl App {
     fn new() -> Self {
-        let (scope, _dirty) = Scope::new();
+        let (scope, dirty) = Scope::new();
         Self {
             scope,
-            pending_click: false,
+            dirty,
             last_cursor: (0.0, 0.0),
             window: None,
             surface: None,
@@ -67,10 +67,7 @@ impl App {
         HashMap<NodeId, ComputedStyle>,
         HashMap<NodeId, BoxLayout>,
     ) {
-        let should_increment = std::mem::take(&mut self.pending_click);
-        let tree = self
-            .scope
-            .render(|| Counter(CounterProps { should_increment }));
+        let tree = self.scope.render(|| Counter(CounterProps {}));
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(COUNTER_CSS)
             .expect("counter.css should parse under florui-style's supported subset");
@@ -120,25 +117,21 @@ impl App {
         let _ = buffer.present();
     }
 
-    /// Renders once to measure the button, then hit-tests the last cursor
-    /// position against it.
+    /// Renders once purely to get real geometry to hit-test against, finds
+    /// whatever node the cursor is over, and calls its `click` handler if
+    /// it has one. Whether that actually changed anything is the `Scope`'s
+    /// own dirty flag's call, not this function's.
     fn handle_click(&mut self) {
         let (arena, _styles, layouts) = self.render();
-        let Some(button) = arena.find(|a, id| a.tag(id) == "button") else {
-            return;
-        };
-        let Some(&layout) = layouts.get(&button) else {
-            return;
-        };
-        let (bx, by) = florui_layout::absolute_position(&arena, &layouts, button);
         let (x, y) = self.last_cursor;
-        let inside = x >= bx as f64
-            && x < (bx + layout.width) as f64
-            && y >= by as f64
-            && y < (by + layout.height) as f64;
+        if let Some(node) = florui_layout::hit_test(&arena, &layouts, x as f32, y as f32)
+            && let Some(handler) = arena.handler(node, "click")
+        {
+            handler.call();
+        }
 
-        if inside {
-            self.pending_click = true;
+        if self.dirty.get() {
+            self.dirty.set(false);
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
