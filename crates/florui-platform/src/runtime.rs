@@ -371,4 +371,48 @@ mod tests {
         runtime.update(viewport());
         assert_eq!(status_text(find_status(&runtime), &runtime), "ready:42");
     }
+
+    /// loading-boundaries.md's own acceptance requirement: "an externally
+    /// completed future reveals content without a manual update, click,
+    /// or resize." Same shape as the resource-only version above, with a
+    /// `loading_boundary` deciding between a fallback and the real
+    /// content instead of a component branching on `Resource` itself.
+    #[test]
+    fn a_loading_boundary_reveals_content_on_a_real_background_completion() {
+        let root = || {
+            let resource = use_resource("key", |_| {
+                florui_reactive::blocking::spawn_blocking(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                    Ok::<i32, &'static str>(42)
+                })
+            });
+            florui_reactive::loading_boundary(
+                &[&resource],
+                |_refreshing| view! { <div id="status">{"content"}</div> },
+                || view! { <div id="status">{"fallback"}</div> },
+            )
+        };
+
+        let mut runtime = UiRuntime::with_rules(Vec::new(), root, viewport());
+        let (needs_update_tx, needs_update_rx) = std::sync::mpsc::channel();
+        runtime.on_needs_update(move || {
+            let _ = needs_update_tx.send(());
+        });
+        if runtime.is_dirty() {
+            runtime.clear_dirty();
+            runtime.update(viewport());
+        }
+        assert_eq!(status_text(find_status(&runtime), &runtime), "fallback");
+
+        needs_update_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the background thread's completion must reach on_needs_update on its own");
+        // As above: this render's own snapshot still reads the
+        // pre-completion state.
+        runtime.update(viewport());
+        assert!(runtime.is_dirty());
+        runtime.clear_dirty();
+        runtime.update(viewport());
+        assert_eq!(status_text(find_status(&runtime), &runtime), "content");
+    }
 }
