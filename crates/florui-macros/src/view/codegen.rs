@@ -122,6 +122,13 @@ fn primitive_element(tag: &Ident, attrs: &[(Ident, AttrValue)], children: &[Node
     }
 }
 
+/// `key={...}` on a component call is its caller-assigned identity (see
+/// `florui_reactive::use_child_scope_keyed`), not a prop of the component
+/// itself — it never becomes a `Props` field.
+fn is_key_attr(name: &Ident) -> bool {
+    name == "key"
+}
+
 fn component_call(
     tag: &Ident,
     attrs: &[(Ident, AttrValue)],
@@ -129,13 +136,17 @@ fn component_call(
     self_closing: bool,
 ) -> TokenStream {
     let props_ident = format_ident!("{tag}Props");
-    let field_inits = attrs.iter().map(|(name, value)| {
-        let value_expr = match value {
-            AttrValue::Lit(lit) => quote! { #lit },
-            AttrValue::Expr(expr) => quote! { #expr },
-        };
-        quote! { #name: #value_expr, }
-    });
+    let key_attr = attrs.iter().find(|(name, _)| is_key_attr(name));
+    let field_inits = attrs
+        .iter()
+        .filter(|(name, _)| !is_key_attr(name))
+        .map(|(name, value)| {
+            let value_expr = match value {
+                AttrValue::Lit(lit) => quote! { #lit },
+                AttrValue::Expr(expr) => quote! { #expr },
+            };
+            quote! { #name: #value_expr, }
+        });
 
     let children_field = if self_closing {
         TokenStream::new()
@@ -144,7 +155,17 @@ fn component_call(
         quote! { children: ::florui::Children::from(#children), }
     };
 
-    quote! {
-        #tag(#props_ident { #(#field_inits)* #children_field })
+    let props = quote! { #props_ident { #(#field_inits)* #children_field } };
+
+    match key_attr {
+        Some((_, value)) => {
+            let key_expr = match value {
+                AttrValue::Lit(lit) => quote! { #lit },
+                AttrValue::Expr(expr) => quote! { #expr },
+            };
+            let keyed_tag = format_ident!("__florui_keyed_{tag}");
+            quote! { #keyed_tag(::florui::reactive::Key::from(#key_expr), #props) }
+        }
+        None => quote! { #tag(#props) },
     }
 }
