@@ -24,6 +24,7 @@
 //! never the write or a subsequent read of it.
 
 mod batch;
+pub mod blocking;
 mod context;
 mod dirty;
 mod effect;

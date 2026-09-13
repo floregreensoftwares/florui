@@ -31,11 +31,11 @@ pub struct UiRuntime {
     /// fresh every render the same way any other context value is. Advanced
     /// once per [`Self::update`] so a fetch that's already resolvable (or
     /// was woken by prior progress) commits without a host needing to know
-    /// that async work is involved at all. A background completion that
-    /// isn't woken by anything already driving another [`Self::update`]
-    /// (a real timer or I/O reactor, on a host whose event loop otherwise
-    /// only wakes for input) needs its own bridge from the executor's
-    /// waker to that event loop — not yet wired here.
+    /// that async work is involved at all. A background completion woken
+    /// only through this executor's own waker (real I/O, a timer) reaches
+    /// an event-driven host via [`Self::on_needs_update`], the same
+    /// callback a [`florui_reactive::Signal::set`] anywhere under the root
+    /// already uses.
     executor: Rc<LocalExecutor>,
 }
 
@@ -80,9 +80,32 @@ impl UiRuntime {
     /// [`florui_reactive::Signal::set`] happens anywhere under the root —
     /// register a waker with [`DirtyFlag::on_mark`] to learn about it the
     /// instant it happens rather than polling [`Self::is_dirty`] after
-    /// specific events a host already knew to check.
+    /// specific events a host already knew to check. Prefer
+    /// [`Self::on_needs_update`] for a host loop, which also covers async
+    /// resource completions this flag alone does not.
     pub fn dirty_flag(&self) -> DirtyFlag {
         self.dirty.clone()
+    }
+
+    /// Registers `listener` to run whenever this runtime has something an
+    /// event-driven host should react to by calling [`Self::update`]
+    /// again: a [`florui_reactive::Signal::set`] anywhere under the root,
+    /// or a [`florui_reactive::use_resource`] fetch running on this
+    /// runtime's own executor becoming newly pollable. Real progress (a
+    /// background thread finishing, an I/O reactor firing) still only
+    /// happens on its own — this is only the notification that it did, so
+    /// a host that otherwise only wakes for input still learns about it.
+    ///
+    /// May run on a different thread than whichever owns this runtime, the
+    /// same way a real I/O completion can — `listener` itself must not
+    /// touch this runtime; only signal that an update is due, the way a
+    /// host's own event-loop proxy does. Replaces any previously
+    /// registered listener.
+    pub fn on_needs_update(&self, listener: impl Fn() + Send + Sync + 'static) {
+        let listener = std::sync::Arc::new(listener);
+        let for_dirty = std::sync::Arc::clone(&listener);
+        self.dirty.on_mark(move || for_dirty());
+        self.executor.on_woken(move || listener());
     }
 
     /// Re-renders the tree against `viewport` and caches the resulting
@@ -295,5 +318,57 @@ mod tests {
             1,
             "one click writing two signals must wake the host once, not twice"
         );
+    }
+
+    /// Proves the bridge an event-driven host needs actually exists: a
+    /// fetch resolved by a real OS thread (not this test calling anything
+    /// on the resource or the runtime) still reaches the rendered tree,
+    /// with [`UiRuntime::on_needs_update`] as the only thing telling this
+    /// test when to call [`UiRuntime::update`] again — no click, no
+    /// resize, no polling loop. `on_needs_update` is registered right
+    /// after construction, before the mount-effect catch-up update below —
+    /// the same order [`crate::run`]'s real desktop host uses — so a fetch
+    /// that resolves unusually fast still has a listener in place; the
+    /// artificial delay is extra margin, not what makes this correct.
+    #[test]
+    fn a_background_completion_notifies_on_needs_update_without_a_polling_loop() {
+        let root = || {
+            let resource = use_resource("key", |_| {
+                florui_reactive::blocking::spawn_blocking(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                    Ok::<i32, &'static str>(42)
+                })
+            });
+            let text = match resource.get() {
+                Resource::Idle => "idle".to_string(),
+                Resource::Pending { .. } => "pending".to_string(),
+                Resource::Ready(value) => format!("ready:{value}"),
+                Resource::Failed { error, .. } => format!("failed:{error}"),
+            };
+            view! { <div id="status">{text}</div> }
+        };
+
+        let mut runtime = UiRuntime::with_rules(Vec::new(), root, viewport());
+        let (needs_update_tx, needs_update_rx) = std::sync::mpsc::channel();
+        runtime.on_needs_update(move || {
+            let _ = needs_update_tx.send(());
+        });
+        if runtime.is_dirty() {
+            runtime.clear_dirty();
+            runtime.update(viewport());
+        }
+        assert_eq!(status_text(find_status(&runtime), &runtime), "pending");
+
+        needs_update_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the background thread's completion must reach on_needs_update on its own");
+        // As above: this render's own snapshot still reads the
+        // pre-completion state, since `update` only commits `Ready` (via
+        // run_until_stalled) after building it.
+        runtime.update(viewport());
+        assert!(runtime.is_dirty());
+        runtime.clear_dirty();
+        runtime.update(viewport());
+        assert_eq!(status_text(find_status(&runtime), &runtime), "ready:42");
     }
 }
