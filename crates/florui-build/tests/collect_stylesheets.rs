@@ -190,6 +190,82 @@ fn visited_rust_files_include_every_reachable_module_for_rerun_if_changed() {
 }
 
 #[test]
+fn an_unsupported_cfg_with_no_stylesheet_underneath_is_tolerated() {
+    let krate = TempCrate::new("cfg-test-inline");
+    krate.write(
+        "src/lib.rs",
+        r#"
+        stylesheet!("./root.css");
+
+        #[cfg(test)]
+        mod tests {
+            #[test]
+            fn some_unit_test() {
+                assert_eq!(1 + 1, 2);
+            }
+        }
+        "#,
+    );
+    krate.write("src/root.css", ".root {}");
+
+    let result = collect_stylesheets(
+        "demo",
+        &krate.root,
+        &krate.root.join("src/lib.rs"),
+        &no_features,
+    )
+    .unwrap();
+
+    assert_eq!(result.stylesheets.len(), 1);
+    assert_eq!(result.stylesheets[0].literal_path, "./root.css");
+}
+
+#[test]
+fn an_unsupported_cfg_with_no_stylesheet_underneath_is_tolerated_for_a_file_module() {
+    let krate = TempCrate::new("cfg-test-file");
+    krate.write("src/lib.rs", "#[cfg(test)]\nmod tests;");
+    krate.write("src/tests.rs", "fn some_helper() {}");
+
+    let result = collect_stylesheets(
+        "demo",
+        &krate.root,
+        &krate.root.join("src/lib.rs"),
+        &no_features,
+    )
+    .unwrap();
+
+    assert!(result.stylesheets.is_empty());
+}
+
+#[test]
+fn an_unsupported_cfg_hiding_a_real_stylesheet_is_still_rejected() {
+    let krate = TempCrate::new("cfg-test-hides-stylesheet");
+    krate.write(
+        "src/lib.rs",
+        r#"
+        #[cfg(test)]
+        mod tests {
+            stylesheet!("./hidden.css");
+        }
+        "#,
+    );
+    krate.write("src/hidden.css", ".hidden {}");
+
+    let err = collect_stylesheets(
+        "demo",
+        &krate.root,
+        &krate.root.join("src/lib.rs"),
+        &no_features,
+    )
+    .unwrap_err();
+
+    assert!(
+        err.to_string().contains("test"),
+        "the error should still name the unsupported predicate: {err}"
+    );
+}
+
+#[test]
 fn a_missing_module_file_is_a_clear_error_not_a_panic() {
     let krate = TempCrate::new("missing");
     krate.write("src/lib.rs", "mod ghost;");

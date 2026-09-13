@@ -139,8 +139,22 @@ fn visit(
     // Enabled child modules first, depth-first, in source order.
     for item in items {
         let Item::Mod(module) = item else { continue };
-        if !module_enabled(module, declaring_file, is_feature_enabled)? {
-            continue;
+        match module_enabled(module, declaring_file, is_feature_enabled) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            // A predicate this collector cannot evaluate (`test`,
+            // `target_os`, ...) only matters if a real `stylesheet!` could
+            // be hiding under it — e.g. an inline `#[cfg(test)] mod tests`
+            // full of ordinary unit tests never contains one. Checking
+            // first, rather than failing on sight, is what makes writing
+            // tests anywhere in a `stylesheet!`-using crate possible at
+            // all; still refuse to guess when it could actually matter.
+            Err(err) => {
+                if module_subtree_has_stylesheet(module, declaring_file, children_dir)? {
+                    return Err(err);
+                }
+                continue;
+            }
         }
 
         match &module.content {
@@ -210,6 +224,59 @@ fn module_enabled(
             message,
         }
     })
+}
+
+/// Resolves `module`'s own content (inline or a child file, same as the
+/// normal traversal) and checks it with [`subtree_has_stylesheet`].
+fn module_subtree_has_stylesheet(
+    module: &ItemMod,
+    declaring_file: &Path,
+    children_dir: &Path,
+) -> Result<bool, CollectError> {
+    match &module.content {
+        Some((_, inline_items)) => {
+            let name = module.ident.to_string();
+            let inline_children_dir =
+                module_graph::children_dir_for(declaring_file, children_dir, &name);
+            subtree_has_stylesheet(inline_items, declaring_file, &inline_children_dir)
+        }
+        None => {
+            let name = module.ident.to_string();
+            let child_file = module_graph::resolve_child_path(children_dir, module)?;
+            let child_children_dir =
+                module_graph::children_dir_for(&child_file, children_dir, &name);
+            let child_ast = module_graph::parse(&child_file)?;
+            subtree_has_stylesheet(&child_ast.items, &child_file, &child_children_dir)
+        }
+    }
+}
+
+/// Whether a `stylesheet!` declaration could be reached from `items`,
+/// ignoring every `#[cfg(...)]` gate along the way — used only to decide
+/// whether an unsupported cfg predicate is safe to ignore (nothing
+/// stylesheet-shaped lives under it, under any possible resolution of that
+/// predicate) or must be reported instead.
+fn subtree_has_stylesheet(
+    items: &[Item],
+    declaring_file: &Path,
+    children_dir: &Path,
+) -> Result<bool, CollectError> {
+    let invocations =
+        scan::find_stylesheet_invocations(items).map_err(|source| CollectError::Scan {
+            file: declaring_file.to_path_buf(),
+            source,
+        })?;
+    if !invocations.is_empty() {
+        return Ok(true);
+    }
+
+    for item in items {
+        let Item::Mod(module) = item else { continue };
+        if module_subtree_has_stylesheet(module, declaring_file, children_dir)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn build_entry(

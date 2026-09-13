@@ -4,7 +4,13 @@
 //! Anything else (`target_os`, bare `unix`, `test`, ...) is reported as
 //! unsupported rather than guessed at, since guessing wrong would silently
 //! include or exclude a module's stylesheet — the collector must match
-//! "the selected Rust build configuration," not approximate it.
+//! "the selected Rust build configuration," not approximate it. This
+//! module only decides whether a predicate is understood; [`crate::collect`]
+//! is the one that decides an unsupported predicate is safe to ignore when
+//! nothing stylesheet-shaped lives under the module it gates (an inline
+//! `#[cfg(test)] mod tests` full of ordinary unit tests, say) rather than
+//! failing every crate that mixes `stylesheet!` with `#[cfg(test)]`
+//! anywhere in its module graph.
 
 use proc_macro2::Ident;
 use syn::parse::ParseStream;
