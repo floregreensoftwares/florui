@@ -16,6 +16,19 @@ use proc_macro::TokenStream;
 /// simple parameter names (no destructuring patterns), and return a type —
 /// typically [`Element`](../florui/enum.Element.html).
 ///
+/// Every field is a struct field, so a `view!` call site that omits one
+/// fails to compile — this is also how a required named slot (an
+/// `Element`-typed field) is enforced, and an `Option<T>`-typed field is
+/// how an optional one gets a component-supplied default. What this does
+/// *not* do yet: let a call site omit an `Option<T>` field's attribute
+/// entirely — today it must still write `field={None}`. `view!` and
+/// `#[component]` are separate macro invocations with no shared type
+/// information, so `view!` can't currently tell which fields are optional
+/// on its own; closing that gap without giving up the required-field
+/// compile error is an open question (an explicit per-field default
+/// declared here, read back by `view!`'s own codegen, is one route to
+/// evaluate — not a settled design).
+///
 /// ```
 /// use florui::prelude::*;
 ///
