@@ -21,6 +21,7 @@
 mod context;
 mod dirty;
 mod effect;
+mod error_boundary;
 mod key;
 mod memo;
 mod refs;
@@ -30,6 +31,7 @@ mod signal;
 pub use context::{provide_context, use_context};
 pub use dirty::DirtyFlag;
 pub use effect::{Cleanup, use_effect};
+pub use error_boundary::{ErrorBoundary, ErrorReporter, error_boundary, use_error_boundary};
 pub use key::Key;
 pub use memo::use_memo;
 pub use refs::{Ref, use_ref};
