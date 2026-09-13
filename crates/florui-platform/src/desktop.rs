@@ -12,10 +12,12 @@
 //! around.
 
 use std::num::NonZeroU32;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use florui::Element;
 use florui_style::{NodeId, Rgba, StyleError};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use taffy::prelude::*;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -30,6 +32,8 @@ pub enum RunError {
     Stylesheet(StyleError),
     WindowCreation(winit::error::OsError),
     SurfaceCreation(softbuffer::SoftBufferError),
+    CssFile(std::io::Error),
+    CssWatch(notify::Error),
 }
 
 impl std::fmt::Display for RunError {
@@ -41,6 +45,8 @@ impl std::fmt::Display for RunError {
             RunError::SurfaceCreation(err) => {
                 write!(f, "render surface could not be created: {err}")
             }
+            RunError::CssFile(err) => write!(f, "could not read stylesheet file: {err}"),
+            RunError::CssWatch(err) => write!(f, "could not watch stylesheet file: {err}"),
         }
     }
 }
@@ -52,6 +58,8 @@ impl std::error::Error for RunError {
             RunError::Stylesheet(err) => Some(err),
             RunError::WindowCreation(err) => Some(err),
             RunError::SurfaceCreation(err) => Some(err),
+            RunError::CssFile(err) => Some(err),
+            RunError::CssWatch(err) => Some(err),
         }
     }
 }
@@ -62,11 +70,15 @@ enum UserEvent {
     /// pollable — see [`UiRuntime::on_needs_update`]. Both call for the
     /// same reaction: re-render and repaint.
     Dirty,
+    /// The watched CSS file (see [`run_with_css_reload`]) changed on disk.
+    CssChanged,
 }
 
 /// Opens a window titled `title` and keeps it live over `root` — called
 /// fresh on every render, the way a `#[component]` function normally is.
-/// `css` is parsed once; it does not get watched for changes.
+/// `css` is parsed once; it does not get watched for changes — for a dev
+/// loop that reloads edited CSS without losing component state, use
+/// [`run_with_css_reload`] instead.
 ///
 /// Blocks the calling thread until the window closes.
 pub fn run(
@@ -95,6 +107,82 @@ pub fn run(
     }
 }
 
+/// Same as [`run`], but reads `css_path` from disk and watches it for
+/// changes instead of taking a fixed string: saving an edit re-parses the
+/// stylesheet and repaints through [`UiRuntime::set_rules`], which never
+/// touches component state — every `Signal` keeps its value across the
+/// reload, unlike a Rust source change, which needs an actual process
+/// restart (and does lose it; see `florui dev`'s own reporting of that).
+///
+/// A reload that fails to parse is reported to stderr and the previous,
+/// still-valid stylesheet keeps rendering — only the *initial* read at
+/// startup must succeed. Blocks the calling thread until the window closes.
+pub fn run_with_css_reload(
+    title: &str,
+    css_path: impl AsRef<Path>,
+    canvas_color: Rgba,
+    root: impl Fn() -> Element + 'static,
+) -> Result<(), RunError> {
+    let css_path = css_path.as_ref().to_owned();
+    let css = std::fs::read_to_string(&css_path).map_err(RunError::CssFile)?;
+    let rules = florui_style::parse_stylesheet(&css).map_err(RunError::Stylesheet)?;
+
+    let event_loop = EventLoop::<UserEvent>::with_user_event()
+        .build()
+        .map_err(RunError::EventLoop)?;
+    event_loop.set_control_flow(ControlFlow::Wait);
+
+    let proxy = event_loop.create_proxy();
+    let watcher = watch_css_file(&css_path, proxy.clone()).map_err(RunError::CssWatch)?;
+
+    let mut host = DesktopHost::new(
+        title.to_string(),
+        canvas_color,
+        rules,
+        Box::new(root),
+        proxy,
+    );
+    host.css_path = Some(css_path);
+    host._css_watcher = Some(watcher);
+
+    event_loop.run_app(&mut host).map_err(RunError::EventLoop)?;
+    match host.fatal_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Watches `css_path`'s parent directory (not the file itself, so editors
+/// that save via rename/replace are still observed) and wakes the event
+/// loop only on a change to `css_path` exactly — mirrors
+/// `florui-devtools::preview::watch_fixture`.
+fn watch_css_file(
+    css_path: &Path,
+    proxy: EventLoopProxy<UserEvent>,
+) -> notify::Result<RecommendedWatcher> {
+    let target = css_path
+        .canonicalize()
+        .unwrap_or_else(|_| css_path.to_owned());
+    let parent = css_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+
+    let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+        let Ok(event) = result else { return };
+        let touches_target = event
+            .paths
+            .iter()
+            .any(|p| p.canonicalize().map(|c| c == target).unwrap_or(false));
+        if touches_target {
+            // The event loop may already be gone; nothing to do if so.
+            let _ = proxy.send_event(UserEvent::CssChanged);
+        }
+    })?;
+    watcher.watch(parent, RecursiveMode::NonRecursive)?;
+    Ok(watcher)
+}
+
 /// Owns the window, the `softbuffer` surface, and the event loop; delegates
 /// every rendering, hit-testing, and dispatch decision to a [`UiRuntime`].
 struct DesktopHost {
@@ -112,6 +200,11 @@ struct DesktopHost {
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     _context: Option<softbuffer::Context<Rc<Window>>>,
     fatal_error: Option<RunError>,
+    /// Only set by [`run_with_css_reload`] — [`run`] leaves this `None`,
+    /// and [`Self::reload_css`] is a no-op without it.
+    css_path: Option<PathBuf>,
+    /// Kept alive only to keep watching; dropping it stops delivery.
+    _css_watcher: Option<RecommendedWatcher>,
 }
 
 impl DesktopHost {
@@ -135,6 +228,8 @@ impl DesktopHost {
             surface: None,
             _context: None,
             fatal_error: None,
+            css_path: None,
+            _css_watcher: None,
         }
     }
 
@@ -270,6 +365,39 @@ impl DesktopHost {
             .and_then(|runtime| runtime.hit_test(x as f32, y as f32));
     }
 
+    /// Re-reads and re-parses the watched CSS file (see
+    /// [`run_with_css_reload`]), swaps it into the running [`UiRuntime`]
+    /// via [`UiRuntime::set_rules`] — never rebuilding the tree, so every
+    /// `Signal` keeps its value — and repaints. A failure (bad syntax, a
+    /// save-in-progress truncated read) is reported and the last good
+    /// stylesheet keeps rendering, the same recovery contract the
+    /// Stage-0 fixture preview already established.
+    fn reload_css(&mut self) {
+        let Some(path) = self.css_path.clone() else {
+            return;
+        };
+        let loaded = std::fs::read_to_string(&path)
+            .map_err(RunError::CssFile)
+            .and_then(|css| florui_style::parse_stylesheet(&css).map_err(RunError::Stylesheet));
+        match loaded {
+            Ok(rules) => {
+                if let Some(runtime) = &mut self.runtime {
+                    runtime.set_rules(rules);
+                }
+                println!(
+                    "florui-platform: stylesheet reloaded from {}",
+                    path.display()
+                );
+                self.update_and_request_redraw();
+            }
+            Err(error) => {
+                eprintln!(
+                    "florui-platform: stylesheet reload failed, keeping last good version: {error}"
+                );
+            }
+        }
+    }
+
     fn handle_release(&mut self) {
         let (x, y) = self.last_cursor;
         let pressed = self.pressed.take();
@@ -369,6 +497,7 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Dirty => self.update_and_request_redraw(),
+            UserEvent::CssChanged => self.reload_css(),
         }
     }
 }

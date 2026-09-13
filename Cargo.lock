@@ -1354,6 +1354,7 @@ dependencies = [
  "florui-paint",
  "florui-reactive",
  "florui-style",
+ "notify",
  "softbuffer",
  "taffy",
  "winit",
