@@ -1,0 +1,22 @@
+[package]
+name = "florui-style-stylo-experiment"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "florui_style_stylo_experiment"
+
+[dependencies]
+florui = { path = "../florui" }
+florui-style = { path = "../florui-style" }
+app_units = "0.7"
+atomic_refcell = "0.1"
+euclid = "0.22"
+selectors = "0.32"
+servo_arc = "0.4"
+stylo = "0.8"
+stylo_atoms = "0.8"
+stylo_dom = "0.8"
+url = "2"

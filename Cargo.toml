@@ -14,6 +14,7 @@ members = [
     "crates/florui-paint",
     "crates/florui-platform",
     "crates/florui-reactive",
+    "crates/florui-style-stylo-experiment",
     "examples/florui-example-app",
 ]
 
