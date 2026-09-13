@@ -1,0 +1,49 @@
+#!/bin/sh
+# Enforces this repo's commit message convention:
+#
+#   type(scope): imperative description
+#
+# A commit that only touches the whole workspace (not one crate) may drop
+# the scope, e.g. "ci: cache the Cargo registry".
+#
+# Enable this hook with: git config core.hooksPath .githooks
+
+set -eu
+
+message_file="$1"
+first_line=$(head -n 1 "$message_file")
+
+# Merge commits and fixup/squash markers are exempt.
+case "$first_line" in
+    "Merge "* | "fixup! "* | "squash! "*)
+        exit 0
+        ;;
+esac
+
+types="feat|fix|refactor|perf|test|docs|build|ci|chore"
+# Deliberately small and stable — add a name here only when a genuinely
+# new, lasting subsystem needs one, not per commit.
+scopes="style|layout|text|paint|render|platform|api|conformance|reactive|view|primitives|devtools|cli|build|example|workspace"
+
+if echo "$first_line" | grep -qE "^($types)(\(($scopes)\))?: .+"; then
+    exit 0
+fi
+
+cat >&2 <<EOF
+commit message does not match this repo's convention:
+
+    type(scope): imperative description
+
+got:
+
+    $first_line
+
+types:  feat fix refactor perf test docs build ci chore
+scopes: style layout text paint render platform api conformance
+        reactive view primitives devtools cli build example workspace
+
+a type with no scope is only for a workspace-wide change (e.g. "ci: ...").
+if this is really a new, lasting subsystem, add its name to the scopes
+list in .githooks/commit-msg on purpose, rather than inventing one here.
+EOF
+exit 1
