@@ -37,7 +37,7 @@ pub use stylesheets::{StylesheetSource, dedup as dedup_stylesheets};
 pub mod prelude {
     pub use crate::reactive::{
         Binding, Cleanup, ErrorBoundary, ErrorReporter, Executor, Key, Ref, Resource,
-        ResourceHandle, Scope, Signal, TrackedRead, error_boundary, loading_boundary,
+        ResourceHandle, Scope, Signal, TrackedRead, batch, error_boundary, loading_boundary,
         provide_context, render_once, use_attachment, use_child_scope, use_child_scope_keyed,
         use_context, use_effect, use_error_boundary, use_memo, use_ref, use_resource, use_signal,
     };
