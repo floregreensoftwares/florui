@@ -25,6 +25,7 @@
 
 mod attachment;
 mod batch;
+mod binding;
 pub mod blocking;
 mod context;
 mod dirty;
@@ -43,6 +44,7 @@ pub mod trace;
 
 pub use attachment::use_attachment;
 pub use batch::batch;
+pub use binding::Binding;
 pub use context::{provide_context, use_context};
 pub use dirty::DirtyFlag;
 pub use effect::{Cleanup, use_effect};
