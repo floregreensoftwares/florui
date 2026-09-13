@@ -18,8 +18,9 @@ pub use stylesheets::{StylesheetSource, dedup as dedup_stylesheets};
 
 pub mod prelude {
     pub use crate::reactive::{
-        Cleanup, Key, Ref, Scope, Signal, provide_context, render_once, use_child_scope,
-        use_child_scope_keyed, use_context, use_effect, use_memo, use_ref, use_signal,
+        Cleanup, ErrorBoundary, ErrorReporter, Key, Ref, Scope, Signal, error_boundary,
+        provide_context, render_once, use_child_scope, use_child_scope_keyed, use_context,
+        use_effect, use_error_boundary, use_memo, use_ref, use_signal,
     };
     pub use crate::{Children, Element, Handler, IntoNodes, component, stylesheet, view};
 }
