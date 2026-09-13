@@ -12,6 +12,11 @@
     font-size: 32px;
 }
 
+.doubled {
+    font-size: 16px;
+    margin-top: 8px;
+}
+
 .increment {
     width: 60px;
     padding-top: 8px;

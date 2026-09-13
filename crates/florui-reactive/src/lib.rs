@@ -1,15 +1,16 @@
-//! Persistent local component state: [`use_signal`] and the [`Scope`]
-//! that gives it somewhere stable to live across repeated renders of the
-//! same tree.
+//! Persistent local component state: [`use_signal`], [`use_memo`], and the
+//! [`Scope`] that gives them somewhere stable to live across repeated
+//! renders of the same tree.
 //!
 //! # Scope
 //!
-//! Not built yet: `use_memo`, `use_effect`, `use_context`, `use_ref`,
-//! per-component identity (needed for keyed/conditional mounting), and
-//! disposal. One `Scope` has one flat, call-ordered slot list, so every
-//! hook call in the tree it renders must run in the same order and count
-//! every time. No event wiring in `view!` yet either — [`Scope`] just
-//! exposes a dirty flag for a host to poll.
+//! Not built yet: `use_effect`, `use_context`, `use_ref`, per-component
+//! identity (needed for keyed/conditional mounting), disposal, and
+//! automatic dependency tracking for `use_memo` (deps are compared by
+//! equality, not inferred). One `Scope` has one flat, call-ordered slot
+//! list, so every hook call in the tree it renders must run in the same
+//! order and count every time. No event wiring in `view!` yet either —
+//! [`Scope`] just exposes a dirty flag for a host to poll.
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
@@ -26,9 +27,9 @@ struct ScopeInner {
 }
 
 /// Where a tree's hook state lives across repeated re-renders — replaying
-/// `use_signal` calls against the same slots, in the same order, is what
-/// lets a plain Rust function call keep state instead of starting fresh
-/// every time.
+/// `use_signal`/`use_memo` calls against the same slots, in the same
+/// order, is what lets a plain Rust function call keep state instead of
+/// starting fresh every time.
 pub struct Scope {
     inner: Rc<ScopeInner>,
 }
@@ -100,6 +101,27 @@ impl<T> Signal<T> {
     }
 }
 
+/// Reserves the next call-order slot in the currently active [`Scope`] —
+/// shared by every hook. `hook_name` names the caller in the panic message.
+///
+/// # Panics
+///
+/// Panics if called outside a [`Scope::render`] pass.
+fn active_slot(hook_name: &str) -> (Rc<ScopeInner>, usize) {
+    ACTIVE_SCOPES.with(|scopes| {
+        let scopes = scopes.borrow();
+        let scope = scopes.last().unwrap_or_else(|| {
+            panic!(
+                "{hook_name} called outside of Scope::render — hooks must run \
+                 during a component tree's render pass"
+            )
+        });
+        let index = scope.cursor.get();
+        scope.cursor.set(index + 1);
+        (Rc::clone(scope), index)
+    })
+}
+
 /// Persistent local state: `init` runs once, the first render this call
 /// appears in; every later render returns that same [`Signal`] untouched.
 ///
@@ -108,37 +130,61 @@ impl<T> Signal<T> {
 /// Panics outside a [`Scope::render`] pass, or if hooks ran in a different
 /// order or count than last render (see the crate-level scope note).
 pub fn use_signal<T: 'static>(init: impl FnOnce() -> T) -> Signal<T> {
-    ACTIVE_SCOPES.with(|scopes| {
-        let scopes = scopes.borrow();
-        let scope = scopes.last().unwrap_or_else(|| {
-            panic!(
-                "use_signal called outside of Scope::render — hooks must run \
-                 during a component tree's render pass"
-            )
-        });
-        let index = scope.cursor.get();
-        scope.cursor.set(index + 1);
+    let (scope, index) = active_slot("use_signal");
+    let mut slots = scope.slots.borrow_mut();
+    if index == slots.len() {
+        let signal = Signal {
+            value: Rc::new(RefCell::new(init())),
+            dirty: Rc::clone(&scope.dirty),
+        };
+        slots.push(Box::new(signal.clone()));
+        signal
+    } else {
+        slots[index]
+            .downcast_ref::<Signal<T>>()
+            .unwrap_or_else(|| {
+                panic!(
+                    "hook order changed between renders at call position {index} — \
+                     hooks must run unconditionally, in the same order, every render"
+                )
+            })
+            .clone()
+    }
+}
 
-        let mut slots = scope.slots.borrow_mut();
-        if index == slots.len() {
-            let signal = Signal {
-                value: Rc::new(RefCell::new(init())),
-                dirty: Rc::clone(&scope.dirty),
-            };
-            slots.push(Box::new(signal.clone()));
-            signal
-        } else {
-            slots[index]
-                .downcast_ref::<Signal<T>>()
-                .unwrap_or_else(|| {
-                    panic!(
-                        "hook order changed between renders at call position {index} — \
-                         hooks must run unconditionally, in the same order, every render"
-                    )
-                })
-                .clone()
+/// A cached derived value: `compute(&deps)` only re-runs when `deps`
+/// compares unequal to last render's. `deps` must capture everything
+/// `compute` actually depends on — nothing here tracks that for you.
+///
+/// # Panics
+///
+/// Panics outside a [`Scope::render`] pass, or if hooks ran in a different
+/// order or count than last render (see the crate-level scope note).
+pub fn use_memo<D, T>(deps: D, compute: impl FnOnce(&D) -> T) -> T
+where
+    D: PartialEq + 'static,
+    T: Clone + 'static,
+{
+    let (scope, index) = active_slot("use_memo");
+    let mut slots = scope.slots.borrow_mut();
+    if index == slots.len() {
+        let value = compute(&deps);
+        slots.push(Box::new((deps, value.clone())));
+        value
+    } else {
+        let (stored_deps, stored_value) =
+            slots[index].downcast_mut::<(D, T)>().unwrap_or_else(|| {
+                panic!(
+                    "hook order changed between renders at call position {index} — \
+                     hooks must run unconditionally, in the same order, every render"
+                )
+            });
+        if *stored_deps != deps {
+            *stored_value = compute(&deps);
+            *stored_deps = deps;
         }
-    })
+        stored_value.clone()
+    }
 }
 
 #[cfg(test)]
@@ -231,5 +277,57 @@ mod tests {
         scope.render(|| {
             use_signal(|| "not an i32");
         });
+    }
+
+    #[test]
+    fn a_memo_computes_from_its_deps() {
+        let (scope, _dirty) = Scope::new();
+        let value = scope.render(|| use_memo(3, |n| n * 2));
+        assert_eq!(value, 6);
+    }
+
+    #[test]
+    fn a_memo_does_not_recompute_when_deps_are_unchanged() {
+        let (scope, _dirty) = Scope::new();
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+
+        let render = || {
+            let calls = calls.clone();
+            scope.render(move || {
+                use_memo(5, move |n| {
+                    calls.set(calls.get() + 1);
+                    n * 2
+                })
+            })
+        };
+
+        assert_eq!(render(), 10);
+        assert_eq!(render(), 10);
+        assert_eq!(calls.get(), 1, "compute must run once for the same deps");
+    }
+
+    #[test]
+    fn a_memo_recomputes_when_deps_change() {
+        let (scope, _dirty) = Scope::new();
+        assert_eq!(scope.render(|| use_memo(2, |n| n * 10)), 20);
+        assert_eq!(scope.render(|| use_memo(3, |n| n * 10)), 30);
+    }
+
+    #[test]
+    #[should_panic(expected = "hook order changed between renders")]
+    fn a_memo_with_a_different_deps_type_at_the_same_position_panics() {
+        let (scope, _dirty) = Scope::new();
+        scope.render(|| {
+            use_memo(1_i32, |n| n.to_string());
+        });
+        scope.render(|| {
+            use_memo("not an i32", |s| s.to_string());
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "use_memo called outside of Scope::render")]
+    fn use_memo_outside_a_render_panics() {
+        use_memo(1, |n| *n);
     }
 }

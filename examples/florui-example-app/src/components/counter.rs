@@ -1,5 +1,5 @@
 use florui::prelude::*;
-use florui_reactive::use_signal;
+use florui_reactive::{use_memo, use_signal};
 
 stylesheet!("./counter.css");
 
@@ -12,10 +12,12 @@ pub fn Counter(should_increment: bool) -> Element {
     if should_increment {
         count.set(count.get() + 1);
     }
+    let doubled = use_memo(count.get(), |n| n * 2);
 
     view! {
         <div class="counter">
             <span class="count">{count.get().to_string()}</span>
+            <span class="doubled">{format!("x2 = {doubled}")}</span>
             <button class="increment">{"+1"}</button>
         </div>
     }
@@ -28,11 +30,20 @@ mod tests {
 
     use super::*;
 
-    fn rendered_count(scope: &Scope, should_increment: bool) -> String {
+    fn text_of_class(arena: &Arena, class: &str) -> String {
+        let node = arena
+            .find(|a, id| a.classes(id).iter().any(|c| c == class))
+            .unwrap_or_else(|| panic!("no node with class {class:?}"));
+        arena.text_content(node).to_string()
+    }
+
+    fn render(scope: &Scope, should_increment: bool) -> Arena {
         let tree = scope.render(|| Counter(CounterProps { should_increment }));
-        let arena = Arena::build(&tree);
-        let span = arena.find(|a, id| a.tag(id) == "span").unwrap();
-        arena.text_content(span).to_string()
+        Arena::build(&tree)
+    }
+
+    fn rendered_count(scope: &Scope, should_increment: bool) -> String {
+        text_of_class(&render(scope, should_increment), "count")
     }
 
     #[test]
@@ -69,5 +80,13 @@ mod tests {
         );
         rendered_count(&scope, true);
         assert!(dirty.get());
+    }
+
+    #[test]
+    fn the_doubled_memo_tracks_the_count() {
+        let (scope, _dirty) = Scope::new();
+        assert_eq!(text_of_class(&render(&scope, false), "doubled"), "x2 = 0");
+        assert_eq!(text_of_class(&render(&scope, true), "doubled"), "x2 = 2");
+        assert_eq!(text_of_class(&render(&scope, true), "doubled"), "x2 = 4");
     }
 }
