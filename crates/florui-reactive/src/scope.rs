@@ -26,18 +26,24 @@ pub struct Scope {
 
 impl Scope {
     /// A fresh scope, plus the dirty flag a host polls to know when a
-    /// [`Signal::set`](crate::Signal::set) inside it means "render again."
+    /// [`Signal::set`](crate::Signal::set) inside it (or inside any
+    /// [`use_child_scope`] nested within it) means "render again."
     pub fn new() -> (Self, Rc<Cell<bool>>) {
         let dirty = Rc::new(Cell::new(false));
-        let scope = Self {
+        (Self::with_dirty_flag(Rc::clone(&dirty)), dirty)
+    }
+
+    /// A fresh scope sharing an existing dirty flag, so a write anywhere
+    /// under it is still visible to whoever holds that flag.
+    fn with_dirty_flag(dirty: Rc<Cell<bool>>) -> Self {
+        Self {
             inner: Rc::new(ScopeInner {
                 slots: RefCell::new(Vec::new()),
                 cursor: Cell::new(0),
-                dirty: dirty.clone(),
+                dirty,
                 context: RefCell::new(HashMap::new()),
             }),
-        };
-        (scope, dirty)
+        }
     }
 
     /// Runs `render` with this scope active, so hook calls inside see the
@@ -58,10 +64,49 @@ impl Scope {
     }
 }
 
+impl Clone for Scope {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Rc::clone(&self.inner),
+        }
+    }
+}
+
 impl Default for Scope {
     fn default() -> Self {
         Self::new().0
     }
+}
+
+/// Gives each call site of this function its own persistent [`Scope`],
+/// nested inside whichever scope is currently active — this is the
+/// mechanism `#[component]` needs so every component gets its own hook
+/// state, not one shared list for the whole tree; it is not meant to be
+/// called directly from ordinary component code. The child shares its
+/// parent's dirty flag, so a write anywhere under it still reaches
+/// whoever is watching the root.
+///
+/// # Panics
+///
+/// Panics if called outside a [`Scope::render`] pass, or if this call's
+/// position held something other than a child scope last render.
+pub fn use_child_scope<T>(render: impl FnOnce() -> T) -> T {
+    let (parent, index) = active_slot("use_child_scope");
+    let mut slots = parent.slots.borrow_mut();
+    if index == slots.len() {
+        slots.push(Box::new(Scope::with_dirty_flag(Rc::clone(&parent.dirty))));
+    }
+    let child = slots[index]
+        .downcast_ref::<Scope>()
+        .unwrap_or_else(|| {
+            panic!(
+                "hook order changed between renders at call position {index} — \
+                 hooks must run unconditionally, in the same order, every render"
+            )
+        })
+        .clone();
+    drop(slots);
+    child.render(render)
 }
 
 /// Reserves the next call-order slot in the currently active [`Scope`] —
@@ -112,6 +157,72 @@ mod tests {
             // Must land on the outer scope's second slot, unaffected by inner's render.
             let value = use_signal(|| "outer-after").get();
             assert_eq!(value, "outer-after");
+        });
+    }
+
+    #[test]
+    fn a_child_scope_persists_its_own_state_across_renders_of_the_parent() {
+        let (root, _dirty) = Scope::new();
+        root.render(|| {
+            use_child_scope(|| use_signal(|| 0).set(5));
+        });
+        let value = root.render(|| use_child_scope(|| use_signal(|| 0).get()));
+        assert_eq!(
+            value, 5,
+            "the child scope, and its signal, must be the same instance across parent renders"
+        );
+    }
+
+    #[test]
+    fn two_child_scopes_at_different_positions_are_independent() {
+        let (root, _dirty) = Scope::new();
+        let (a, b) = root.render(|| {
+            let a = use_child_scope(|| use_signal(|| "a").get());
+            let b = use_child_scope(|| use_signal(|| "b").get());
+            (a, b)
+        });
+        assert_eq!(a, "a");
+        assert_eq!(b, "b");
+    }
+
+    #[test]
+    fn setting_a_signal_in_a_child_scope_marks_the_shared_dirty_flag() {
+        let (root, dirty) = Scope::new();
+        root.render(|| {
+            use_child_scope(|| use_signal(|| 0).set(1));
+        });
+        assert!(
+            dirty.get(),
+            "a host watching only the root's flag must still see a write deep in a child scope"
+        );
+    }
+
+    #[test]
+    fn a_grandchild_scope_also_shares_the_root_dirty_flag() {
+        let (root, dirty) = Scope::new();
+        root.render(|| {
+            use_child_scope(|| {
+                use_child_scope(|| use_signal(|| 0).set(1));
+            });
+        });
+        assert!(dirty.get());
+    }
+
+    #[test]
+    #[should_panic(expected = "use_child_scope called outside of Scope::render")]
+    fn use_child_scope_outside_a_render_panics() {
+        use_child_scope(|| ());
+    }
+
+    #[test]
+    #[should_panic(expected = "hook order changed between renders")]
+    fn a_non_child_scope_hook_at_the_same_position_panics() {
+        let (root, _dirty) = Scope::new();
+        root.render(|| {
+            use_child_scope(|| ());
+        });
+        root.render(|| {
+            use_signal(|| 0);
         });
     }
 }
