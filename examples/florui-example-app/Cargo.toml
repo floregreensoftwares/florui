@@ -20,6 +20,7 @@ florui-reactive = { path = "../../crates/florui-reactive" }
 florui-style = { path = "../../crates/florui-style" }
 florui-layout = { path = "../../crates/florui-layout" }
 florui-paint = { path = "../../crates/florui-paint" }
+florui-platform = { path = "../../crates/florui-platform" }
 taffy = "0.14"
 winit = "0.30.13"
 softbuffer = "0.4.8"
