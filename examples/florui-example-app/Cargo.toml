@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 florui = { path = "../../crates/florui" }
+florui-reactive = { path = "../../crates/florui-reactive" }
 
 [dev-dependencies]
 florui-style = { path = "../../crates/florui-style" }
