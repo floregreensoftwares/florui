@@ -5,33 +5,42 @@
 //!
 //! # Scope
 //!
+//! [`UiRuntime`] is the window-independent half — rendering, hit
+//! testing, and click dispatch — and knows nothing about `winit` or a
+//! window. [`run`] pairs it with a desktop host that owns the window, the
+//! `softbuffer` surface, and the event loop; that pairing is a
+//! convenience, not the only way to drive a [`UiRuntime`].
+//!
 //! One window, one root component, one CSS string parsed once at
 //! startup — no hot reload, no multiple windows, no resizable layout
-//! beyond whatever the tree's own explicit sizes already produce. Real
-//! mouse position drives `:hover`; a real click dispatches whichever
-//! `onclick` handler the clicked node declared; a [`florui_reactive::Signal`]
-//! set anywhere under the root triggers a real repaint. No keyboard, no
-//! focus, no text input.
+//! beyond whatever the tree's own explicit sizes already produce against
+//! the real window viewport. Real mouse position drives `:hover`; a real
+//! click dispatches whichever `onclick` handler was under the cursor for
+//! both press and release; a [`florui_reactive::Signal`] set anywhere
+//! under the root wakes the host to repaint immediately, not just after
+//! a click. No keyboard, no focus, no text input.
 
-use std::cell::Cell;
-use std::collections::HashMap;
+mod runtime;
+
+pub use runtime::UiRuntime;
+
 use std::num::NonZeroU32;
 use std::rc::Rc;
 
 use florui::Element;
-use florui_layout::BoxLayout;
-use florui_reactive::Scope;
-use florui_style::{Arena, ComputedStyle, InteractionState, NodeId, Rgba, StyleError};
+use florui_style::{NodeId, Rgba, StyleError};
 use taffy::prelude::*;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
 #[derive(Debug)]
 pub enum RunError {
     EventLoop(winit::error::EventLoopError),
     Stylesheet(StyleError),
+    WindowCreation(winit::error::OsError),
+    SurfaceCreation(softbuffer::SoftBufferError),
 }
 
 impl std::fmt::Display for RunError {
@@ -39,6 +48,10 @@ impl std::fmt::Display for RunError {
         match self {
             RunError::EventLoop(err) => write!(f, "event loop failed: {err}"),
             RunError::Stylesheet(err) => write!(f, "stylesheet failed to parse: {err}"),
+            RunError::WindowCreation(err) => write!(f, "window could not be created: {err}"),
+            RunError::SurfaceCreation(err) => {
+                write!(f, "render surface could not be created: {err}")
+            }
         }
     }
 }
@@ -48,8 +61,15 @@ impl std::error::Error for RunError {
         match self {
             RunError::EventLoop(err) => Some(err),
             RunError::Stylesheet(err) => Some(err),
+            RunError::WindowCreation(err) => Some(err),
+            RunError::SurfaceCreation(err) => Some(err),
         }
     }
+}
+
+enum UserEvent {
+    /// A [`florui_reactive::Signal`] changed somewhere under the root.
+    Dirty,
 }
 
 /// Opens a window titled `title` and keeps it live over `root` — called
@@ -64,71 +84,91 @@ pub fn run(
     root: impl Fn() -> Element + 'static,
 ) -> Result<(), RunError> {
     let rules = florui_style::parse_stylesheet(css).map_err(RunError::Stylesheet)?;
-    let event_loop = EventLoop::new().map_err(RunError::EventLoop)?;
+    let event_loop = EventLoop::<UserEvent>::with_user_event()
+        .build()
+        .map_err(RunError::EventLoop)?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new(title.to_string(), canvas_color, rules, Box::new(root));
-    event_loop.run_app(&mut app).map_err(RunError::EventLoop)
+    let mut host = DesktopHost::new(
+        title.to_string(),
+        canvas_color,
+        rules,
+        Box::new(root),
+        event_loop.create_proxy(),
+    );
+    event_loop.run_app(&mut host).map_err(RunError::EventLoop)?;
+    match host.fatal_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
-struct App {
+/// Owns the window, the `softbuffer` surface, and the event loop; delegates
+/// every rendering, hit-testing, and dispatch decision to a [`UiRuntime`].
+struct DesktopHost {
     title: String,
     canvas_color: Rgba,
     rules: Vec<florui_style::Rule>,
-    root: Box<dyn Fn() -> Element>,
-    scope: Scope,
-    dirty: Rc<Cell<bool>>,
-    interaction: InteractionState,
-    hovered: Option<NodeId>,
+    root: Option<Box<dyn Fn() -> Element>>,
+    proxy: EventLoopProxy<UserEvent>,
+    runtime: Option<UiRuntime>,
+    /// The node hit-tested at the last left-button press, if any — a
+    /// click only dispatches on release over this same node.
+    pressed: Option<NodeId>,
     last_cursor: (f64, f64),
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     _context: Option<softbuffer::Context<Rc<Window>>>,
+    fatal_error: Option<RunError>,
 }
 
-impl App {
+impl DesktopHost {
     fn new(
         title: String,
         canvas_color: Rgba,
         rules: Vec<florui_style::Rule>,
         root: Box<dyn Fn() -> Element>,
+        proxy: EventLoopProxy<UserEvent>,
     ) -> Self {
-        let (scope, dirty) = Scope::new();
         Self {
             title,
             canvas_color,
             rules,
-            root,
-            scope,
-            dirty,
-            interaction: InteractionState::new(),
-            hovered: None,
+            root: Some(root),
+            proxy,
+            runtime: None,
+            pressed: None,
             last_cursor: (0.0, 0.0),
             window: None,
             surface: None,
             _context: None,
+            fatal_error: None,
         }
     }
 
-    /// Builds a fresh tree and computes its style and layout — no
-    /// diffing, a full rebuild every render.
-    fn render(
-        &mut self,
-    ) -> (
-        Arena,
-        HashMap<NodeId, ComputedStyle>,
-        HashMap<NodeId, BoxLayout>,
-    ) {
-        let tree = self.scope.render(|| (self.root)());
-        let arena = Arena::build(&tree);
-        let styles = florui_style::compute(&arena, &self.rules, &self.interaction);
-        let layouts = florui_layout::compute_layout(&arena, &styles, Size::MAX_CONTENT)
-            .expect("this tree's explicit sizes never produce a layout failure");
-        (arena, styles, layouts)
+    fn viewport_size(&self) -> Size<AvailableSpace> {
+        let size = self
+            .window
+            .as_ref()
+            .map(|window| window.inner_size())
+            .unwrap_or_default();
+        Size {
+            width: AvailableSpace::Definite(size.width as f32),
+            height: AvailableSpace::Definite(size.height as f32),
+        }
+    }
+
+    /// Stops the event loop after logging `error`, and keeps it so [`run`]
+    /// can return it once `run_app` unwinds — an `ApplicationHandler`
+    /// method has no return value of its own to report failure through.
+    fn fail(&mut self, event_loop: &ActiveEventLoop, error: RunError) {
+        eprintln!("florui-platform: {error}");
+        self.fatal_error = Some(error);
+        event_loop.exit();
     }
 
     fn redraw(&mut self) {
-        let Some(window) = self.window.clone() else {
+        let (Some(window), Some(runtime)) = (self.window.clone(), &self.runtime) else {
             return;
         };
         let size = window.inner_size();
@@ -138,24 +178,29 @@ impl App {
             return;
         };
 
-        let (arena, styles, layouts) = self.render();
+        let (arena, styles, layouts) = runtime.geometry();
         let canvas = florui_paint::paint_to_buffer(
             size.width,
             size.height,
             self.canvas_color,
-            &arena,
-            &styles,
-            &layouts,
+            arena,
+            styles,
+            layouts,
         );
 
         let Some(surface) = &mut self.surface else {
             return;
         };
-        if surface.resize(width, height).is_err() {
+        if let Err(error) = surface.resize(width, height) {
+            eprintln!("florui-platform: could not resize the render surface: {error}");
             return;
         }
-        let Ok(mut buffer) = surface.buffer_mut() else {
-            return;
+        let mut buffer = match surface.buffer_mut() {
+            Ok(buffer) => buffer,
+            Err(error) => {
+                eprintln!("florui-platform: render surface buffer unavailable: {error}");
+                return;
+            }
         };
         // Canvas is always opaque, so premultiplied-by-255 is a no-op.
         let pixels: Vec<u32> = canvas
@@ -164,64 +209,108 @@ impl App {
             .map(|p| u32::from_be_bytes([0, p.red(), p.green(), p.blue()]))
             .collect();
         buffer.copy_from_slice(&pixels);
-        let _ = buffer.present();
+        if let Err(error) = buffer.present() {
+            eprintln!("florui-platform: could not present the frame: {error}");
+        }
     }
 
-    fn handle_cursor_moved(&mut self, x: f64, y: f64) {
-        self.last_cursor = (x, y);
-        let (arena, _styles, layouts) = self.render();
-        let hit = florui_layout::hit_test(&arena, &layouts, x as f32, y as f32);
-        if hit == self.hovered {
-            return;
+    /// Re-renders against the current viewport and requests a repaint —
+    /// used both after a resize and after a [`UserEvent::Dirty`], so any
+    /// `Signal::set` anywhere under the root reaches the screen without
+    /// the host having to know which specific interaction caused it.
+    fn update_and_request_redraw(&mut self) {
+        let viewport = self.viewport_size();
+        if let Some(runtime) = &mut self.runtime {
+            runtime.clear_dirty();
+            runtime.update(viewport);
         }
-        self.hovered = hit;
-        self.interaction = match hit {
-            Some(id) => InteractionState::new().with_hovered(id),
-            None => InteractionState::new(),
-        };
         if let Some(window) = &self.window {
             window.request_redraw();
         }
     }
 
-    /// Renders once purely to get real geometry to hit-test against,
-    /// finds whatever node the cursor is over, and calls its `click`
-    /// handler if it has one. Whether that changed anything is the
-    /// `Scope`'s own dirty flag's call, not this function's.
-    fn handle_click(&mut self) {
-        let (arena, _styles, layouts) = self.render();
-        let (x, y) = self.last_cursor;
-        if let Some(node) = florui_layout::hit_test(&arena, &layouts, x as f32, y as f32)
-            && let Some(handler) = arena.handler(node, "click")
-        {
-            handler.call();
+    /// Updates `:hover` against the runtime's cached geometry — no
+    /// rebuild just to know what's under the cursor. Only re-renders (to
+    /// pick up any `:hover`-dependent style) when the hovered node
+    /// actually changed.
+    fn handle_cursor_moved(&mut self, x: f64, y: f64) {
+        self.last_cursor = (x, y);
+        let viewport = self.viewport_size();
+        let Some(runtime) = &mut self.runtime else {
+            return;
+        };
+        let hit = runtime.hit_test(x as f32, y as f32);
+        if !runtime.set_hovered(hit) {
+            return;
         }
+        runtime.update(viewport);
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
 
-        if self.dirty.get() {
-            self.dirty.set(false);
-            if let Some(window) = &self.window {
-                window.request_redraw();
-            }
+    /// Remembers whichever node is under the cursor at press time — the
+    /// click itself only fires on release, and only if that release lands
+    /// back on this same node (so dragging off a button and releasing
+    /// elsewhere cancels it).
+    fn handle_press(&mut self) {
+        let (x, y) = self.last_cursor;
+        self.pressed = self
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.hit_test(x as f32, y as f32));
+    }
+
+    fn handle_release(&mut self) {
+        let (x, y) = self.last_cursor;
+        let pressed = self.pressed.take();
+        let Some(runtime) = &self.runtime else {
+            return;
+        };
+        let released_over = runtime.hit_test(x as f32, y as f32);
+        if let (Some(pressed), Some(released_over)) = (pressed, released_over)
+            && pressed == released_over
+        {
+            runtime.dispatch_click(pressed);
         }
     }
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<UserEvent> for DesktopHost {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
         }
         let attrs = Window::default_attributes().with_title(self.title.clone());
-        let window = Rc::new(
-            event_loop
-                .create_window(attrs)
-                .expect("window should be creatable on a real desktop session"),
-        );
-        let context = softbuffer::Context::new(window.clone())
-            .expect("softbuffer context should be creatable");
-        let surface = softbuffer::Surface::new(&context, window.clone())
-            .expect("softbuffer surface should be creatable");
+        let window = match event_loop.create_window(attrs) {
+            Ok(window) => Rc::new(window),
+            Err(error) => return self.fail(event_loop, RunError::WindowCreation(error)),
+        };
+        let context = match softbuffer::Context::new(window.clone()) {
+            Ok(context) => context,
+            Err(error) => return self.fail(event_loop, RunError::SurfaceCreation(error)),
+        };
+        let surface = match softbuffer::Surface::new(&context, window.clone()) {
+            Ok(surface) => surface,
+            Err(error) => return self.fail(event_loop, RunError::SurfaceCreation(error)),
+        };
 
+        let size = window.inner_size();
+        let viewport = Size {
+            width: AvailableSpace::Definite(size.width as f32),
+            height: AvailableSpace::Definite(size.height as f32),
+        };
+        let root = self
+            .root
+            .take()
+            .expect("resumed only builds the runtime once, guarded by self.window");
+        let runtime = UiRuntime::with_rules(self.rules.clone(), root, viewport);
+        let proxy = self.proxy.clone();
+        runtime.dirty_flag().on_mark(move || {
+            let _ = proxy.send_event(UserEvent::Dirty);
+        });
+
+        self.runtime = Some(runtime);
         self.window = Some(window);
         self._context = Some(context);
         self.surface = Some(surface);
@@ -239,17 +328,29 @@ impl ApplicationHandler for App {
         }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(_) => self.redraw(),
+            WindowEvent::Resized(_) => self.update_and_request_redraw(),
             WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::CursorMoved { position, .. } => {
                 self.handle_cursor_moved(position.x, position.y);
             }
+            WindowEvent::CursorLeft { .. } => self.pressed = None,
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } => self.handle_click(),
+            } => self.handle_press(),
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => self.handle_release(),
             _ => {}
+        }
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::Dirty => self.update_and_request_redraw(),
         }
     }
 }
