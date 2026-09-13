@@ -18,6 +18,7 @@
 //! [`DirtyFlag::on_mark`] callback to hear about it the instant it
 //! happens.
 
+pub mod blocking;
 mod context;
 mod dirty;
 mod effect;

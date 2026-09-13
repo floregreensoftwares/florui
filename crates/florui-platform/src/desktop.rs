@@ -57,7 +57,10 @@ impl std::error::Error for RunError {
 }
 
 enum UserEvent {
-    /// A [`florui_reactive::Signal`] changed somewhere under the root.
+    /// Either a [`florui_reactive::Signal`] changed somewhere under the
+    /// root, or a [`florui_reactive::use_resource`] fetch became newly
+    /// pollable — see [`UiRuntime::on_needs_update`]. Both call for the
+    /// same reaction: re-render and repaint.
     Dirty,
 }
 
@@ -312,14 +315,14 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
             .expect("resumed only builds the runtime once, guarded by self.window");
         let mut runtime = UiRuntime::with_rules(self.rules.clone(), root, viewport);
         let proxy = self.proxy.clone();
-        runtime.dirty_flag().on_mark(move || {
+        runtime.on_needs_update(move || {
             let _ = proxy.send_event(UserEvent::Dirty);
         });
-        // The waker above can only be registered after the runtime (and the
-        // first render its constructor already ran) exists — so an initial
-        // mount effect that itself calls `Signal::set` marks the flag with
-        // no waker listening yet, and that mark would otherwise be lost:
-        // nothing else re-checks it before the first paint.
+        // The listener above can only be registered after the runtime (and
+        // the first render its constructor already ran) exists — so an
+        // initial mount effect that itself calls `Signal::set` marks the
+        // flag with nothing listening yet, and that mark would otherwise
+        // be lost: nothing else re-checks it before the first paint.
         if runtime.is_dirty() {
             runtime.clear_dirty();
             runtime.update(viewport);
