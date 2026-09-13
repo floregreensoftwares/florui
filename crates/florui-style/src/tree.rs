@@ -5,7 +5,7 @@
 //! that view once, up front, rather than threading parent references
 //! through `Element` itself.
 
-use florui::{Element, ElementNode};
+use florui::{Element, ElementNode, Handler};
 
 pub type NodeId = usize;
 
@@ -16,6 +16,7 @@ struct ArenaNode {
     /// The node's own direct text, for text measurement — not inherited
     /// from or propagated to any other node.
     text: String,
+    handlers: Vec<(String, Handler)>,
     parent: Option<NodeId>,
     children: Vec<NodeId>,
 }
@@ -55,6 +56,7 @@ impl Arena {
             classes: class_list(&node.attrs),
             id: attr_value(&node.attrs, "id"),
             text: collect_text(&node.children),
+            handlers: node.handlers.clone(),
             parent,
             children: Vec::new(),
         });
@@ -98,6 +100,16 @@ impl Arena {
     /// `NodeId`, not its parent's.
     pub fn text_content(&self, id: NodeId) -> &str {
         &self.nodes[id].text
+    }
+
+    /// The handler this node declared for `event` (e.g. `"click"` for an
+    /// `onclick={...}` attribute), if any.
+    pub fn handler(&self, id: NodeId, event: &str) -> Option<&Handler> {
+        self.nodes[id]
+            .handlers
+            .iter()
+            .find(|(name, _)| name == event)
+            .map(|(_, handler)| handler)
     }
 
     /// Depth-first pre-order search across every root, for tests and
@@ -242,6 +254,15 @@ mod tests {
             "",
             "the text belongs to the span, not its ancestor"
         );
+    }
+
+    #[test]
+    fn handler_finds_the_declared_event_by_name() {
+        let tree: Element = view! { <button onclick={|| ()} /> };
+        let arena = Arena::build(&tree);
+        let button = arena.roots()[0];
+        assert!(arena.handler(button, "click").is_some());
+        assert!(arena.handler(button, "mouseenter").is_none());
     }
 
     #[test]
