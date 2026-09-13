@@ -2,7 +2,7 @@
 //! `#[component]` function.
 
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 
 use super::parse::ParsedComponent;
 
@@ -17,6 +17,11 @@ pub fn expand(component: ParsedComponent) -> TokenStream {
         return_type,
         block,
     } = component;
+
+    // `view!` calls this instead of `#name` when the call site declares a
+    // `key={...}` attribute — see `view::codegen::component_call`. Doc-hidden:
+    // this is a codegen detail, not part of a component's own public API.
+    let keyed_name = format_ident!("__florui_keyed_{name}");
 
     quote! {
         #vis struct #props_ident {
@@ -34,6 +39,18 @@ pub fn expand(component: ParsedComponent) -> TokenStream {
             // (see `Scope::render`) somewhere up the call stack, even for
             // the outermost/root component.
             ::florui::reactive::use_child_scope(move || #block)
+        }
+
+        #[doc(hidden)]
+        #[allow(non_snake_case)]
+        #vis fn #keyed_name(
+            __key: ::florui::reactive::Key,
+            __props: #props_ident,
+        ) -> #return_type {
+            let #props_ident { #(#field_names),* } = __props;
+            // Same body as #name, but addressed by the caller's own key
+            // instead of call position — see `use_child_scope_keyed`.
+            ::florui::reactive::use_child_scope_keyed(__key, move || #block)
         }
     }
 }
