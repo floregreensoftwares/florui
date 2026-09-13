@@ -3,9 +3,11 @@
 //! particular window system. The `desktop` feature (on by default) adds
 //! [`run`], a real `winit`/`softbuffer` desktop host built on top of it,
 //! so a caller doesn't have to write its own desktop event loop just to
-//! see a component tree running; a mobile or game host that wants
-//! [`UiRuntime`] alone, without pulling in `winit`/`softbuffer` at all,
-//! can disable it (`default-features = false`).
+//! see a component tree running, and [`run_with_css_reload`], the same
+//! host watching its stylesheet on disk so an edit reaches the window
+//! without resetting any component state; a mobile or game host that
+//! wants [`UiRuntime`] alone, without pulling in `winit`/`softbuffer`/
+//! `notify` at all, can disable it (`default-features = false`).
 
 mod runtime;
 mod size_observer;
@@ -17,4 +19,4 @@ pub use size_observer::{SizeObserverRegistry, use_committed_size};
 mod desktop;
 
 #[cfg(feature = "desktop")]
-pub use desktop::{RunError, run};
+pub use desktop::{RunError, run, run_with_css_reload};

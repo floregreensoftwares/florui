@@ -94,6 +94,16 @@ impl UiRuntime {
         self.dirty.clone()
     }
 
+    /// Replaces the stylesheet driving every subsequent [`Self::update`].
+    /// Only `rules` changes — `scope` (every `Signal`, `use_memo`,
+    /// `use_effect`, and the rest of a component's persistent state) is
+    /// left completely alone, so a CSS-only reload never resets state the
+    /// way a fresh render from scratch would. Does not itself re-render;
+    /// call [`Self::update`] afterward to see the new rules take effect.
+    pub fn set_rules(&mut self, rules: Vec<Rule>) {
+        self.rules = rules;
+    }
+
     /// Registers `listener` to run whenever this runtime has something an
     /// event-driven host should react to by calling [`Self::update`]
     /// again: a [`florui_reactive::Signal::set`] anywhere under the root,
@@ -197,6 +207,8 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
+    use florui_style::Rgba;
+
     use florui::prelude::*;
     use florui_reactive::testing::manual_future;
     use florui_reactive::{Resource, use_resource};
@@ -270,6 +282,46 @@ mod tests {
         runtime.update(viewport());
         let status = find_status(&runtime);
         assert_eq!(status_text(status, &runtime), "ready:42");
+    }
+
+    /// The concrete, automatable half of "CSS reload preserves state": a
+    /// real winit file watcher and event loop are only exercisable
+    /// manually, but the actual mechanism — swapping `rules` without
+    /// touching `scope` — needs no window at all to prove.
+    #[test]
+    fn set_rules_changes_style_without_resetting_component_state() {
+        let root = || {
+            let count = use_signal(|| 0);
+            let clicked = count.clone();
+            view! {
+                <button id="status" onclick={move || clicked.set(clicked.get() + 1)}>
+                    {count.get().to_string()}
+                </button>
+            }
+        };
+        let mut runtime = UiRuntime::with_rules(Vec::new(), root, viewport());
+        let status = find_status(&runtime);
+        runtime.dispatch_click(status);
+        runtime.update(viewport());
+        assert_eq!(status_text(find_status(&runtime), &runtime), "1");
+
+        let new_rules = florui_style::parse_stylesheet("#status { color: #ff0000; }")
+            .expect("a trivial rule always parses");
+        runtime.set_rules(new_rules);
+        runtime.update(viewport());
+
+        assert_eq!(
+            status_text(find_status(&runtime), &runtime),
+            "1",
+            "swapping in a real stylesheet must not reset the click count set before it"
+        );
+        let (_, styles, _) = runtime.geometry();
+        let status = find_status(&runtime);
+        assert_eq!(
+            styles[&status].color,
+            Rgba::opaque(0xff, 0x00, 0x00),
+            "the new rule must actually take effect, not just fail to reset state"
+        );
     }
 
     #[test]
