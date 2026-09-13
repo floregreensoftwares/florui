@@ -12,10 +12,18 @@
 //! text all compose the same way.
 
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned};
 use syn::Ident;
 
 use super::ast::{AttrValue, Node};
+
+/// `onclick`, `onmouseenter`, ... — any attribute in this shape names an
+/// event handler rather than a plain string attribute; `view!` has no
+/// fixed list of recognized event names; it's needed once a host actually
+/// dispatches one.
+fn event_name(attr_name: &str) -> Option<&str> {
+    attr_name.strip_prefix("on").filter(|rest| !rest.is_empty())
+}
 
 pub fn expand(nodes: Vec<Node>) -> TokenStream {
     if nodes.is_empty() {
@@ -70,18 +78,47 @@ fn children_vec(children: &[Node]) -> TokenStream {
 
 fn primitive_element(tag: &Ident, attrs: &[(Ident, AttrValue)], children: &[Node]) -> TokenStream {
     let tag_str = tag.to_string();
-    let attr_pairs = attrs.iter().map(|(name, value)| {
+    let mut attr_pairs = Vec::new();
+    let mut handler_pairs = Vec::new();
+
+    for (name, value) in attrs {
         let name_str = name.to_string();
-        let value_expr = match value {
-            AttrValue::Lit(lit) => quote! { (#lit).to_string() },
-            AttrValue::Expr(expr) => quote! { (#expr).to_string() },
-        };
-        quote! { (#name_str.to_string(), #value_expr) }
-    });
+        if let Some(event) = event_name(&name_str) {
+            handler_pairs.push(match value {
+                AttrValue::Expr(expr) => {
+                    quote! { (#event.to_string(), ::florui::Handler::new(#expr)) }
+                }
+                AttrValue::Lit(lit) => {
+                    let message = format!(
+                        "event handler attribute `{name_str}` needs a Rust expression in \
+                         braces, e.g. `{name_str}={{move || ...}}`, not a string literal"
+                    );
+                    quote_spanned! { lit.span() => compile_error!(#message) }
+                }
+            });
+        } else {
+            let value_expr = match value {
+                AttrValue::Lit(lit) => quote! { (#lit).to_string() },
+                AttrValue::Expr(expr) => quote! { (#expr).to_string() },
+            };
+            attr_pairs.push(quote! { (#name_str.to_string(), #value_expr) });
+        }
+    }
     let children = children_vec(children);
 
-    quote! {
-        ::florui::Element::node(#tag_str, ::std::vec![ #(#attr_pairs),* ], #children)
+    if handler_pairs.is_empty() {
+        quote! {
+            ::florui::Element::node(#tag_str, ::std::vec![ #(#attr_pairs),* ], #children)
+        }
+    } else {
+        quote! {
+            ::florui::Element::node_with_handlers(
+                #tag_str,
+                ::std::vec![ #(#attr_pairs),* ],
+                ::std::vec![ #(#handler_pairs),* ],
+                #children,
+            )
+        }
     }
 }
 
