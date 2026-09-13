@@ -1089,6 +1089,10 @@ name = "florui-primitives"
 version = "0.1.0"
 
 [[package]]
+name = "florui-reactive"
+version = "0.1.0"
+
+[[package]]
 name = "florui-style"
 version = "0.1.0"
 dependencies = [

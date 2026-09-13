@@ -12,6 +12,7 @@ members = [
     "crates/florui-layout",
     "crates/florui-text",
     "crates/florui-paint",
+    "crates/florui-reactive",
     "examples/florui-example-app",
 ]
 
