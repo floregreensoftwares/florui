@@ -87,8 +87,14 @@ impl Wake for ForwardingWaker {
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
-        self.notifier.notify();
+        // Requeue in LocalPool *before* telling anyone to pump it: another
+        // thread's run_until_stalled could otherwise wake from `notify`'s
+        // channel send and run before this task is actually ready to be
+        // found, finding nothing and never draining it. LocalPool's own
+        // wake is synchronous, so by the time `notify` runs the task is
+        // guaranteed to already be in its ready queue.
         self.inner.wake_by_ref();
+        self.notifier.notify();
     }
 }
 
