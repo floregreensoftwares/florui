@@ -20,3 +20,6 @@ mod desktop;
 
 #[cfg(feature = "desktop")]
 pub use desktop::{RunError, run, run_with_css_reload};
+
+#[cfg(feature = "desktop")]
+pub mod dpi;
