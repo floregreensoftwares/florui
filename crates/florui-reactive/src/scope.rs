@@ -5,6 +5,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::DirtyFlag;
+
 thread_local! {
     pub(crate) static ACTIVE_SCOPES: RefCell<Vec<Rc<ScopeInner>>> = const { RefCell::new(Vec::new()) };
 }
@@ -12,7 +14,7 @@ thread_local! {
 pub(crate) struct ScopeInner {
     pub(crate) slots: RefCell<Vec<Box<dyn Any>>>,
     pub(crate) cursor: Cell<usize>,
-    pub(crate) dirty: Rc<Cell<bool>>,
+    pub(crate) dirty: DirtyFlag,
     pub(crate) context: RefCell<HashMap<TypeId, Box<dyn Any>>>,
     pub(crate) pending_effects: RefCell<Vec<PendingEffect>>,
 }
@@ -41,17 +43,19 @@ pub struct Scope {
 }
 
 impl Scope {
-    /// A fresh scope, plus the dirty flag a host polls to know when a
+    /// A fresh scope, plus the [`DirtyFlag`] a host uses to know when a
     /// [`Signal::set`](crate::Signal::set) inside it (or inside any
-    /// [`use_child_scope`] nested within it) means "render again."
-    pub fn new() -> (Self, Rc<Cell<bool>>) {
-        let dirty = Rc::new(Cell::new(false));
-        (Self::with_dirty_flag(Rc::clone(&dirty)), dirty)
+    /// [`use_child_scope`] nested within it) means "render again" —
+    /// either by polling [`DirtyFlag::get`] or, better, registering a
+    /// [`DirtyFlag::on_mark`] callback to hear about it immediately.
+    pub fn new() -> (Self, DirtyFlag) {
+        let dirty = DirtyFlag::new();
+        (Self::with_dirty_flag(dirty.clone()), dirty)
     }
 
     /// A fresh scope sharing an existing dirty flag, so a write anywhere
     /// under it is still visible to whoever holds that flag.
-    fn with_dirty_flag(dirty: Rc<Cell<bool>>) -> Self {
+    fn with_dirty_flag(dirty: DirtyFlag) -> Self {
         Self {
             inner: Rc::new(ScopeInner {
                 slots: RefCell::new(Vec::new()),
@@ -125,7 +129,7 @@ pub fn use_child_scope<T>(render: impl FnOnce() -> T) -> T {
     let (parent, index) = active_slot("use_child_scope");
     let mut slots = parent.slots.borrow_mut();
     if index == slots.len() {
-        slots.push(Box::new(Scope::with_dirty_flag(Rc::clone(&parent.dirty))));
+        slots.push(Box::new(Scope::with_dirty_flag(parent.dirty.clone())));
     }
     let child = slots[index]
         .downcast_ref::<Scope>()
@@ -225,6 +229,23 @@ mod tests {
         assert!(
             dirty.get(),
             "a host watching only the root's flag must still see a write deep in a child scope"
+        );
+    }
+
+    #[test]
+    fn a_waker_registered_on_the_root_flag_fires_from_a_signal_set_in_a_child_scope() {
+        let (root, dirty) = Scope::new();
+        let woken = Rc::new(std::cell::Cell::new(false));
+        let woken_in_waker = Rc::clone(&woken);
+        dirty.on_mark(move || woken_in_waker.set(true));
+
+        root.render(|| {
+            use_child_scope(|| use_signal(|| 0).set(1));
+        });
+
+        assert!(
+            woken.get(),
+            "a host should learn about the write immediately, not just by polling later"
         );
     }
 

@@ -1,22 +1,23 @@
 //! [`Signal`]: persistent local state via [`use_signal`].
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::DirtyFlag;
 use crate::scope::active_slot;
 
 /// Persistent local state for one call-order position. Cloning is cheap
 /// and shares the same cell — every clone reads and writes the same value.
 pub struct Signal<T> {
     value: Rc<RefCell<T>>,
-    dirty: Rc<Cell<bool>>,
+    dirty: DirtyFlag,
 }
 
 impl<T> Clone for Signal<T> {
     fn clone(&self) -> Self {
         Self {
             value: Rc::clone(&self.value),
-            dirty: Rc::clone(&self.dirty),
+            dirty: self.dirty.clone(),
         }
     }
 }
@@ -32,7 +33,7 @@ impl<T> Signal<T> {
     /// Writes a new value and marks the owning [`Scope`](crate::Scope) dirty.
     pub fn set(&self, value: T) {
         *self.value.borrow_mut() = value;
-        self.dirty.set(true);
+        self.dirty.mark();
     }
 }
 
@@ -49,7 +50,7 @@ pub fn use_signal<T: 'static>(init: impl FnOnce() -> T) -> Signal<T> {
     if index == slots.len() {
         let signal = Signal {
             value: Rc::new(RefCell::new(init())),
-            dirty: Rc::clone(&scope.dirty),
+            dirty: scope.dirty.clone(),
         };
         slots.push(Box::new(signal.clone()));
         signal
