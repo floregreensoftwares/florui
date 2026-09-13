@@ -7,7 +7,6 @@
 
 use std::collections::HashSet;
 
-use crate::selector::PseudoClass;
 use crate::tree::NodeId;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -37,12 +36,16 @@ impl InteractionState {
         self
     }
 
-    pub fn matches(&self, pseudo: PseudoClass, id: NodeId) -> bool {
-        match pseudo {
-            PseudoClass::Hover => self.hovered.contains(&id),
-            PseudoClass::Focus => self.focused.contains(&id),
-            PseudoClass::Active => self.active.contains(&id),
-        }
+    pub fn is_hovered(&self, id: NodeId) -> bool {
+        self.hovered.contains(&id)
+    }
+
+    pub fn is_focused(&self, id: NodeId) -> bool {
+        self.focused.contains(&id)
+    }
+
+    pub fn is_active(&self, id: NodeId) -> bool {
+        self.active.contains(&id)
     }
 }
 
@@ -56,10 +59,10 @@ mod tests {
             .with_hovered(1)
             .with_focused(2)
             .with_active(3);
-        assert!(state.matches(PseudoClass::Hover, 1));
-        assert!(!state.matches(PseudoClass::Hover, 2));
-        assert!(state.matches(PseudoClass::Focus, 2));
-        assert!(state.matches(PseudoClass::Active, 3));
-        assert!(!state.matches(PseudoClass::Active, 1));
+        assert!(state.is_hovered(1));
+        assert!(!state.is_hovered(2));
+        assert!(state.is_focused(2));
+        assert!(state.is_active(3));
+        assert!(!state.is_active(1));
     }
 }

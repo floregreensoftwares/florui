@@ -12,7 +12,7 @@ use std::rc::Rc;
 use florui::Element;
 use florui_example_app::components::card::{Card, CardProps};
 use florui_layout::BoxLayout;
-use florui_style::{Arena, ComputedStyle, InteractionState, NodeId, PseudoClass, Rgba};
+use florui_style::{Arena, ComputedStyle, InteractionState, NodeId, Rgba};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use taffy::prelude::*;
 use winit::application::ApplicationHandler;
@@ -166,7 +166,7 @@ impl App {
             && y >= by as f64
             && y < (by + layout.height) as f64;
 
-        let was_hovered = self.interaction.matches(PseudoClass::Hover, button);
+        let was_hovered = self.interaction.is_hovered(button);
         if inside != was_hovered {
             self.interaction = if inside {
                 InteractionState::new().with_hovered(button)

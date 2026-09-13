@@ -1,50 +1,18 @@
-//! Errors from parsing the supported CSS subset. Every unsupported
-//! construct (an unknown property, a pseudo-class we don't implement,
-//! `!important`, an unclosed block) is a named, reported error — never a
-//! silently accepted or silently dropped declaration.
+//! [`StyleError`] exists for its `Result<_, StyleError>` signature's sake.
+//! Real CSS parsing (now Stylo's, not a hand-rolled subset) recovers from
+//! a malformed rule or declaration by skipping it, the same way a browser
+//! does — it does not reject a whole stylesheet the way this crate's
+//! previous closed-subset parser did. There is currently no way to
+//! actually construct one.
 
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StyleError {
-    UnclosedBlock,
-    EmptySelector,
-    EmptyCompoundSelector,
-    UnsupportedPseudoClass(String),
-    UnsupportedProperty(String),
-    InvalidValue { property: String, value: String },
-    UnsupportedImportant { property: String },
-    EmptyDeclaration,
-}
+pub enum StyleError {}
 
 impl fmt::Display for StyleError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            StyleError::UnclosedBlock => write!(f, "unclosed `{{ ... }}` block"),
-            StyleError::EmptySelector => write!(f, "empty selector"),
-            StyleError::EmptyCompoundSelector => {
-                write!(f, "selector has an empty `.`, `#`, or `:` component")
-            }
-            StyleError::UnsupportedPseudoClass(name) => {
-                write!(
-                    f,
-                    "unsupported pseudo-class `:{name}` (only :hover, :focus, :active are understood)"
-                )
-            }
-            StyleError::UnsupportedProperty(name) => {
-                write!(
-                    f,
-                    "unsupported property `{name}` (only background-color and color are understood)"
-                )
-            }
-            StyleError::InvalidValue { property, value } => {
-                write!(f, "invalid value `{value}` for `{property}`")
-            }
-            StyleError::UnsupportedImportant { property } => {
-                write!(f, "`!important` is not supported (on `{property}`)")
-            }
-            StyleError::EmptyDeclaration => write!(f, "empty declaration (stray `;`?)"),
-        }
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {}
     }
 }
 
