@@ -1,0 +1,19 @@
+[package]
+name = "florui-platform"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "florui_platform"
+
+[dependencies]
+florui = { path = "../florui" }
+florui-layout = { path = "../florui-layout" }
+florui-paint = { path = "../florui-paint" }
+florui-reactive = { path = "../florui-reactive" }
+florui-style = { path = "../florui-style" }
+softbuffer = "0.4.8"
+taffy = "0.14"
+winit = "0.30.13"

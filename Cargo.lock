@@ -1043,6 +1043,7 @@ dependencies = [
  "florui-build",
  "florui-layout",
  "florui-paint",
+ "florui-platform",
  "florui-reactive",
  "florui-style",
  "notify",
@@ -1084,6 +1085,20 @@ dependencies = [
  "skrifa 0.44.0",
  "taffy",
  "tiny-skia",
+]
+
+[[package]]
+name = "florui-platform"
+version = "0.1.0"
+dependencies = [
+ "florui",
+ "florui-layout",
+ "florui-paint",
+ "florui-reactive",
+ "florui-style",
+ "softbuffer",
+ "taffy",
+ "winit",
 ]
 
 [[package]]
