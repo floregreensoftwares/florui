@@ -84,8 +84,10 @@ mod integration_tests {
             }
         ";
 
-        let tree = Button(ButtonProps {
-            label: "Open projects".to_string(),
+        let tree = render_once(|| {
+            Button(ButtonProps {
+                label: "Open projects".to_string(),
+            })
         });
         let arena = Arena::build(&tree);
         let rules = parse_stylesheet(css).unwrap();

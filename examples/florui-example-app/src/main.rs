@@ -9,13 +9,16 @@
 //! entry point over it. See `examples/visual.rs` for a rendered capture of
 //! the same tree.
 
+use florui::reactive::render_once;
 use florui_example_app::components::card::{Card, CardProps};
 
 include!(concat!(env!("OUT_DIR"), "/florui_stylesheets.rs"));
 
 fn main() {
-    let tree = Card(CardProps {
-        title: "Florui".to_string(),
+    let tree = render_once(|| {
+        Card(CardProps {
+            title: "Florui".to_string(),
+        })
     });
     println!("Element tree:\n{tree:#?}\n");
 

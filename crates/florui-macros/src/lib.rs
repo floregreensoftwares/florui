@@ -24,8 +24,10 @@ use proc_macro::TokenStream;
 ///     view! { <p>Hello, {name}!</p> }
 /// }
 ///
-/// let el = Greeting(GreetingProps {
-///     name: "Ada".to_string(),
+/// let el = render_once(|| {
+///     Greeting(GreetingProps {
+///         name: "Ada".to_string(),
+///     })
 /// });
 /// let Element::Node(node) = el else {
 ///     panic!("expected a node");

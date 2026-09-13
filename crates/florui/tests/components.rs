@@ -5,8 +5,10 @@ use support::{Button, ButtonProps, Card, CardProps, Label, LabelProps};
 
 #[test]
 fn self_closing_component_has_no_children_field() {
-    let el = Button(ButtonProps {
-        label: "Open projects".to_string(),
+    let el = render_once(|| {
+        Button(ButtonProps {
+            label: "Open projects".to_string(),
+        })
     });
     let Element::Node(node) = el else {
         panic!("expected a node");
@@ -21,9 +23,11 @@ fn self_closing_component_has_no_children_field() {
 
 #[test]
 fn component_forwards_children_without_a_wrapper() {
-    let el = Card(CardProps {
-        title: "Hello".to_string(),
-        children: Children::from(vec![Element::text("body")]),
+    let el = render_once(|| {
+        Card(CardProps {
+            title: "Hello".to_string(),
+            children: Children::from(vec![Element::text("body")]),
+        })
     });
     let Element::Node(node) = el else {
         panic!("expected a node");
@@ -52,11 +56,13 @@ fn view_with_multiple_roots_becomes_a_fragment() {
 
 #[test]
 fn view_calls_components_by_capitalized_tag() {
-    let el: Element = view! {
-        <div>
-            <Label text={"hi".to_string()} />
-        </div>
-    };
+    let el: Element = render_once(|| {
+        view! {
+            <div>
+                <Label text={"hi".to_string()} />
+            </div>
+        }
+    });
     let Element::Node(node) = el else {
         panic!("expected a node");
     };

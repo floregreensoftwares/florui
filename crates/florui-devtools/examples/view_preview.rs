@@ -17,9 +17,11 @@ fn Card(background: String, accent: String) -> Element {
 }
 
 fn main() {
-    let tree = Card(CardProps {
-        background: "#1e1e22".to_string(),
-        accent: "#42734f".to_string(),
+    let tree = render_once(|| {
+        Card(CardProps {
+            background: "#1e1e22".to_string(),
+            accent: "#42734f".to_string(),
+        })
     });
 
     let scene = element_scene::from_element(&tree, Rgba::opaque(0, 0, 0));

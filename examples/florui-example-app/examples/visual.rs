@@ -5,6 +5,7 @@
 //! `cargo run --example visual -p florui-example-app`
 
 use florui_example_app::components::card::{Card, CardProps};
+use florui_reactive::render_once;
 use florui_style::{Arena, InteractionState, Rgba};
 use taffy::prelude::*;
 
@@ -12,8 +13,10 @@ const CARD_CSS: &str = include_str!("../src/components/card.css");
 const BUTTON_CSS: &str = include_str!("../src/components/button.css");
 
 fn main() {
-    let tree = Card(CardProps {
-        title: "Florui".to_string(),
+    let tree = render_once(|| {
+        Card(CardProps {
+            title: "Florui".to_string(),
+        })
     });
 
     let css = format!("{CARD_CSS}\n{BUTTON_CSS}");

@@ -87,8 +87,10 @@ struct App {
 
 impl App {
     fn new() -> Self {
-        let tree = Card(CardProps {
-            title: "Florui".to_string(),
+        let tree = florui_reactive::render_once(|| {
+            Card(CardProps {
+                title: "Florui".to_string(),
+            })
         });
         let arena = Arena::build(&tree);
         let button = arena.find(|a, id| a.tag(id) == "button");

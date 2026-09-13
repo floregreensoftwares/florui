@@ -29,7 +29,11 @@ pub fn expand(component: ParsedComponent) -> TokenStream {
         #[allow(non_snake_case)]
         #vis fn #name(__props: #props_ident) -> #return_type {
             let #props_ident { #(#field_names),* } = __props;
-            #block
+            // Every component gets its own persistent hook state, keyed to
+            // this call site — requires an active `florui_reactive::Scope`
+            // (see `Scope::render`) somewhere up the call stack, even for
+            // the outermost/root component.
+            ::florui::reactive::use_child_scope(move || #block)
         }
     }
 }
