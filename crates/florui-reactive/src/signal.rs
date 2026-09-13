@@ -1,4 +1,11 @@
 //! [`Signal`]: persistent local state via [`use_signal`].
+//!
+//! Read-after-write is always synchronous: [`Signal::get`] returns
+//! whatever the most recent [`Signal::set`] stored, immediately — this
+//! holds whether or not that `set` happened inside [`crate::batch`].
+//! `batch` only defers *notifying a host that something changed*
+//! ([`DirtyFlag`]'s wake); the write itself, and every read after it, are
+//! never deferred or reordered.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -23,14 +30,19 @@ impl<T> Clone for Signal<T> {
 }
 
 impl<T: Clone> Signal<T> {
-    /// Reads the current value.
+    /// Reads the current value — always the most recent [`Self::set`],
+    /// synchronously; see the module docs on why a [`crate::batch`] in
+    /// progress does not change this.
     pub fn get(&self) -> T {
         self.value.borrow().clone()
     }
 }
 
 impl<T> Signal<T> {
-    /// Writes a new value and marks the owning [`Scope`](crate::Scope) dirty.
+    /// Writes a new value immediately, then marks the owning
+    /// [`Scope`](crate::Scope) dirty — deferred to wake its host only
+    /// once, alongside every other write in the same [`crate::batch`], if
+    /// one is in progress; otherwise immediately, same as always.
     pub fn set(&self, value: T) {
         *self.value.borrow_mut() = value;
         self.dirty.mark();
