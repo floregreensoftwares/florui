@@ -14,6 +14,22 @@ pub(crate) struct ScopeInner {
     pub(crate) cursor: Cell<usize>,
     pub(crate) dirty: Rc<Cell<bool>>,
     pub(crate) context: RefCell<HashMap<TypeId, Box<dyn Any>>>,
+    pub(crate) pending_effects: RefCell<Vec<PendingEffect>>,
+}
+
+impl Drop for ScopeInner {
+    /// Removing an identity disposes its hooks: every effect this scope
+    /// (and, as the field drop cascades into any stored child `Scope`,
+    /// every scope nested inside it) still owns runs its cleanup here.
+    fn drop(&mut self) {
+        crate::effect::dispose(self);
+    }
+}
+
+/// An effect queued during a render, to run once that render commits.
+pub(crate) struct PendingEffect {
+    pub(crate) index: usize,
+    pub(crate) run: Box<dyn FnOnce() -> Option<crate::effect::Cleanup>>,
 }
 
 /// Where a tree's hook state lives across repeated re-renders — replaying
@@ -42,6 +58,7 @@ impl Scope {
                 cursor: Cell::new(0),
                 dirty,
                 context: RefCell::new(HashMap::new()),
+                pending_effects: RefCell::new(Vec::new()),
             }),
         }
     }
@@ -50,6 +67,8 @@ impl Scope {
     /// slots this scope left behind last time. Provided context is
     /// cleared first — a render that wants it visible must provide it
     /// again, the same way it re-runs every other line of the component.
+    /// Once `render` returns, any [`use_effect`](crate::use_effect) queued
+    /// during it runs — after commit, same as a real hook model requires.
     pub fn render<T>(&self, render: impl FnOnce() -> T) -> T {
         self.inner.cursor.set(0);
         self.inner.context.borrow_mut().clear();
@@ -60,6 +79,7 @@ impl Scope {
             popped.is_some_and(|popped| Rc::ptr_eq(&popped, &self.inner)),
             "Scope::render must pop the exact scope it pushed"
         );
+        crate::effect::run_pending(&self.inner);
         result
     }
 }
@@ -76,6 +96,17 @@ impl Default for Scope {
     fn default() -> Self {
         Self::new().0
     }
+}
+
+/// Renders `render` once, in a fresh, throwaway [`Scope`] — every
+/// `#[component]` call needs one active somewhere up the call stack, and
+/// this is the convenient choice for a one-shot render (a test, a static
+/// capture) that never needs its hook state to persist afterward. A host
+/// that renders repeatedly should keep its own [`Scope`] and call
+/// [`Scope::render`] directly instead, so state actually survives between
+/// renders.
+pub fn render_once<T>(render: impl FnOnce() -> T) -> T {
+    Scope::new().0.render(render)
 }
 
 /// Gives each call site of this function its own persistent [`Scope`],
