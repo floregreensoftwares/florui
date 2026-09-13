@@ -116,10 +116,13 @@ impl UiRuntime {
     }
 
     /// Calls `node`'s `click` handler, if it declared one, against the
-    /// last computed geometry.
+    /// last computed geometry — inside [`florui_reactive::batch`], so a
+    /// handler that writes more than one `Signal` (or writes the same one
+    /// more than once) wakes this runtime's host exactly once for the
+    /// whole click, not once per write.
     pub fn dispatch_click(&self, node: NodeId) {
         if let Some(handler) = self.arena.handler(node, "click") {
-            handler.call();
+            florui_reactive::batch(|| handler.call());
         }
     }
 
@@ -131,5 +134,76 @@ impl UiRuntime {
 
     pub fn clear_dirty(&self) {
         self.dirty.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use florui::prelude::*;
+
+    use super::*;
+
+    #[test]
+    fn dispatch_click_calls_the_nodes_own_click_handler() {
+        let clicked = Rc::new(Cell::new(false));
+        let clicked_in_handler = Rc::clone(&clicked);
+        let runtime = UiRuntime::with_rules(
+            Vec::new(),
+            move || {
+                let clicked = Rc::clone(&clicked_in_handler);
+                view! { <button onclick={move || clicked.set(true)} /> }
+            },
+            Size::MAX_CONTENT,
+        );
+        let button = runtime.geometry().0.roots()[0];
+
+        runtime.dispatch_click(button);
+
+        assert!(clicked.get());
+    }
+
+    #[test]
+    fn dispatch_click_on_a_node_with_no_handler_does_nothing() {
+        let runtime = UiRuntime::with_rules(Vec::new(), || view! { <div /> }, Size::MAX_CONTENT);
+        let node = runtime.geometry().0.roots()[0];
+
+        // Must not panic — the whole point of the test.
+        runtime.dispatch_click(node);
+    }
+
+    #[test]
+    fn a_handler_writing_two_signals_wakes_the_host_exactly_once() {
+        let wakes = Rc::new(Cell::new(0));
+        let wakes_in_waker = Rc::clone(&wakes);
+
+        let runtime = UiRuntime::with_rules(
+            Vec::new(),
+            || {
+                let a = use_signal(|| 0);
+                let b = use_signal(|| 0);
+                view! {
+                    <button onclick={move || {
+                        a.set(1);
+                        b.set(2);
+                    }} />
+                }
+            },
+            Size::MAX_CONTENT,
+        );
+        runtime
+            .dirty_flag()
+            .on_mark(move || wakes_in_waker.set(wakes_in_waker.get() + 1));
+        let button = runtime.geometry().0.roots()[0];
+
+        runtime.dispatch_click(button);
+
+        assert_eq!(
+            wakes.get(),
+            1,
+            "one click writing two signals must wake the host once, not twice"
+        );
     }
 }

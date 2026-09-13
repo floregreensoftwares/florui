@@ -25,15 +25,30 @@ impl DirtyFlag {
         }
     }
 
-    /// Sets the flag and, if a waker is registered, calls it immediately
-    /// — a host uses this to learn about a change the instant it happens
-    /// instead of only checking after specific events it already knew to
-    /// look at.
+    /// Sets the flag and, if a waker is registered, calls it — immediately,
+    /// unless a [`crate::batch`] is in progress, in which case the wake is
+    /// deferred until that batch finishes (see its module docs) so a host
+    /// isn't woken once per write inside one event.
     pub(crate) fn mark(&self) {
         self.inner.flag.set(true);
+        crate::batch::defer_or_fire(self);
+    }
+
+    /// Calls the registered waker, if any, unconditionally — used both by
+    /// [`Self::mark`]'s own immediate (non-batched) path and by
+    /// [`crate::batch`] once it's ready to flush a deferred wake.
+    pub(crate) fn fire_waker(&self) {
         if let Some(waker) = self.inner.waker.borrow().as_ref() {
             waker();
         }
+    }
+
+    /// Whether `self` and `other` are the same underlying flag (clones of
+    /// one another), not merely two flags that happen to agree on state —
+    /// used by [`crate::batch`] to dedupe repeated marks of the same flag
+    /// within one batch into a single deferred wake.
+    pub(crate) fn same_flag_as(&self, other: &Self) -> bool {
+        std::rc::Rc::ptr_eq(&self.inner, &other.inner)
     }
 
     /// Whether [`Self::mark`] has been called since the last [`Self::clear`].
