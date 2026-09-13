@@ -1,16 +1,16 @@
-//! Resolves declared values into used values for every node: matches
-//! rules, picks the winning declaration per property by (specificity,
-//! source order), then applies each property's own inheritance rule.
+//! The used-value types every other crate consumes — [`ComputedStyle`],
+//! [`Edges`] — and [`compute`], the entry point that resolves them for
+//! every node in a tree. The actual selector matching, cascade, and
+//! inheritance behind `compute` is Stylo's, in [`crate::stylo`]; this
+//! module owns the public shape, not the resolution logic.
 
 use std::collections::HashMap;
 
 use crate::color::Rgba;
 use crate::interaction::InteractionState;
-use crate::matching::matches_selector;
-use crate::selector::{Specificity, specificity_of};
 use crate::stylesheet_parse::Rule;
+use crate::stylo;
 use crate::tree::{Arena, NodeId};
-use crate::value::{Property, Value};
 
 /// One edge's value on each of the four sides of the box, in that order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,9 +25,12 @@ pub struct Edges<T> {
 pub struct ComputedStyle {
     pub background_color: Rgba,
     pub color: Rgba,
-    /// `None` means `auto`.
+    /// `None` means `auto` — or, since real CSS now parses here, any
+    /// value this crate can't yet resolve to a concrete pixel length
+    /// (a percentage, a `calc()`); see [`crate::stylo`]'s conversion
+    /// notes.
     pub width: Option<f32>,
-    /// `None` means `auto`.
+    /// `None` means `auto`; see [`Self::width`].
     pub height: Option<f32>,
     /// Each edge is `None` for an explicit `auto` (enabling the usual
     /// auto-margin centering behavior), `Some(0.0)` when nothing set it.
@@ -38,207 +41,14 @@ pub struct ComputedStyle {
     pub font_size: f32,
 }
 
+/// Resolves every node in `arena` against `rules` and `state` — real
+/// selector matching, cascade, and inheritance, via Stylo.
 pub fn compute(
     arena: &Arena,
     rules: &[Rule],
     state: &InteractionState,
 ) -> HashMap<NodeId, ComputedStyle> {
-    let mut result = HashMap::new();
-    for &root in arena.roots() {
-        compute_node(arena, rules, state, root, None, &mut result);
-    }
-    result
-}
-
-fn compute_node(
-    arena: &Arena,
-    rules: &[Rule],
-    state: &InteractionState,
-    node: NodeId,
-    parent: Option<&ComputedStyle>,
-    result: &mut HashMap<NodeId, ComputedStyle>,
-) {
-    let style = resolve_style(arena, rules, state, node, parent);
-    result.insert(node, style);
-    for &child in arena.children(node) {
-        compute_node(arena, rules, state, child, Some(&style), result);
-    }
-}
-
-fn resolve_style(
-    arena: &Arena,
-    rules: &[Rule],
-    state: &InteractionState,
-    node: NodeId,
-    parent: Option<&ComputedStyle>,
-) -> ComputedStyle {
-    let color = |property, initial, parent_value: fn(&ComputedStyle) -> Rgba| {
-        resolve(
-            arena,
-            rules,
-            state,
-            node,
-            parent,
-            property,
-            property.inherits(),
-            initial,
-            as_color,
-            parent_value,
-        )
-    };
-    let size = |property, parent_value: fn(&ComputedStyle) -> Option<f32>| {
-        resolve(
-            arena,
-            rules,
-            state,
-            node,
-            parent,
-            property,
-            false,
-            None,
-            as_optional_length,
-            parent_value,
-        )
-    };
-    let margin_edge = |property, parent_value: fn(&ComputedStyle) -> Option<f32>| {
-        resolve(
-            arena,
-            rules,
-            state,
-            node,
-            parent,
-            property,
-            false,
-            Some(0.0),
-            as_optional_length,
-            parent_value,
-        )
-    };
-    let padding_edge = |property, parent_value: fn(&ComputedStyle) -> f32| {
-        resolve(
-            arena,
-            rules,
-            state,
-            node,
-            parent,
-            property,
-            false,
-            0.0,
-            as_length,
-            parent_value,
-        )
-    };
-
-    ComputedStyle {
-        background_color: color(Property::BackgroundColor, Rgba::TRANSPARENT, |s| {
-            s.background_color
-        }),
-        color: color(Property::Color, Rgba::opaque(0, 0, 0), |s| s.color),
-        width: size(Property::Width, |s| s.width),
-        height: size(Property::Height, |s| s.height),
-        margin: Edges {
-            top: margin_edge(Property::MarginTop, |s| s.margin.top),
-            right: margin_edge(Property::MarginRight, |s| s.margin.right),
-            bottom: margin_edge(Property::MarginBottom, |s| s.margin.bottom),
-            left: margin_edge(Property::MarginLeft, |s| s.margin.left),
-        },
-        padding: Edges {
-            top: padding_edge(Property::PaddingTop, |s| s.padding.top),
-            right: padding_edge(Property::PaddingRight, |s| s.padding.right),
-            bottom: padding_edge(Property::PaddingBottom, |s| s.padding.bottom),
-            left: padding_edge(Property::PaddingLeft, |s| s.padding.left),
-        },
-        font_size: resolve(
-            arena,
-            rules,
-            state,
-            node,
-            parent,
-            Property::FontSize,
-            true,
-            16.0,
-            as_length,
-            |s| s.font_size,
-        ),
-    }
-}
-
-fn as_color(value: Value) -> Rgba {
-    match value {
-        Value::Color(color) => color,
-        other => unreachable!("a color property never resolves a non-color value: {other:?}"),
-    }
-}
-
-fn as_optional_length(value: Value) -> Option<f32> {
-    match value {
-        Value::Length(length) => Some(length),
-        Value::Auto => None,
-        other => unreachable!("a length-or-auto property never resolves {other:?}"),
-    }
-}
-
-fn as_length(value: Value) -> f32 {
-    match value {
-        Value::Length(length) => length,
-        other => unreachable!("a length-only property never resolves {other:?}"),
-    }
-}
-
-/// Resolves one property to its used value `T`: the winning declaration's
-/// value if any (honoring explicit `initial`/`inherit` keywords), else
-/// this property's own default (inherited from the parent, or `initial`).
-#[allow(clippy::too_many_arguments)]
-fn resolve<T: Copy>(
-    arena: &Arena,
-    rules: &[Rule],
-    state: &InteractionState,
-    node: NodeId,
-    parent: Option<&ComputedStyle>,
-    property: Property,
-    inherits_by_default: bool,
-    initial: T,
-    to_value: impl Fn(Value) -> T,
-    parent_value: impl Fn(&ComputedStyle) -> T,
-) -> T {
-    let inherited = || parent.map(&parent_value).unwrap_or(initial);
-    match winning_value(arena, rules, state, node, property) {
-        Some(Value::Initial) => initial,
-        Some(Value::Inherit) => inherited(),
-        Some(other) => to_value(other),
-        None if inherits_by_default => inherited(),
-        None => initial,
-    }
-}
-
-fn winning_value(
-    arena: &Arena,
-    rules: &[Rule],
-    state: &InteractionState,
-    node: NodeId,
-    property: Property,
-) -> Option<Value> {
-    let mut best: Option<(Specificity, usize, Value)> = None;
-    for rule in rules {
-        if !matches_selector(arena, node, &rule.selector, state) {
-            continue;
-        }
-        let specificity = specificity_of(&rule.selector);
-        for declaration in &rule.declarations {
-            if declaration.property != property {
-                continue;
-            }
-            let candidate_key = (specificity, rule.source_order);
-            let replace = match &best {
-                None => true,
-                Some((s, o, _)) => candidate_key >= (*s, *o),
-            };
-            if replace {
-                best = Some((specificity, rule.source_order, declaration.value));
-            }
-        }
-    }
-    best.map(|(_, _, value)| value)
+    stylo::compute(arena, rules, state)
 }
 
 #[cfg(test)]
@@ -474,5 +284,42 @@ mod tests {
         let (arena, computed) = styles(&tree, "", &InteractionState::new());
         let node = arena.roots()[0];
         assert_eq!(computed[&node].font_size, 16.0);
+    }
+
+    #[test]
+    fn descendant_combinator_matches_any_depth_not_just_direct_children() {
+        let tree: Element = view! {
+            <div class="card">
+                <div>
+                    <button>{"Go"}</button>
+                </div>
+            </div>
+        };
+        let (arena, computed) = styles(
+            &tree,
+            ".card button { background-color: #42734f; }",
+            &InteractionState::new(),
+        );
+        let button = arena.find(|a, id| a.tag(id) == "button").unwrap();
+        assert_eq!(
+            computed[&button].background_color,
+            Rgba::opaque(0x42, 0x73, 0x4f)
+        );
+    }
+
+    #[test]
+    fn descendant_combinator_requires_the_ancestor_to_exist() {
+        let tree: Element = view! {
+            <div>
+                <button>{"Go"}</button>
+            </div>
+        };
+        let (arena, computed) = styles(
+            &tree,
+            ".card button { background-color: #42734f; }",
+            &InteractionState::new(),
+        );
+        let button = arena.find(|a, id| a.tag(id) == "button").unwrap();
+        assert_eq!(computed[&button].background_color, Rgba::TRANSPARENT);
     }
 }
