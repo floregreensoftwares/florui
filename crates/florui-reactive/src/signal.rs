@@ -38,6 +38,19 @@ impl<T: Clone> Signal<T> {
     }
 }
 
+impl<T: Clone + 'static> Signal<T> {
+    /// The default [`crate::Binding`] adapter: reads this signal's current
+    /// value, and unconditionally writes back whatever value is
+    /// requested. An application that needs validation or controlled
+    /// acceptance builds a [`crate::Binding`] directly instead, with its
+    /// own `on_request` closure deciding whether — and with what — to
+    /// call [`Self::set`].
+    pub fn binding(&self) -> crate::binding::Binding<T> {
+        let signal = self.clone();
+        crate::binding::Binding::new(self.get(), move |value| signal.set(value))
+    }
+}
+
 impl<T> Signal<T> {
     /// Writes a new value immediately, then marks the owning
     /// [`Scope`](crate::Scope) dirty — deferred to wake its host only
@@ -131,6 +144,22 @@ mod tests {
             clone
         });
         assert_eq!(clone.get(), 9);
+    }
+
+    #[test]
+    fn binding_reads_the_signals_current_value_and_writes_through_on_request() {
+        let (scope, _dirty) = Scope::new();
+        let signal = scope.render(|| use_signal(|| "initial"));
+
+        let binding = signal.binding();
+        assert_eq!(binding.get(), "initial");
+
+        binding.request_update("updated");
+        assert_eq!(
+            signal.get(),
+            "updated",
+            "the default binding adapter must accept every request unconditionally"
+        );
     }
 
     #[test]

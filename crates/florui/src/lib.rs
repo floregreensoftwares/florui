@@ -10,7 +10,25 @@ mod stylesheets;
 
 pub use children::Children;
 pub use element::{Element, ElementNode};
-pub use florui_macros::{component, stylesheet, view};
+/// Named slots — a component's own typed, non-`children` props — are
+/// required at compile time exactly like any other prop: omitting one
+/// leaves the generated props struct literal incomplete.
+///
+/// ```compile_fail
+/// use florui::prelude::*;
+///
+/// #[component]
+/// fn Dialog(header: Element, body: Element) -> Element {
+///     view! { <div>{header}{body}</div> }
+/// }
+///
+/// fn missing_required_slot() -> Element {
+///     // `body` is required and not provided — must not compile.
+///     view! { <Dialog header={view! { <h1>{"Title"}</h1> }} /> }
+/// }
+/// ```
+pub use florui_macros::component;
+pub use florui_macros::{stylesheet, view};
 pub use florui_reactive as reactive;
 pub use handler::Handler;
 pub use into_nodes::IntoNodes;
@@ -18,10 +36,10 @@ pub use stylesheets::{StylesheetSource, dedup as dedup_stylesheets};
 
 pub mod prelude {
     pub use crate::reactive::{
-        Cleanup, ErrorBoundary, ErrorReporter, Executor, Key, Ref, Resource, ResourceHandle, Scope,
-        Signal, TrackedRead, error_boundary, loading_boundary, provide_context, render_once,
-        use_attachment, use_child_scope, use_child_scope_keyed, use_context, use_effect,
-        use_error_boundary, use_memo, use_ref, use_resource, use_signal,
+        Binding, Cleanup, ErrorBoundary, ErrorReporter, Executor, Key, Ref, Resource,
+        ResourceHandle, Scope, Signal, TrackedRead, error_boundary, loading_boundary,
+        provide_context, render_once, use_attachment, use_child_scope, use_child_scope_keyed,
+        use_context, use_effect, use_error_boundary, use_memo, use_ref, use_resource, use_signal,
     };
     pub use crate::{Children, Element, Handler, IntoNodes, component, stylesheet, view};
 }
