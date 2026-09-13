@@ -8,10 +8,12 @@
 //! same way [`crate::run`] does.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use florui::Element;
 use florui_layout::BoxLayout;
-use florui_reactive::{DirtyFlag, Scope};
+use florui_reactive::executor::{Executor, LocalExecutor};
+use florui_reactive::{DirtyFlag, Scope, provide_context};
 use florui_style::{Arena, ComputedStyle, InteractionState, NodeId, Rule, StyleError};
 use taffy::prelude::*;
 
@@ -25,6 +27,16 @@ pub struct UiRuntime {
     arena: Arena,
     styles: HashMap<NodeId, ComputedStyle>,
     layouts: HashMap<NodeId, BoxLayout>,
+    /// Reachable by [`florui_reactive::use_resource`] via context, provided
+    /// fresh every render the same way any other context value is. Advanced
+    /// once per [`Self::update`] so a fetch that's already resolvable (or
+    /// was woken by prior progress) commits without a host needing to know
+    /// that async work is involved at all. A background completion that
+    /// isn't woken by anything already driving another [`Self::update`]
+    /// (a real timer or I/O reactor, on a host whose event loop otherwise
+    /// only wakes for input) needs its own bridge from the executor's
+    /// waker to that event loop — not yet wired here.
+    executor: Rc<LocalExecutor>,
 }
 
 impl UiRuntime {
@@ -58,6 +70,7 @@ impl UiRuntime {
             arena: Arena::build(&Element::Fragment(Vec::new())),
             styles: HashMap::new(),
             layouts: HashMap::new(),
+            executor: Rc::new(LocalExecutor::new()),
         };
         runtime.update(viewport);
         runtime
@@ -76,7 +89,14 @@ impl UiRuntime {
     /// geometry for [`Self::geometry`]/[`Self::hit_test`] to answer
     /// without rendering again.
     pub fn update(&mut self, viewport: Size<AvailableSpace>) {
-        let tree = self.scope.render(|| (self.root)());
+        let executor = Rc::clone(&self.executor);
+        let tree = self.scope.render(|| {
+            provide_context(Rc::clone(&executor) as Rc<dyn Executor>);
+            (self.root)()
+        });
+        // Lets any resource the render just started (or a prior task's
+        // waker already requeued) make progress before this frame commits.
+        self.executor.run_until_stalled();
         self.arena = Arena::build(&tree);
         self.styles = florui_style::compute(&self.arena, &self.rules, &self.interaction);
         self.layouts = florui_layout::compute_layout(&self.arena, &self.styles, viewport)
@@ -131,5 +151,84 @@ impl UiRuntime {
 
     pub fn clear_dirty(&self) {
         self.dirty.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use florui::view;
+    use florui_reactive::testing::manual_future;
+    use florui_reactive::{Resource, use_resource};
+
+    use super::*;
+
+    fn viewport() -> Size<AvailableSpace> {
+        Size {
+            width: AvailableSpace::Definite(100.0),
+            height: AvailableSpace::Definite(100.0),
+        }
+    }
+
+    fn status_text(id: NodeId, runtime: &UiRuntime) -> String {
+        let (arena, ..) = runtime.geometry();
+        arena.text_content(id).to_string()
+    }
+
+    fn find_status(runtime: &UiRuntime) -> NodeId {
+        let (arena, ..) = runtime.geometry();
+        arena
+            .find(|arena, id| arena.id_attr(id) == Some("status"))
+            .expect("root always renders a #status node")
+    }
+
+    /// Proves `use_resource` works through a real [`UiRuntime`], not just
+    /// the raw `florui-reactive` hook in isolation: the `Executor` it
+    /// needs comes from context [`Self::update`] provides, and its
+    /// eventual `Ready` state reaches a real rendered tree.
+    #[test]
+    fn a_resource_resolves_through_a_real_update_cycle() {
+        let (future, resolver) = manual_future::<Result<i32, &'static str>>();
+        let future = Rc::new(RefCell::new(Some(future)));
+
+        let root = move || {
+            let future = Rc::clone(&future);
+            let resource = use_resource("key", move |_| {
+                future
+                    .borrow_mut()
+                    .take()
+                    .expect("the fetch only runs once for an unchanged key")
+            });
+            let text = match resource.get() {
+                Resource::Idle => "idle".to_string(),
+                Resource::Pending { .. } => "pending".to_string(),
+                Resource::Ready(value) => format!("ready:{value}"),
+                Resource::Failed { error, .. } => format!("failed:{error}"),
+            };
+            view! { <div id="status">{text}</div> }
+        };
+
+        let mut runtime = UiRuntime::with_rules(Vec::new(), root, viewport());
+        // The effect that starts the fetch runs after the first render
+        // commits, the same as any other mount effect — its `Signal::set`
+        // to `Pending` only shows up once something re-renders afterward.
+        assert!(runtime.is_dirty());
+        runtime.clear_dirty();
+        runtime.update(viewport());
+        let status = find_status(&runtime);
+        assert_eq!(status_text(status, &runtime), "pending");
+
+        resolver.resolve(Ok(42));
+        // This render's own snapshot still reads the pre-completion state:
+        // `update` advances the executor (committing `Ready`) only after
+        // building this render's tree, the same ordering that makes the
+        // initial `Pending` above take one extra render to show up too.
+        runtime.update(viewport());
+        assert!(runtime.is_dirty());
+        runtime.clear_dirty();
+        runtime.update(viewport());
+        let status = find_status(&runtime);
+        assert_eq!(status_text(status, &runtime), "ready:42");
     }
 }

@@ -1274,6 +1274,9 @@ version = "0.1.0"
 [[package]]
 name = "florui-reactive"
 version = "0.1.0"
+dependencies = [
+ "futures",
+]
 
 [[package]]
 name = "florui-style"
