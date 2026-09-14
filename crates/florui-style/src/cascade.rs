@@ -21,6 +21,25 @@ pub struct Edges<T> {
     pub left: T,
 }
 
+/// Which of this crate's two embedded font families to shape/measure text
+/// with — real CSS's own `font-family` is a whole comma-separated
+/// preference list of specific names and generics; this crate only
+/// distinguishes the one pair it actually has fonts for. A specific named
+/// family (`"Helvetica"`, `"Georgia"`) it can't back with an embedded font
+/// resolves to [`Self::SansSerif`], the same as an unspecified
+/// `font-family` — real CSS's own initial value is itself UA-dependent,
+/// and a browser's is typically a sans-serif system font (often Arial on
+/// Windows); this crate's stand-in for that default is its own embedded
+/// Open Sans, not a redistribution of Arial itself (proprietary, so this
+/// crate cannot embed it) and not metrically matched to it either — see
+/// `florui_text`'s own `fonts/NOTICE.md` for that tradeoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FontFamily {
+    #[default]
+    SansSerif,
+    Monospace,
+}
+
 /// A container's own layout algorithm. Only these two exist so far; grid is
 /// planned as its own later addition on top of this same field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -97,6 +116,9 @@ pub struct ComputedStyle {
     pub padding: Edges<f32>,
     /// Inherits; initial `16.0`.
     pub font_size: f32,
+    /// Inherits; initial [`FontFamily::SansSerif`]. See [`FontFamily`]'s
+    /// own doc for what "resolves to" means here.
+    pub font_family: FontFamily,
     /// This node's own layout algorithm, applied to *its children* — a
     /// leaf's `display` never affects how its own box is placed by its
     /// parent (that's [`Self::flex_grow`]/[`Self::flex_shrink`]/
@@ -568,5 +590,63 @@ mod tests {
         let node = arena.roots()[0];
         assert_eq!(computed[&node].column_gap, 0.0);
         assert_eq!(computed[&node].row_gap, 0.0);
+    }
+
+    #[test]
+    fn font_family_defaults_to_sans_serif() {
+        let tree: Element = view! { <div /> };
+        let (arena, computed) = styles(&tree, "", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].font_family, FontFamily::SansSerif);
+    }
+
+    #[test]
+    fn font_family_monospace_is_read_back_from_real_css() {
+        let tree: Element = view! { <div class="code" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".code { font-family: monospace; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].font_family, FontFamily::Monospace);
+    }
+
+    #[test]
+    fn font_family_named_falls_back_to_sans_serif() {
+        // This crate has no embedded font backing an arbitrary requested
+        // name — it must fall back to its own default rather than erroring
+        // or silently picking something else unpredictable.
+        let tree: Element = view! { <div class="fancy" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".fancy { font-family: Helvetica; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].font_family, FontFamily::SansSerif);
+    }
+
+    #[test]
+    fn font_family_inherits_but_an_explicit_value_overrides_it() {
+        let tree: Element = view! {
+            <div class="code">
+                <span>{"inherited"}</span>
+                <span class="prose">{"overridden"}</span>
+            </div>
+        };
+        let (arena, computed) = styles(
+            &tree,
+            ".code { font-family: monospace; } .prose { font-family: sans-serif; }",
+            &InteractionState::new(),
+        );
+        let code = arena.roots()[0];
+        assert_eq!(computed[&code].font_family, FontFamily::Monospace);
+
+        let mut spans = arena.children(code).iter().copied();
+        let inherited = spans.next().unwrap();
+        let overridden = spans.next().unwrap();
+        assert_eq!(computed[&inherited].font_family, FontFamily::Monospace);
+        assert_eq!(computed[&overridden].font_family, FontFamily::SansSerif);
     }
 }

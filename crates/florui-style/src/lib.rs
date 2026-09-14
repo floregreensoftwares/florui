@@ -39,8 +39,8 @@ mod stylo;
 mod tree;
 
 pub use cascade::{
-    ComputedStyle, ContentAlignment, Display, Edges, FlexDirection, FlexWrap, ItemAlignment,
-    compute,
+    ComputedStyle, ContentAlignment, Display, Edges, FlexDirection, FlexWrap, FontFamily,
+    ItemAlignment, compute,
 };
 pub use color::{ColorParseError, Rgba, parse_hex_color};
 pub use error::StyleError;

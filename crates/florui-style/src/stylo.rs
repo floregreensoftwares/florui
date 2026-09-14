@@ -50,7 +50,7 @@ use stylo_dom::ElementState;
 
 use crate::cascade::{
     ComputedStyle, ContentAlignment, Display as FlorDisplay, Edges, FlexDirection, FlexWrap,
-    ItemAlignment,
+    FontFamily as FlorFontFamily, ItemAlignment,
 };
 use crate::color::Rgba;
 use crate::interaction::InteractionState;
@@ -860,6 +860,7 @@ fn to_computed_style(values: &ComputedValues) -> ComputedStyle {
         flex_basis: to_flex_basis(&position.flex_basis),
         column_gap: to_gap(&position.column_gap),
         row_gap: to_gap(&position.row_gap),
+        font_family: to_font_family(&font.font_family),
     }
 }
 
@@ -973,6 +974,22 @@ fn to_gap(
             lp.0.to_length().map(|length| length.px()).unwrap_or(0.0)
         }
         GenericLengthPercentageOrNormal::Normal => 0.0,
+    }
+}
+
+/// Resolves real CSS's whole comma-separated `font-family` preference list
+/// down to the one distinction this crate's two embedded fonts actually
+/// support: this crate has no way to honor a specific requested name
+/// (`"Helvetica"`) or most other generics (`serif`, `cursive`, `fantasy`),
+/// so only a first-preference `monospace` resolves to
+/// [`FlorFontFamily::Monospace`] — everything else, including an empty
+/// list (real CSS's own initial value), falls back to
+/// [`FlorFontFamily::SansSerif`], this crate's stand-in default.
+fn to_font_family(value: &style::values::computed::font::FontFamily) -> FlorFontFamily {
+    use style::values::computed::font::{GenericFontFamily, SingleFontFamily};
+    match value.families.list.first() {
+        Some(SingleFontFamily::Generic(GenericFontFamily::Monospace)) => FlorFontFamily::Monospace,
+        _ => FlorFontFamily::SansSerif,
     }
 }
 

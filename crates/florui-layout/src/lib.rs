@@ -61,12 +61,20 @@ impl std::error::Error for LayoutError {
     }
 }
 
-/// The one embedded font this crate measures leaf text with — see
+/// A leaf's own text plus what's needed to measure it — see
 /// [`florui_text`]'s own scope notes for what "measure" does and doesn't
-/// cover yet (no rasterization, no wrapping, one font).
+/// cover yet (no rasterization).
 struct TextContext {
     text: String,
     font_size: f32,
+    font_family: florui_text::FontFamily,
+}
+
+fn to_text_font_family(value: florui_style::FontFamily) -> florui_text::FontFamily {
+    match value {
+        florui_style::FontFamily::SansSerif => florui_text::FontFamily::SansSerif,
+        florui_style::FontFamily::Monospace => florui_text::FontFamily::Monospace,
+    }
 }
 
 /// Computes block-layout geometry for every node in `arena`, using
@@ -98,6 +106,13 @@ pub fn compute_layout(
         )
         .map_err(LayoutError)?;
 
+    // Fresh every call, not cached across renders — a real app-registered
+    // extra font (`florui_text::Font::register`, e.g. for a script neither
+    // embedded font covers) has no way to reach this instance yet, since
+    // nothing here persists one across calls to register it on. Until that
+    // wiring exists, "font updates invalidate dependent layout" holds
+    // trivially at this layer: there is nothing long-lived here to go
+    // stale in the first place.
     let mut font = florui_text::Font::load_embedded();
     tree.compute_layout_with_measure(
         synthetic_root,
@@ -161,8 +176,10 @@ fn measure(
     });
 
     let metrics = match wrap_width {
-        Some(width) => font.measure_wrapped(&context.text, context.font_size, width),
-        None => font.measure(&context.text, context.font_size),
+        Some(width) => {
+            font.measure_wrapped(context.font_family, &context.text, context.font_size, width)
+        }
+        None => font.measure(context.font_family, &context.text, context.font_size),
     };
     Size {
         width: metrics.width,
@@ -186,11 +203,17 @@ fn build_node(
             tree.new_leaf(style)?
         } else {
             let font_size = styles.get(&node).map_or(16.0, |s| s.font_size);
+            let font_family = styles
+                .get(&node)
+                .map_or(florui_text::FontFamily::SansSerif, |s| {
+                    to_text_font_family(s.font_family)
+                });
             tree.new_leaf_with_context(
                 style,
                 TextContext {
                     text: text.to_string(),
                     font_size,
+                    font_family,
                 },
             )?
         }
@@ -531,7 +554,11 @@ mod tests {
         let (arena, layouts) = layout_for(&tree, "");
         let node = arena.roots()[0];
 
-        let expected = florui_text::Font::load_embedded().measure("Hi", 16.0);
+        let expected = florui_text::Font::load_embedded().measure(
+            florui_text::FontFamily::SansSerif,
+            "Hi",
+            16.0,
+        );
         assert_close(layouts[&node].width, expected.width);
         assert_close(layouts[&node].height, expected.height);
         assert!(expected.width > 0.0, "the font actually measured something");
@@ -552,7 +579,11 @@ mod tests {
         let (arena, layouts) = layout_for(&tree, ".big { font-size: 40px; }");
         let node = arena.roots()[0];
 
-        let expected = florui_text::Font::load_embedded().measure("Hi", 40.0);
+        let expected = florui_text::Font::load_embedded().measure(
+            florui_text::FontFamily::SansSerif,
+            "Hi",
+            40.0,
+        );
         assert_close(layouts[&node].width, expected.width);
         assert_close(layouts[&node].height, expected.height);
     }
@@ -602,7 +633,11 @@ mod tests {
         let card = arena.roots()[0];
         let span = arena.children(card)[0];
 
-        let expected = florui_text::Font::load_embedded().measure("Hi", 16.0);
+        let expected = florui_text::Font::load_embedded().measure(
+            florui_text::FontFamily::SansSerif,
+            "Hi",
+            16.0,
+        );
         assert_close(layouts[&span].width, expected.width);
         assert_close(layouts[&span].height, expected.height);
     }
@@ -833,7 +868,11 @@ mod tests {
         let h2 = arena.children(card)[0];
 
         let mut font = florui_text::Font::load_embedded();
-        let unwrapped = font.measure("one two three four five six seven eight nine ten", 16.0);
+        let unwrapped = font.measure(
+            florui_text::FontFamily::SansSerif,
+            "one two three four five six seven eight nine ten",
+            16.0,
+        );
 
         assert!(
             layouts[&h2].height > unwrapped.height,
@@ -852,7 +891,11 @@ mod tests {
         let node = arena.roots()[0];
 
         let mut font = florui_text::Font::load_embedded();
-        let unwrapped = font.measure("one two three four five", 16.0);
+        let unwrapped = font.measure(
+            florui_text::FontFamily::SansSerif,
+            "one two three four five",
+            16.0,
+        );
 
         assert_eq!(layouts[&node].width, 60.0, "the explicit width still wins");
         assert!(
@@ -872,7 +915,49 @@ mod tests {
         let card = arena.roots()[0];
         let h2 = arena.children(card)[0];
 
-        let expected = florui_text::Font::load_embedded().measure("Hi", 16.0);
+        let expected = florui_text::Font::load_embedded().measure(
+            florui_text::FontFamily::SansSerif,
+            "Hi",
+            16.0,
+        );
         assert_close(layouts[&h2].height, expected.height);
+    }
+
+    #[test]
+    fn font_family_monospace_measures_with_the_monospace_embedded_font() {
+        let tree: Element = view! { <span class="code">{"AAAAA"}</span> };
+        let (arena, layouts) = layout_for(&tree, ".code { font-family: monospace; }");
+        let node = arena.roots()[0];
+
+        let expected = florui_text::Font::load_embedded().measure(
+            florui_text::FontFamily::Monospace,
+            "AAAAA",
+            16.0,
+        );
+        assert_close(layouts[&node].width, expected.width);
+    }
+
+    #[test]
+    fn no_font_family_declared_measures_with_the_sans_serif_default() {
+        let tree: Element = view! { <span>{"AAAAA"}</span> };
+        let (arena, layouts) = layout_for(&tree, "");
+        let node = arena.roots()[0];
+
+        let sans_serif = florui_text::Font::load_embedded().measure(
+            florui_text::FontFamily::SansSerif,
+            "AAAAA",
+            16.0,
+        );
+        let monospace = florui_text::Font::load_embedded().measure(
+            florui_text::FontFamily::Monospace,
+            "AAAAA",
+            16.0,
+        );
+        assert_close(layouts[&node].width, sans_serif.width);
+        assert!(
+            (layouts[&node].width - monospace.width).abs() > 1.0,
+            "must actually be measuring with the proportional sans-serif default, \
+             not coincidentally matching the monospace width"
+        );
     }
 }
