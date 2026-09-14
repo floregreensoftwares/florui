@@ -25,13 +25,22 @@ impl Rule {
     }
 }
 
+/// Parses `css` as `Origin::Author` — every application/component
+/// stylesheet, always. [`crate::default_stylesheet`] is the only other
+/// caller of CSS parsing in this crate, and it needs a different origin
+/// (`Origin::UserAgent`), which is why the actual parsing logic lives in
+/// [`parse_stylesheet_with_origin`] instead of being inlined here.
 pub fn parse_stylesheet(css: &str) -> Result<Vec<Rule>, StyleError> {
+    parse_stylesheet_with_origin(css, Origin::Author).map(|rule| vec![rule])
+}
+
+pub(crate) fn parse_stylesheet_with_origin(css: &str, origin: Origin) -> Result<Rule, StyleError> {
     let lock = shared_lock();
     let url = url::Url::parse("about:florui").expect("a fixed, valid URL literal");
     let sheet = Stylesheet::from_str(
         css,
         url.into(),
-        Origin::Author,
+        origin,
         StyloArc::new(lock.wrap(MediaList::empty())),
         lock.clone(),
         None,
@@ -39,7 +48,7 @@ pub fn parse_stylesheet(css: &str) -> Result<Vec<Rule>, StyleError> {
         style::context::QuirksMode::NoQuirks,
         AllowImportRules::No,
     );
-    Ok(vec![Rule(StyloArc::new(sheet))])
+    Ok(Rule(StyloArc::new(sheet)))
 }
 
 #[cfg(test)]
