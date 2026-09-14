@@ -107,7 +107,9 @@ pub fn compute_layout(
                 inputs,
                 style,
                 |_, _| 0.0,
-                |_, _| measure(&mut font, context),
+                |known_dimensions, available_space| {
+                    measure(&mut font, context, known_dimensions, available_space)
+                },
             )
         },
     )
@@ -132,16 +134,39 @@ pub fn compute_layout(
 /// A leaf with no text measures at `0x0` — `compute_leaf_layout` only
 /// falls back to this for an axis that neither the node's own style nor
 /// its parent's known dimensions already settled.
-fn measure(font: &mut florui_text::Font, context: Option<&mut TextContext>) -> Size<f32> {
-    match context {
-        Some(context) => {
-            let metrics = font.measure(&context.text, context.font_size);
-            Size {
-                width: metrics.width,
-                height: metrics.height,
-            }
-        }
-        None => Size::ZERO,
+///
+/// Wraps when a width is actually known: either the node's own explicit
+/// style already resolved one (`known_dimensions.width`, e.g. a `width:
+/// 200px` on this very leaf), or the space it's being measured within is
+/// definite (`available_space.width`, e.g. a flex/block container with its
+/// own resolved width). Neither being true means this measurement is for
+/// an intrinsic/max-content size (nothing yet constrains this axis), where
+/// real CSS's own behavior is also unwrapped — there is nothing to wrap
+/// against. A genuine min-content query (the width of the single longest
+/// unbreakable word) isn't distinguished from that case yet; see
+/// `florui_text`'s own module docs for that tracked gap.
+fn measure(
+    font: &mut florui_text::Font,
+    context: Option<&mut TextContext>,
+    known_dimensions: Size<Option<f32>>,
+    available_space: Size<AvailableSpace>,
+) -> Size<f32> {
+    let Some(context) = context else {
+        return Size::ZERO;
+    };
+
+    let wrap_width = known_dimensions.width.or(match available_space.width {
+        AvailableSpace::Definite(width) => Some(width),
+        AvailableSpace::MinContent | AvailableSpace::MaxContent => None,
+    });
+
+    let metrics = match wrap_width {
+        Some(width) => font.measure_wrapped(&context.text, context.font_size, width),
+        None => font.measure(&context.text, context.font_size),
+    };
+    Size {
+        width: metrics.width,
+        height: metrics.height,
     }
 }
 
@@ -790,5 +815,64 @@ mod tests {
             layouts[&block_child].x, 0.0,
             "the flex row still positions its block-display child as a flex item"
         );
+    }
+
+    #[test]
+    fn text_wraps_and_grows_taller_inside_a_narrow_explicitly_sized_container() {
+        let tree: Element = view! {
+            <div class="card">
+                <h2>{"one two three four five six seven eight nine ten"}</h2>
+            </div>
+        };
+        // No explicit width on the h2 itself — it must still wrap, inheriting
+        // its available width from the block container's own resolved
+        // content width, the same as a real browser's default block
+        // formatting context.
+        let (arena, layouts) = layout_for(&tree, ".card { width: 100px; }");
+        let card = arena.roots()[0];
+        let h2 = arena.children(card)[0];
+
+        let mut font = florui_text::Font::load_embedded();
+        let unwrapped = font.measure("one two three four five six seven eight nine ten", 16.0);
+
+        assert!(
+            layouts[&h2].height > unwrapped.height,
+            "wrapping across a 100px container must take more than one line's height"
+        );
+        assert!(
+            layouts[&h2].width <= 100.0 + 1.0,
+            "a wrapped leaf must not exceed its container's own width"
+        );
+    }
+
+    #[test]
+    fn an_explicit_width_on_the_text_node_itself_also_wraps_it() {
+        let tree: Element = view! { <h2 class="narrow">{"one two three four five"}</h2> };
+        let (arena, layouts) = layout_for(&tree, ".narrow { width: 60px; }");
+        let node = arena.roots()[0];
+
+        let mut font = florui_text::Font::load_embedded();
+        let unwrapped = font.measure("one two three four five", 16.0);
+
+        assert_eq!(layouts[&node].width, 60.0, "the explicit width still wins");
+        assert!(
+            layouts[&node].height > unwrapped.height,
+            "an explicit width on the leaf itself must also trigger wrapping"
+        );
+    }
+
+    #[test]
+    fn a_wide_enough_container_does_not_wrap_short_text() {
+        let tree: Element = view! {
+            <div class="card">
+                <h2>{"Hi"}</h2>
+            </div>
+        };
+        let (arena, layouts) = layout_for(&tree, ".card { width: 400px; }");
+        let card = arena.roots()[0];
+        let h2 = arena.children(card)[0];
+
+        let expected = florui_text::Font::load_embedded().measure("Hi", 16.0);
+        assert_close(layouts[&h2].height, expected.height);
     }
 }

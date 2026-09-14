@@ -12,14 +12,20 @@
 //!
 //! One embedded font ([`EMBEDDED_FONT`], pinned deliberately — see
 //! `fonts/NOTICE.md` — rather than presuming font fallback support before
-//! it exists), one size, one plain unstyled run of text, measured
-//! unwrapped (no max-width, no line breaking, no multi-line, no rich/mixed
-//! styling within a run). [`measure`] answers exactly one question: how
-//! wide and tall is this text if nothing constrains its width.
-//! [`Font::shape`] answers a different question: which glyphs, from which
-//! font, at which pen positions — the input a rasterizer needs, without
-//! this crate doing any rasterizing itself. Actual wrapping at a given
-//! available width is a separate, not-yet-built concern.
+//! it exists), one size, one plain unstyled run of text. [`Font::measure`]/
+//! [`Font::shape`] answer their questions (respectively: how wide/tall:,
+//! and which glyphs at which pen positions) unwrapped, as a single line;
+//! [`Font::measure_wrapped`]/[`Font::shape_wrapped`] answer the same two
+//! questions wrapped at a given available width, real multi-line layout.
+//! `ShapedGlyph`'s `x`/`y` are already absolute within the whole shaped
+//! block regardless of which line a glyph landed on, so [`ShapedText`]
+//! needs no separate per-line type to support either case.
+//!
+//! Not addressed here: min-content sizing (the width of the single
+//! longest unbreakable word) — [`Font::measure_wrapped`] wraps at an
+//! explicit width or not at all, so a caller with only a min-content
+//! constraint (no definite width anywhere) still gets unwrapped
+//! measurement, which overstates how narrow the text could actually go.
 
 use std::sync::Arc;
 
@@ -124,37 +130,60 @@ impl Font {
     /// Measures `text` at `font_size`, as if nothing constrained its
     /// width: no wrapping, a single line.
     pub fn measure(&mut self, text: &str, font_size: f32) -> TextMetrics {
-        if text.is_empty() {
+        Self::metrics_of(self.layout_unwrapped(text, font_size))
+    }
+
+    /// Measures `text` at `font_size`, wrapping at `max_width` — real
+    /// multi-line layout. A single word wider than `max_width` still gets
+    /// its own (overflowing) line rather than being broken mid-word or
+    /// bleeding onto an adjacent line — Parley's own wrapping behavior,
+    /// matching real CSS's default `overflow-wrap: normal`.
+    pub fn measure_wrapped(&mut self, text: &str, font_size: f32, max_width: f32) -> TextMetrics {
+        Self::metrics_of(self.layout_wrapped(text, font_size, max_width))
+    }
+
+    fn metrics_of(layout: Option<parley::Layout<[u8; 4]>>) -> TextMetrics {
+        match layout {
             // Parley measures an empty string as zero-width but still
             // reports a nonzero line height; a truly empty run should not
             // claim to occupy a line it never lays out.
-            return TextMetrics {
+            None => TextMetrics {
                 width: 0.0,
                 height: 0.0,
-            };
-        }
-
-        let layout = self.layout(text, font_size);
-        TextMetrics {
-            width: layout.width(),
-            height: layout.height(),
+            },
+            Some(layout) => TextMetrics {
+                width: layout.width(),
+                height: layout.height(),
+            },
         }
     }
 
     /// Shapes `text` at `font_size` into paintable glyphs — same
-    /// unwrapped, single-line, single-run-per-font layout as [`measure`],
-    /// but exposing glyph ids and pen positions instead of just overall
-    /// width/height.
+    /// unwrapped, single-line layout as [`Self::measure`], but exposing
+    /// glyph ids and pen positions instead of just overall width/height.
     pub fn shape(&mut self, text: &str, font_size: f32) -> ShapedText {
-        if text.is_empty() {
+        Self::shaped_text_of(self.layout_unwrapped(text, font_size))
+    }
+
+    /// Shapes `text` at `font_size` into paintable glyphs, wrapped at
+    /// `max_width` — same wrapping behavior as [`Self::measure_wrapped`].
+    /// Every glyph's `x`/`y` stays absolute within the whole shaped block
+    /// (not line-relative), so a caller paints this exactly like an
+    /// unwrapped [`Self::shape`] result — later lines simply carry larger
+    /// `y` values, with no separate per-line structure to unpack.
+    pub fn shape_wrapped(&mut self, text: &str, font_size: f32, max_width: f32) -> ShapedText {
+        Self::shaped_text_of(self.layout_wrapped(text, font_size, max_width))
+    }
+
+    fn shaped_text_of(layout: Option<parley::Layout<[u8; 4]>>) -> ShapedText {
+        let Some(layout) = layout else {
             return ShapedText {
                 runs: Vec::new(),
                 width: 0.0,
                 height: 0.0,
             };
-        }
+        };
 
-        let layout = self.layout(text, font_size);
         let mut runs = Vec::new();
         for line in layout.lines() {
             for item in line.items() {
@@ -185,10 +214,35 @@ impl Font {
         }
     }
 
-    /// Builds and line-breaks (as a single unwrapped line) a Parley layout
-    /// for `text` at `font_size` — the scratch-state setup [`measure`] and
-    /// [`shape`] both need before reading anything back out of it.
-    fn layout(&mut self, text: &str, font_size: f32) -> parley::Layout<[u8; 4]> {
+    /// [`Self::layout_wrapped`] with no width constraint — a single
+    /// unwrapped line.
+    fn layout_unwrapped(&mut self, text: &str, font_size: f32) -> Option<parley::Layout<[u8; 4]>> {
+        self.build_layout(text, font_size, None)
+    }
+
+    /// Builds and line-breaks a Parley layout for `text` at `font_size`,
+    /// wrapped at `max_width` — the scratch-state setup every measure/shape
+    /// method needs before reading anything back out of it. `None` for
+    /// empty `text`, which Parley itself would otherwise still lay out as
+    /// one zero-width line with a nonzero line height.
+    fn layout_wrapped(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        max_width: f32,
+    ) -> Option<parley::Layout<[u8; 4]>> {
+        self.build_layout(text, font_size, Some(max_width))
+    }
+
+    fn build_layout(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        max_width: Option<f32>,
+    ) -> Option<parley::Layout<[u8; 4]>> {
+        if text.is_empty() {
+            return None;
+        }
         let mut builder = self
             .layout_cx
             .ranged_builder(&mut self.font_cx, text, 1.0, true);
@@ -197,8 +251,8 @@ impl Font {
             self.family_name.as_str(),
         )));
         let mut layout = builder.build(text);
-        layout.break_all_lines(None);
-        layout
+        layout.break_all_lines(max_width);
+        Some(layout)
     }
 }
 
@@ -307,5 +361,98 @@ mod tests {
         assert!(shaped.runs.is_empty());
         assert_eq!(shaped.width, 0.0);
         assert_eq!(shaped.height, 0.0);
+    }
+
+    #[test]
+    fn wrapping_at_a_width_that_fits_everything_matches_unwrapped_measurement() {
+        let mut font = Font::load_embedded();
+        let unwrapped = font.measure("one two three", 16.0);
+        let wrapped = font.measure_wrapped("one two three", 16.0, unwrapped.width + 1.0);
+        assert_eq!(wrapped.width, unwrapped.width);
+        assert_eq!(
+            wrapped.height, unwrapped.height,
+            "room for the whole line must not wrap it at all"
+        );
+    }
+
+    #[test]
+    fn wrapping_at_a_narrower_width_grows_the_height_and_shrinks_the_width() {
+        let mut font = Font::load_embedded();
+        let one_word = font.measure("aaaaa", 16.0);
+        let unwrapped = font.measure("aaaaa bbbbb ccccc", 16.0);
+
+        // Just wide enough for the widest single word, not the whole line —
+        // must wrap onto three lines, one per word.
+        let wrapped = font.measure_wrapped("aaaaa bbbbb ccccc", 16.0, one_word.width + 1.0);
+
+        assert!(
+            wrapped.width <= one_word.width + 1.0,
+            "no wrapped line should exceed the width it wrapped at"
+        );
+        assert_eq!(
+            wrapped.height,
+            one_word.height * 3.0,
+            "three words, one per line, at three times a single line's height"
+        );
+        assert!(wrapped.height > unwrapped.height);
+    }
+
+    #[test]
+    fn wrapping_never_breaks_a_single_word_even_when_narrower_than_the_max_width() {
+        // Real CSS's own default (`overflow-wrap: normal`): an unbreakable
+        // word wider than the container overflows it rather than being
+        // split mid-word.
+        let mut font = Font::load_embedded();
+        let word = font.measure("supercalifragilisticexpialidocious", 16.0);
+        let wrapped =
+            font.measure_wrapped("supercalifragilisticexpialidocious", 16.0, word.width / 2.0);
+        assert_eq!(
+            wrapped.width, word.width,
+            "the single unbreakable word must overflow the requested width, not be cut"
+        );
+        assert_eq!(wrapped.height, word.height, "still exactly one line");
+    }
+
+    #[test]
+    fn empty_text_wraps_to_zero() {
+        let mut font = Font::load_embedded();
+        let metrics = font.measure_wrapped("", 16.0, 100.0);
+        assert_eq!(
+            metrics,
+            TextMetrics {
+                width: 0.0,
+                height: 0.0
+            }
+        );
+    }
+
+    #[test]
+    fn shape_wrapped_keeps_every_glyph_and_spreads_them_across_lines() {
+        let mut font = Font::load_embedded();
+        let one_word = font.measure("aaaaa", 16.0);
+        let shaped = font.shape_wrapped("aaaaa bbbbb", 16.0, one_word.width + 1.0);
+
+        let total_glyphs: usize = shaped.runs.iter().map(|run| run.glyphs.len()).sum();
+        assert_eq!(
+            total_glyphs, 11,
+            "wrapping must not drop or duplicate any of the 10 letters or the \
+             space between the two words"
+        );
+
+        let first_y = shaped.runs[0].glyphs[0].y;
+        let last_run = shaped.runs.last().unwrap();
+        let last_y = last_run.glyphs.last().unwrap().y;
+        assert!(
+            last_y > first_y,
+            "a glyph on the second wrapped line must sit lower than one on the first"
+        );
+    }
+
+    #[test]
+    fn shape_wrapped_glyphs_on_the_same_line_share_a_y() {
+        let mut font = Font::load_embedded();
+        let shaped = font.shape_wrapped("aaaaa", 16.0, 1000.0);
+        let glyphs = &shaped.runs[0].glyphs;
+        assert_eq!(glyphs[0].y, glyphs[4].y, "one line, one shared baseline");
     }
 }
