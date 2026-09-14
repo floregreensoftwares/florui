@@ -131,6 +131,9 @@ fn paint_node(
         if !text.is_empty() {
             let color = style.map_or(Rgba::opaque(0, 0, 0), |s| s.color);
             let font_size = style.map_or(16.0, |s| s.font_size);
+            let font_family = style.map_or(florui_text::FontFamily::SansSerif, |s| {
+                to_text_font_family(s.font_family)
+            });
             let no_padding = florui_style::Edges {
                 top: 0.0,
                 right: 0.0,
@@ -151,6 +154,7 @@ fn paint_node(
                 TextPaint {
                     text,
                     font_size,
+                    font_family,
                     color,
                     x: x + padding.left,
                     y: y + padding.top,
@@ -189,22 +193,31 @@ fn fill_rect(buffer: &mut Canvas, x: f32, y: f32, width: f32, height: f32, color
 struct TextPaint<'a> {
     text: &'a str,
     font_size: f32,
+    font_family: florui_text::FontFamily,
     color: Rgba,
     x: f32,
     y: f32,
     wrap_width: f32,
 }
 
+fn to_text_font_family(value: florui_style::FontFamily) -> florui_text::FontFamily {
+    match value {
+        florui_style::FontFamily::SansSerif => florui_text::FontFamily::SansSerif,
+        florui_style::FontFamily::Monospace => florui_text::FontFamily::Monospace,
+    }
+}
+
 fn paint_text(buffer: &mut Canvas, font: &mut Font, params: TextPaint<'_>) {
     let TextPaint {
         text,
         font_size,
+        font_family,
         color,
         x,
         y,
         wrap_width,
     } = params;
-    let shaped = font.shape_wrapped(text, font_size, wrap_width);
+    let shaped = font.shape_wrapped(font_family, text, font_size, wrap_width);
     let mut builder = PathBuilder::new();
 
     for run in &shaped.runs {
