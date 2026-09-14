@@ -52,6 +52,10 @@ const CSS: &str = "
         border: 1px solid #767676;
     }
 
+    h1, h2, h3, h4, h5, h6 {
+        font-weight: bold;
+    }
+
     h1 { font-size: 2em; margin-top: 0.67em; margin-bottom: 0.67em; }
     h2 { font-size: 1.5em; margin-top: 0.83em; margin-bottom: 0.83em; }
     h3 { font-size: 1.17em; margin-top: 1em; margin-bottom: 1em; }
@@ -194,6 +198,7 @@ mod tests {
             let style = computed_style_of(markup);
             assert_eq!(style.display, Display::Block);
             assert_close(style.font_size, expected_font_size, "font-size");
+            assert_eq!(style.font_weight, 700.0, "h1-h6 are bold by default");
             assert_close(style.margin.top.unwrap(), expected_margin, "margin-top");
             assert_close(
                 style.margin.bottom.unwrap(),
@@ -201,6 +206,12 @@ mod tests {
                 "margin-bottom",
             );
         }
+    }
+
+    #[test]
+    fn p_and_div_are_not_bold_by_default() {
+        assert_eq!(computed_style_of(view! { <div /> }).font_weight, 400.0);
+        assert_eq!(computed_style_of(view! { <p /> }).font_weight, 400.0);
     }
 
     /// The actual point of `Origin::UserAgent`: an author rule overrides

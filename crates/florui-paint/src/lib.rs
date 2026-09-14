@@ -23,7 +23,7 @@ use std::path::Path;
 use florui_layout::{BoxLayout, absolute_position};
 use florui_style::{Arena, ComputedStyle, NodeId, Rgba};
 use florui_text::Font;
-use skrifa::instance::{LocationRef, Size as GlyphSize};
+use skrifa::instance::{LocationRef, NormalizedCoord, Size as GlyphSize};
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{FontRef, GlyphId, MetadataProvider};
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Rect, Transform};
@@ -188,6 +188,7 @@ fn paint_node(
             let text = arena.text_content(node);
             if !text.is_empty() {
                 let font_size = style.map_or(16.0, |s| s.font_size);
+                let font_weight = style.map_or(400.0, |s| s.font_weight);
                 let font_family = style.map_or(florui_text::FontFamily::SansSerif, |s| {
                     to_text_font_family(s.font_family)
                 });
@@ -197,6 +198,7 @@ fn paint_node(
                     TextPaint {
                         text,
                         font_size,
+                        font_weight,
                         font_family,
                         color,
                         x: content_x,
@@ -282,6 +284,7 @@ fn paint_border(
 struct TextPaint<'a> {
     text: &'a str,
     font_size: f32,
+    font_weight: f32,
     font_family: florui_text::FontFamily,
     color: Rgba,
     x: f32,
@@ -300,13 +303,14 @@ fn paint_text(buffer: &mut Canvas, font: &mut Font, params: TextPaint<'_>) {
     let TextPaint {
         text,
         font_size,
+        font_weight,
         font_family,
         color,
         x,
         y,
         wrap_width,
     } = params;
-    let shaped = font.shape_wrapped(font_family, text, font_size, wrap_width);
+    let shaped = font.shape_wrapped(font_family, text, font_size, font_weight, wrap_width);
     paint_shaped_runs(buffer, &shaped.runs, x, y, color);
 }
 
@@ -334,6 +338,16 @@ fn paint_shaped_runs(
         };
         let outlines = font_ref.outline_glyphs();
         let size = GlyphSize::new(run.font_size);
+        // Without this, every glyph draws at the font's default variable
+        // instance regardless of what was actually shaped — a bold run
+        // would measure wider (Parley resolves the wght axis correctly
+        // for layout) but paint no bolder at all.
+        let coords: Vec<NormalizedCoord> = run
+            .normalized_coords
+            .iter()
+            .map(|&bits| NormalizedCoord::from_bits(bits))
+            .collect();
+        let location = LocationRef::new(&coords);
 
         for glyph in &run.glyphs {
             let Some(outline) = outlines.get(GlyphId::new(glyph.id)) else {
@@ -344,7 +358,7 @@ fn paint_shaped_runs(
                 origin_x: x + glyph.x,
                 origin_y: y + glyph.y,
             };
-            let settings = DrawSettings::unhinted(size, LocationRef::default());
+            let settings = DrawSettings::unhinted(size, location);
             let _ = outline.draw(settings, &mut pen);
         }
     }
@@ -642,6 +656,54 @@ mod tests {
             }
         }
         assert!(found_ink, "expected at least one red glyph pixel");
+    }
+
+    #[test]
+    fn bold_paints_thicker_strokes_than_regular_at_the_same_size() {
+        // Real variation-coordinate rendering, not just wider layout
+        // metrics: bold's own glyph outlines must cover more ink pixels
+        // than regular's at the identical size — this is exactly the bug
+        // a size-only measurement test would miss (the width changed, but
+        // outlines still drew at the font's default instance).
+        fn ink_pixel_count(font_weight: &str) -> u32 {
+            let tree: Element = view! { <h2>{"H"}</h2> };
+            let css =
+                format!("h2 {{ color: #ff0000; font-size: 60px; font-weight: {font_weight}; }}");
+            let arena = Arena::build(&tree);
+            let rules = florui_style::parse_stylesheet(&css).unwrap();
+            let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+            let layouts =
+                florui_layout::compute_layout(&arena, &styles, Size::MAX_CONTENT).unwrap();
+
+            let node = arena.roots()[0];
+            let width = layouts[&node].width.ceil() as u32;
+            let height = layouts[&node].height.ceil() as u32;
+            let buffer = paint_to_buffer(
+                width,
+                height,
+                Rgba::opaque(0, 0, 0),
+                &arena,
+                &styles,
+                &layouts,
+            );
+
+            let mut count = 0;
+            for py in 0..height {
+                for px in 0..width {
+                    if pixel_rgb(&buffer, px, py)[0] > 0x20 {
+                        count += 1;
+                    }
+                }
+            }
+            count
+        }
+
+        let regular = ink_pixel_count("400");
+        let bold = ink_pixel_count("700");
+        assert!(
+            bold > regular,
+            "bold ({bold} ink pixels) must cover more area than regular ({regular})"
+        );
     }
 
     #[test]

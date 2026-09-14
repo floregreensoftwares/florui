@@ -155,6 +155,8 @@ pub struct ComputedStyle {
     /// Inherits; initial [`FontFamily::SansSerif`]. See [`FontFamily`]'s
     /// own doc for what "resolves to" means here.
     pub font_family: FontFamily,
+    /// Inherits; initial `400.0` (`normal`), CSS's numeric 1–1000 scale.
+    pub font_weight: f32,
     /// This node's own layout algorithm, applied to *its children* — a
     /// leaf's `display` never affects how its own box is placed by its
     /// parent (that's [`Self::flex_grow`]/[`Self::flex_shrink`]/
@@ -437,6 +439,21 @@ mod tests {
         let big = spans.next().unwrap();
         assert_eq!(computed[&plain].font_size, 24.0);
         assert_eq!(computed[&big].font_size, 32.0);
+    }
+
+    #[test]
+    fn font_weight_defaults_to_400_and_resolves_bold_from_real_css() {
+        let tree: Element = view! { <div class="bold" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".bold { font-weight: bold; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].font_weight, 700.0);
+
+        let (arena, computed) = styles(&tree, "", &InteractionState::new());
+        assert_eq!(computed[&arena.roots()[0]].font_weight, 400.0);
     }
 
     #[test]
