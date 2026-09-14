@@ -1,7 +1,10 @@
 //! Persistent local component state: [`use_signal`], [`use_memo`],
 //! [`use_context`], [`use_ref`], [`use_effect`], [`use_child_scope`]/
 //! [`use_child_scope_keyed`], and the [`Scope`] that gives them somewhere
-//! stable to live across repeated renders of the same tree.
+//! stable to live across repeated renders of the same tree. Also
+//! [`KeyedExtents`]/[`ScrollAnchor`]: keyed-measurement and scroll-anchor
+//! *contracts* for a future virtualized collection, not a virtualized
+//! collection itself.
 //!
 //! # Scope
 //!
@@ -41,6 +44,7 @@ mod scope;
 mod signal;
 pub mod testing;
 pub mod trace;
+mod virtualization;
 
 pub use attachment::use_attachment;
 pub use batch::batch;
@@ -57,3 +61,4 @@ pub use refs::{Ref, use_ref};
 pub use resource::{Resource, ResourceHandle, use_resource};
 pub use scope::{Scope, render_once, use_child_scope, use_child_scope_keyed};
 pub use signal::{Signal, use_signal};
+pub use virtualization::{Extent, KeyedExtents, ScrollAnchor};
