@@ -5,6 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+# Read by `florui dev` (see florui-cli's ResolvedProject) to know which
+# example to build and run when invoked from anywhere inside this package
+# with no --example override.
+[package.metadata.florui.dev]
+example = "counter"
+
 [lib]
 name = "florui_example_app"
 

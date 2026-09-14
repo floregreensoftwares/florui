@@ -28,21 +28,28 @@ struct Cli {
 enum Command {
     /// Generate a minimal compiling application.
     New { name: String },
-    /// Launch the native preview host and watch a CSS fixture for changes,
-    /// or, with `--example`, build and run a real cargo example instead,
-    /// restarting it whenever its Rust source changes. CSS reload for a
-    /// running example is that example's own concern (see
-    /// `florui_platform::run_with_css_reload`) — this only watches `.rs`
-    /// files and only ever loses state on a restart, which it always
-    /// reports explicitly, unlike a CSS-only reload.
+    /// Resolves the current project via `cargo metadata` (works from any
+    /// directory inside it, the same way `cargo build` does), builds and
+    /// runs the cargo example declared in its `Cargo.toml`
+    /// (`[package.metadata.florui.dev] example = "..."`), and restarts it
+    /// whenever its Rust source changes — with an explicit report that its
+    /// in-memory state was just reset, since a fresh process has none of
+    /// the old one's. CSS reload for that running example is its own
+    /// concern (see `florui_platform::run_with_css_reload`) — this only
+    /// watches `.rs` files.
+    ///
+    /// `--fixture` instead runs the original, more primitive engine-only
+    /// preview (one drawable rectangle driven directly by a CSS file, no
+    /// real components) that this loop bootstrapped from — still useful
+    /// for the conformance/geometry harness, but not a real project.
     Dev {
-        #[arg(long, default_value = "fixtures/dev/app.css")]
-        fixture: PathBuf,
-        /// Build and run this cargo example from the current directory's
-        /// package instead of the CSS-only fixture preview above. Must be
-        /// run from that package's own directory (the one containing its
-        /// `Cargo.toml`).
-        #[arg(long)]
+        /// Run the primitive CSS-fixture engine preview at this path
+        /// instead of resolving and running the current project.
+        #[arg(long, conflicts_with = "example")]
+        fixture: Option<PathBuf>,
+        /// Run this cargo example instead of the one declared in the
+        /// resolved project's `[package.metadata.florui.dev]`.
+        #[arg(long, conflicts_with = "fixture")]
         example: Option<String>,
     },
     /// Run the Cargo test suite plus the visual/geometry reference fixtures.
@@ -74,9 +81,9 @@ enum Command {
 
 fn main() -> ExitCode {
     match Cli::parse().command {
-        Command::Dev { fixture, example } => match example {
-            Some(example) => run_dev_example(example),
-            None => run_dev(fixture),
+        Command::Dev { fixture, example } => match fixture {
+            Some(fixture) => run_dev(fixture),
+            None => run_dev_example(example),
         },
         Command::New { name } => not_implemented(&format!("`florui new {name}`")),
         Command::Test => run_test(),
@@ -115,14 +122,34 @@ fn example_exe_path(target_dir: &Path, example: &str) -> PathBuf {
         .join(format!("{example}{}", std::env::consts::EXE_SUFFIX))
 }
 
-/// Asks cargo itself where it places build output, rather than assuming
-/// `./target` — a workspace member's own directory has no `target/` of its
-/// own at all; every member shares one at the *workspace* root, which only
-/// `cargo metadata` (or `CARGO_TARGET_DIR`, which it already accounts for)
-/// actually knows the location of.
-fn cargo_target_dir() -> Result<PathBuf, String> {
+/// What `florui dev` needs to know about the project it was invoked
+/// inside, entirely from `cargo metadata` — never an assumed `./target` or
+/// `.` for the package's own directory, since neither holds for a
+/// workspace member invoked from one of its own subdirectories (cargo's
+/// build output always lives at the *workspace* root, and the package
+/// resolved for `dev` is wherever cargo itself says the current directory
+/// belongs, not necessarily cwd itself).
+#[derive(Debug)]
+struct ResolvedProject {
+    /// The resolved package's own directory (`Cargo.toml`'s parent) — what
+    /// `dev` watches for `.rs` changes, regardless of which of its
+    /// subdirectories it was actually invoked from.
+    package_root: PathBuf,
+    /// Where `cargo build` places its output; shared by every workspace
+    /// member, so this is almost never `package_root`-relative.
+    target_dir: PathBuf,
+    /// From `[package.metadata.florui.dev] example = "..."` in the
+    /// resolved package's own `Cargo.toml`, if declared there.
+    default_example: Option<String>,
+}
+
+/// Asks cargo (via `cargo metadata`, not a hand-rolled directory walk) to
+/// resolve which package the current directory belongs to — the same
+/// resolution `cargo build`/`cargo run` already do from any of a package's
+/// subdirectories — and pulls this project's dev configuration out of it.
+fn resolve_project() -> Result<ResolvedProject, String> {
     let output = ChildCommand::new("cargo")
-        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .args(["metadata", "--format-version", "1"])
         .output()
         .map_err(|err| format!("could not run cargo metadata: {err}"))?;
     if !output.status.success() {
@@ -134,11 +161,62 @@ fn cargo_target_dir() -> Result<PathBuf, String> {
     }
     let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|err| format!("could not parse cargo metadata output: {err}"))?;
-    metadata
+    parse_resolved_project(&metadata)
+}
+
+/// The pure, JSON-in half of [`resolve_project`] — separated out so it can
+/// be tested against a hand-built payload without actually shelling out to
+/// cargo.
+fn parse_resolved_project(metadata: &serde_json::Value) -> Result<ResolvedProject, String> {
+    let target_dir = metadata
         .get("target_directory")
         .and_then(serde_json::Value::as_str)
         .map(PathBuf::from)
-        .ok_or_else(|| "cargo metadata output had no target_directory field".to_owned())
+        .ok_or_else(|| "cargo metadata output had no target_directory field".to_owned())?;
+
+    let root_id = metadata
+        .get("resolve")
+        .and_then(|resolve| resolve.get("root"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            "could not determine which package to run `florui dev` for — invoke it from \
+             inside a specific package's own directory, not the workspace root, or pass \
+             --fixture / --example explicitly"
+                .to_owned()
+        })?;
+
+    let package = metadata
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|package| package.get("id").and_then(serde_json::Value::as_str) == Some(root_id))
+        .ok_or_else(|| {
+            "cargo metadata's resolved package was not in its own packages list".to_owned()
+        })?;
+
+    let manifest_path = package
+        .get("manifest_path")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "cargo metadata's package entry had no manifest_path".to_owned())?;
+    let package_root = Path::new(manifest_path)
+        .parent()
+        .ok_or_else(|| format!("{manifest_path} has no parent directory"))?
+        .to_owned();
+
+    let default_example = package
+        .get("metadata")
+        .and_then(|metadata| metadata.get("florui"))
+        .and_then(|florui| florui.get("dev"))
+        .and_then(|dev| dev.get("example"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+
+    Ok(ResolvedProject {
+        package_root,
+        target_dir,
+        default_example,
+    })
 }
 
 /// Runs `cargo build --example <example>`, inheriting stdio so cargo's own
@@ -194,10 +272,13 @@ fn exit_code_from_status(status: ExitStatus) -> ExitCode {
     }
 }
 
-/// Builds and runs `example` from the current directory's package,
-/// restarting it — with an explicit report that its in-memory state was
-/// just reset, since a fresh process has none of the old one's — whenever
-/// a `.rs` file under its `src`/`examples` changes. A build that fails
+/// Resolves the current project (see [`resolve_project`]) and builds and
+/// runs its declared example — `example_override`, if given, takes
+/// precedence over `[package.metadata.florui.dev]` the same way `cargo run
+/// --example` overrides a crate's own `default-run` — restarting it with
+/// an explicit report that its in-memory state was just reset, since a
+/// fresh process has none of the old one's, whenever a `.rs` file under
+/// the resolved package's `src`/`examples` changes. A build that fails
 /// leaves whichever version last built successfully running untouched, the
 /// same "stale but working, plus an actionable diagnostic" recovery
 /// contract the CSS-fixture preview already established; cargo's own
@@ -206,16 +287,23 @@ fn exit_code_from_status(status: ExitStatus) -> ExitCode {
 ///
 /// Exits once the running example's own window closes on its own (not as
 /// a result of a restart this loop performed), returning its exit code.
-fn run_dev_example(example: String) -> ExitCode {
-    let package_root = match std::env::current_dir() {
-        Ok(dir) => dir,
-        Err(err) => return fail(format!("could not read the current directory: {err}")),
-    };
-    let target_dir = match cargo_target_dir() {
-        Ok(dir) => dir,
+fn run_dev_example(example_override: Option<String>) -> ExitCode {
+    let project = match resolve_project() {
+        Ok(project) => project,
         Err(err) => return fail(err),
     };
-    let exe_path = example_exe_path(&target_dir, &example);
+    let example = match example_override.or(project.default_example) {
+        Some(example) => example,
+        None => {
+            return fail(
+                "no dev entry point configured for this package — add\n\n    \
+                 [package.metadata.florui.dev]\n    example = \"<name>\"\n\n\
+                 to its Cargo.toml, or pass --example <name> explicitly",
+            );
+        }
+    };
+    let package_root = project.package_root;
+    let exe_path = example_exe_path(&project.target_dir, &example);
 
     println!(
         "{}",
@@ -826,5 +914,69 @@ mod tests {
             .status()
             .expect("a trivial command should always be spawnable");
         assert_eq!(exit_code_from_status(status), ExitCode::FAILURE);
+    }
+
+    /// A `cargo metadata` payload shaped like the real thing, but reduced
+    /// to only the fields `parse_resolved_project` reads — resolving to
+    /// `root_id`, whose own `metadata.florui.dev.example`, if given, is
+    /// `dev_example`.
+    fn metadata_with(root_id: &str, dev_example: Option<&str>) -> serde_json::Value {
+        let metadata = match dev_example {
+            Some(example) => serde_json::json!({"florui": {"dev": {"example": example}}}),
+            None => serde_json::json!({}),
+        };
+        serde_json::json!({
+            "target_directory": "/workspace/target",
+            "resolve": {"root": root_id},
+            "packages": [
+                {
+                    "id": "path+file:///workspace/other#0.1.0",
+                    "manifest_path": "/workspace/other/Cargo.toml",
+                    "metadata": null,
+                },
+                {
+                    "id": root_id,
+                    "manifest_path": "/workspace/app/Cargo.toml",
+                    "metadata": metadata,
+                },
+            ],
+        })
+    }
+
+    #[test]
+    fn parse_resolved_project_reads_the_root_packages_own_dev_example() {
+        let metadata = metadata_with("path+file:///workspace/app#0.1.0", Some("counter"));
+        let project = parse_resolved_project(&metadata).expect("this payload should resolve");
+        assert_eq!(project.package_root, Path::new("/workspace/app"));
+        assert_eq!(project.target_dir, Path::new("/workspace/target"));
+        assert_eq!(project.default_example.as_deref(), Some("counter"));
+    }
+
+    #[test]
+    fn parse_resolved_project_leaves_default_example_none_when_undeclared() {
+        let metadata = metadata_with("path+file:///workspace/app#0.1.0", None);
+        let project = parse_resolved_project(&metadata).expect("this payload should resolve");
+        assert_eq!(
+            project.default_example, None,
+            "an undeclared [package.metadata.florui.dev] must not be treated as an error — \
+             only as \"no default,\" letting --example still override it"
+        );
+    }
+
+    #[test]
+    fn parse_resolved_project_fails_with_no_resolve_root() {
+        // What a virtual workspace root (no [package] of its own) actually
+        // produces — invoking `florui dev` there must fail with an
+        // actionable message, not panic or silently pick some package.
+        let metadata = serde_json::json!({
+            "target_directory": "/workspace/target",
+            "resolve": {"root": null},
+            "packages": [],
+        });
+        let error = parse_resolved_project(&metadata).unwrap_err();
+        assert!(
+            error.contains("--fixture") && error.contains("--example"),
+            "the error should point at both escape hatches, got: {error}"
+        );
     }
 }
