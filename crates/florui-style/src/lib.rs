@@ -32,6 +32,7 @@
 
 mod cascade;
 mod color;
+mod default_stylesheet;
 mod error;
 mod interaction;
 mod stylesheet_parse;

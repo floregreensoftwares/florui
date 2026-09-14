@@ -773,6 +773,12 @@ fn compute_in_layout_state(
 
     let mut stylist = Stylist::new(device(), QuirksMode::NoQuirks);
     let lock = shared_lock();
+    // The framework's own default element stylesheet first, under
+    // Origin::UserAgent — Stylo's real cascade-origin precedence means an
+    // application rule below overrides it regardless of specificity or
+    // this registration order, the same as a real browser's UA stylesheet.
+    let default_rule = crate::default_stylesheet::rule();
+    stylist.append_stylesheet(DocumentStyleSheet(default_rule.stylesheet()), &lock.read());
     for rule in rules {
         stylist.append_stylesheet(DocumentStyleSheet(rule.stylesheet()), &lock.read());
     }

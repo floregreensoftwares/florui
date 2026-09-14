@@ -576,10 +576,13 @@ mod tests {
         let (arena, layouts) = layout_for(&tree, "");
         let node = arena.roots()[0];
 
+        // h2's real font-size is 24px (1.5em) by default — the framework's
+        // own default element stylesheet, not the bare 16px initial value
+        // an unstyled element with no matching default rule would get.
         let expected = florui_text::Font::load_embedded().measure(
             florui_text::FontFamily::SansSerif,
             "Hi",
-            16.0,
+            24.0,
         );
         assert_close(layouts[&node].width, expected.width);
         assert_close(layouts[&node].height, expected.height);
@@ -662,6 +665,117 @@ mod tests {
         );
         assert_close(layouts[&span].width, expected.width);
         assert_close(layouts[&span].height, expected.height);
+    }
+
+    #[test]
+    fn text_wraps_and_grows_taller_inside_a_narrow_explicitly_sized_container() {
+        let tree: Element = view! {
+            <div class="card">
+                <h2>{"one two three four five six seven eight nine ten"}</h2>
+            </div>
+        };
+        // No explicit width on the h2 itself — it must still wrap, inheriting
+        // its available width from the block container's own resolved
+        // content width, the same as a real browser's default block
+        // formatting context.
+        let (arena, layouts) = layout_for(&tree, ".card { width: 100px; }");
+        let card = arena.roots()[0];
+        let h2 = arena.children(card)[0];
+
+        let mut font = florui_text::Font::load_embedded();
+        let unwrapped = font.measure(
+            florui_text::FontFamily::SansSerif,
+            "one two three four five six seven eight nine ten",
+            16.0,
+        );
+
+        assert!(
+            layouts[&h2].height > unwrapped.height,
+            "wrapping across a 100px container must take more than one line's height"
+        );
+        assert!(
+            layouts[&h2].width <= 100.0 + 1.0,
+            "a wrapped leaf must not exceed its container's own width"
+        );
+    }
+
+    #[test]
+    fn an_explicit_width_on_the_text_node_itself_also_wraps_it() {
+        let tree: Element = view! { <h2 class="narrow">{"one two three four five"}</h2> };
+        let (arena, layouts) = layout_for(&tree, ".narrow { width: 60px; }");
+        let node = arena.roots()[0];
+
+        let mut font = florui_text::Font::load_embedded();
+        let unwrapped = font.measure(
+            florui_text::FontFamily::SansSerif,
+            "one two three four five",
+            16.0,
+        );
+
+        assert_eq!(layouts[&node].width, 60.0, "the explicit width still wins");
+        assert!(
+            layouts[&node].height > unwrapped.height,
+            "an explicit width on the leaf itself must also trigger wrapping"
+        );
+    }
+
+    #[test]
+    fn a_wide_enough_container_does_not_wrap_short_text() {
+        let tree: Element = view! {
+            <div class="card">
+                <h2>{"Hi"}</h2>
+            </div>
+        };
+        let (arena, layouts) = layout_for(&tree, ".card { width: 400px; }");
+        let card = arena.roots()[0];
+        let h2 = arena.children(card)[0];
+
+        // h2's default font-size is 24px (1.5em) — see the identical note
+        // on `a_text_bearing_leaf_with_no_explicit_size_gets_its_measured_intrinsic_size`.
+        let expected = florui_text::Font::load_embedded().measure(
+            florui_text::FontFamily::SansSerif,
+            "Hi",
+            24.0,
+        );
+        assert_close(layouts[&h2].height, expected.height);
+    }
+
+    #[test]
+    fn font_family_monospace_measures_with_the_monospace_embedded_font() {
+        let tree: Element = view! { <span class="code">{"AAAAA"}</span> };
+        let (arena, layouts) = layout_for(&tree, ".code { font-family: monospace; }");
+        let node = arena.roots()[0];
+
+        let expected = florui_text::Font::load_embedded().measure(
+            florui_text::FontFamily::Monospace,
+            "AAAAA",
+            16.0,
+        );
+        assert_close(layouts[&node].width, expected.width);
+    }
+
+    #[test]
+    fn no_font_family_declared_measures_with_the_sans_serif_default() {
+        let tree: Element = view! { <span>{"AAAAA"}</span> };
+        let (arena, layouts) = layout_for(&tree, "");
+        let node = arena.roots()[0];
+
+        let sans_serif = florui_text::Font::load_embedded().measure(
+            florui_text::FontFamily::SansSerif,
+            "AAAAA",
+            16.0,
+        );
+        let monospace = florui_text::Font::load_embedded().measure(
+            florui_text::FontFamily::Monospace,
+            "AAAAA",
+            16.0,
+        );
+        assert_close(layouts[&node].width, sans_serif.width);
+        assert!(
+            (layouts[&node].width - monospace.width).abs() > 1.0,
+            "must actually be measuring with the proportional sans-serif default, \
+             not coincidentally matching the monospace width"
+        );
     }
 
     #[test]
@@ -871,115 +985,6 @@ mod tests {
         assert_eq!(
             layouts[&block_child].x, 0.0,
             "the flex row still positions its block-display child as a flex item"
-        );
-    }
-
-    #[test]
-    fn text_wraps_and_grows_taller_inside_a_narrow_explicitly_sized_container() {
-        let tree: Element = view! {
-            <div class="card">
-                <h2>{"one two three four five six seven eight nine ten"}</h2>
-            </div>
-        };
-        // No explicit width on the h2 itself — it must still wrap, inheriting
-        // its available width from the block container's own resolved
-        // content width, the same as a real browser's default block
-        // formatting context.
-        let (arena, layouts) = layout_for(&tree, ".card { width: 100px; }");
-        let card = arena.roots()[0];
-        let h2 = arena.children(card)[0];
-
-        let mut font = florui_text::Font::load_embedded();
-        let unwrapped = font.measure(
-            florui_text::FontFamily::SansSerif,
-            "one two three four five six seven eight nine ten",
-            16.0,
-        );
-
-        assert!(
-            layouts[&h2].height > unwrapped.height,
-            "wrapping across a 100px container must take more than one line's height"
-        );
-        assert!(
-            layouts[&h2].width <= 100.0 + 1.0,
-            "a wrapped leaf must not exceed its container's own width"
-        );
-    }
-
-    #[test]
-    fn an_explicit_width_on_the_text_node_itself_also_wraps_it() {
-        let tree: Element = view! { <h2 class="narrow">{"one two three four five"}</h2> };
-        let (arena, layouts) = layout_for(&tree, ".narrow { width: 60px; }");
-        let node = arena.roots()[0];
-
-        let mut font = florui_text::Font::load_embedded();
-        let unwrapped = font.measure(
-            florui_text::FontFamily::SansSerif,
-            "one two three four five",
-            16.0,
-        );
-
-        assert_eq!(layouts[&node].width, 60.0, "the explicit width still wins");
-        assert!(
-            layouts[&node].height > unwrapped.height,
-            "an explicit width on the leaf itself must also trigger wrapping"
-        );
-    }
-
-    #[test]
-    fn a_wide_enough_container_does_not_wrap_short_text() {
-        let tree: Element = view! {
-            <div class="card">
-                <h2>{"Hi"}</h2>
-            </div>
-        };
-        let (arena, layouts) = layout_for(&tree, ".card { width: 400px; }");
-        let card = arena.roots()[0];
-        let h2 = arena.children(card)[0];
-
-        let expected = florui_text::Font::load_embedded().measure(
-            florui_text::FontFamily::SansSerif,
-            "Hi",
-            16.0,
-        );
-        assert_close(layouts[&h2].height, expected.height);
-    }
-
-    #[test]
-    fn font_family_monospace_measures_with_the_monospace_embedded_font() {
-        let tree: Element = view! { <span class="code">{"AAAAA"}</span> };
-        let (arena, layouts) = layout_for(&tree, ".code { font-family: monospace; }");
-        let node = arena.roots()[0];
-
-        let expected = florui_text::Font::load_embedded().measure(
-            florui_text::FontFamily::Monospace,
-            "AAAAA",
-            16.0,
-        );
-        assert_close(layouts[&node].width, expected.width);
-    }
-
-    #[test]
-    fn no_font_family_declared_measures_with_the_sans_serif_default() {
-        let tree: Element = view! { <span>{"AAAAA"}</span> };
-        let (arena, layouts) = layout_for(&tree, "");
-        let node = arena.roots()[0];
-
-        let sans_serif = florui_text::Font::load_embedded().measure(
-            florui_text::FontFamily::SansSerif,
-            "AAAAA",
-            16.0,
-        );
-        let monospace = florui_text::Font::load_embedded().measure(
-            florui_text::FontFamily::Monospace,
-            "AAAAA",
-            16.0,
-        );
-        assert_close(layouts[&node].width, sans_serif.width);
-        assert!(
-            (layouts[&node].width - monospace.width).abs() > 1.0,
-            "must actually be measuring with the proportional sans-serif default, \
-             not coincidentally matching the monospace width"
         );
     }
 
