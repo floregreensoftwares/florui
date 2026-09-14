@@ -665,6 +665,17 @@ fn to_taffy_style(style: Option<&ComputedStyle>) -> taffy::Style {
             top: LengthPercentage::length(style.padding.top),
             bottom: LengthPercentage::length(style.padding.bottom),
         },
+        // Content-box math already distinguishes padding from an explicit
+        // size (see this function's own `box_sizing` note above); border
+        // gets the same treatment — a `border-width` adds to a declared
+        // width/height rather than being carved out of it, real CSS's
+        // content-box default for both.
+        border: Rect {
+            left: LengthPercentage::length(style.border.left.width),
+            right: LengthPercentage::length(style.border.right.width),
+            top: LengthPercentage::length(style.border.top.width),
+            bottom: LengthPercentage::length(style.border.bottom.width),
+        },
         ..Default::default()
     }
 }
@@ -881,6 +892,48 @@ mod tests {
         assert_eq!(layouts[&child].x, 13.0, "padding-left 8 + margin-left 5");
         assert_eq!(layouts[&child].y, 18.0, "padding-top 8 + margin-top 10");
         assert_eq!(layouts[&child].width, 50.0);
+    }
+
+    #[test]
+    fn border_adds_to_an_explicit_size_the_same_way_padding_does() {
+        let tree: Element = view! { <div class="card" /> };
+        let (arena, layouts) = layout_for(
+            &tree,
+            ".card { width: 200px; height: 100px; border-top-width: 3px; \
+             border-top-style: solid; border-left-width: 4px; border-left-style: solid; }",
+        );
+        let node = arena.roots()[0];
+        assert_eq!(
+            layouts[&node].width, 204.0,
+            "200 declared content width + 4px border-left"
+        );
+        assert_eq!(
+            layouts[&node].height, 103.0,
+            "100 declared content height + 3px border-top"
+        );
+    }
+
+    #[test]
+    fn border_and_padding_both_offset_a_childs_position_the_same_way() {
+        let tree: Element = view! {
+            <div class="card">
+                <div class="child" />
+            </div>
+        };
+        let (arena, layouts) = layout_for(
+            &tree,
+            "
+            .card { width: 200px; height: 100px; padding-top: 8px; padding-left: 8px; \
+             border-top-width: 3px; border-top-style: solid; \
+             border-left-width: 4px; border-left-style: solid; }
+            .child { width: 50px; height: 30px; }
+            ",
+        );
+        let card = arena.roots()[0];
+        let child = arena.children(card)[0];
+
+        assert_eq!(layouts[&child].x, 12.0, "border-left 4 + padding-left 8");
+        assert_eq!(layouts[&child].y, 11.0, "border-top 3 + padding-top 8");
     }
 
     #[test]

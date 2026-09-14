@@ -49,8 +49,8 @@ use stylo_atoms::Atom as WeakAtom;
 use stylo_dom::ElementState;
 
 use crate::cascade::{
-    ComputedStyle, ContentAlignment, Display as FlorDisplay, Edges, FlexDirection, FlexWrap,
-    FontFamily as FlorFontFamily, ItemAlignment,
+    BorderSide as FlorBorderSide, ComputedStyle, ContentAlignment, Display as FlorDisplay, Edges,
+    FlexDirection, FlexWrap, FontFamily as FlorFontFamily, ItemAlignment,
 };
 use crate::color::Rgba;
 use crate::interaction::InteractionState;
@@ -825,11 +825,13 @@ fn to_computed_style(values: &ComputedValues) -> ComputedStyle {
     let font = values.get_font();
     let margin = values.get_margin();
     let padding = values.get_padding();
+    let border = values.get_border();
 
     // `color`'s own computed value is always already-resolved (real CSS
     // never leaves it as `currentcolor`); resolving it first lets
-    // `background-color`'s possible `currentcolor` reference resolve
-    // against it, rather than an arbitrary fallback.
+    // `background-color`'s (and `border-*-color`'s) possible
+    // `currentcolor` reference resolve against it, rather than an
+    // arbitrary fallback.
     let color = to_absolute_rgba(&text.color);
 
     ComputedStyle {
@@ -867,6 +869,59 @@ fn to_computed_style(values: &ComputedValues) -> ComputedStyle {
         column_gap: to_gap(&position.column_gap),
         row_gap: to_gap(&position.row_gap),
         font_family: to_font_family(&font.font_family),
+        border: Edges {
+            top: to_border_side(
+                border.border_top_style,
+                border.border_top_width,
+                &border.border_top_color,
+                color,
+            ),
+            right: to_border_side(
+                border.border_right_style,
+                border.border_right_width,
+                &border.border_right_color,
+                color,
+            ),
+            bottom: to_border_side(
+                border.border_bottom_style,
+                border.border_bottom_width,
+                &border.border_bottom_color,
+                color,
+            ),
+            left: to_border_side(
+                border.border_left_style,
+                border.border_left_width,
+                &border.border_left_color,
+                color,
+            ),
+        },
+    }
+}
+
+/// One border side: `0.0` width for `none`/`hidden` (real CSS's initial
+/// style, which makes a border invisible regardless of its width/color —
+/// see [`FlorBorderSide`]'s own doc), a solid-only rendering treatment for
+/// every other style. `currentcolor` resolves against `inherited_color`
+/// (this element's own already-resolved `color`), the same fallback
+/// `background-color` already uses.
+fn to_border_side(
+    style: style::values::computed::BorderStyle,
+    width: app_units::Au,
+    color: &style::values::computed::Color,
+    inherited_color: Rgba,
+) -> FlorBorderSide {
+    if style.none_or_hidden() {
+        return FlorBorderSide {
+            width: 0.0,
+            color: inherited_color,
+        };
+    }
+    FlorBorderSide {
+        width: width.to_f32_px(),
+        color: color
+            .as_absolute()
+            .map(to_absolute_rgba)
+            .unwrap_or(inherited_color),
     }
 }
 
