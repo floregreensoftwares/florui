@@ -15,3 +15,8 @@ taffy = "0.14"
 
 [dev-dependencies]
 florui = { path = "../florui" }
+criterion = "0.5"
+
+[[bench]]
+name = "layout"
+harness = false
