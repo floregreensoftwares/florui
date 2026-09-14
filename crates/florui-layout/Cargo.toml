@@ -12,6 +12,7 @@ name = "florui_layout"
 florui-style = { path = "../florui-style" }
 florui-text = { path = "../florui-text" }
 taffy = "0.14"
+stacker = "0.1"
 
 [dev-dependencies]
 florui = { path = "../florui" }

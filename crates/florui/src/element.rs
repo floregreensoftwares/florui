@@ -49,3 +49,25 @@ impl Element {
         Element::Text(text.into())
     }
 }
+
+/// Without this, dropping `Element` recurses once per tree level (the
+/// compiler-generated default), which overflows the stack for a deep
+/// enough tree. An explicit stack instead: each node's own children are
+/// moved out before it drops, so its default per-field drop has nothing
+/// left to recurse into.
+impl Drop for Element {
+    fn drop(&mut self) {
+        let mut pending: Vec<Element> = match self {
+            Element::Node(node) => std::mem::take(&mut node.children),
+            Element::Fragment(children) => std::mem::take(children),
+            Element::Text(_) => return,
+        };
+        while let Some(mut element) = pending.pop() {
+            match &mut element {
+                Element::Node(node) => pending.extend(std::mem::take(&mut node.children)),
+                Element::Fragment(children) => pending.extend(std::mem::take(children)),
+                Element::Text(_) => {}
+            }
+        }
+    }
+}

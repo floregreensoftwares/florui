@@ -5,7 +5,7 @@
 //! that view once, up front, rather than threading parent references
 //! through `Element` itself.
 
-use florui::{Element, ElementNode, Handler};
+use florui::{Element, Handler};
 
 pub type NodeId = usize;
 
@@ -45,75 +45,84 @@ pub struct Arena {
     roots: Vec<NodeId>,
 }
 
+/// One still-unprocessed slice of sibling [`Element`]s, and where their
+/// [`NodeId`]s attach — a real parent, or the root list.
+struct Frame<'a> {
+    elements: &'a [Element],
+    index: usize,
+    parent: Option<NodeId>,
+}
+
 impl Arena {
     pub fn build(root: &Element) -> Self {
         let mut arena = Arena {
             nodes: Vec::new(),
             roots: Vec::new(),
         };
-        arena.roots = arena.push(root, None);
+        arena.push_all(std::slice::from_ref(root));
         arena
     }
 
-    fn push(&mut self, element: &Element, parent: Option<NodeId>) -> Vec<NodeId> {
-        match element {
-            Element::Node(node) => vec![self.push_node(node, parent)],
-            Element::Fragment(children) => {
-                children.iter().flat_map(|c| self.push(c, parent)).collect()
-            }
-            Element::Text(_) => Vec::new(),
-        }
-    }
+    /// Iterative pre-order walk: an explicit stack instead of one call
+    /// frame per tree level, so a deep tree can't overflow the stack.
+    fn push_all(&mut self, root_elements: &[Element]) {
+        let mut stack = vec![Frame {
+            elements: root_elements,
+            index: 0,
+            parent: None,
+        }];
 
-    fn push_node(&mut self, node: &ElementNode, parent: Option<NodeId>) -> NodeId {
-        let id = self.nodes.len();
-        self.nodes.push(ArenaNode {
-            tag: node.tag,
-            classes: class_list(&node.attrs),
-            id: attr_value(&node.attrs, "id"),
-            text: collect_text(&node.children),
-            inline_items: Vec::new(),
-            handlers: node.handlers.clone(),
-            parent,
-            children: Vec::new(),
-        });
+        while let Some(frame) = stack.last_mut() {
+            let Some(element) = frame.elements.get(frame.index) else {
+                stack.pop();
+                continue;
+            };
+            frame.index += 1;
+            let parent = frame.parent;
 
-        let mut children = Vec::new();
-        let mut inline_items = Vec::new();
-        self.push_children(&node.children, id, &mut children, &mut inline_items);
-        self.nodes[id].children = children;
-        self.nodes[id].inline_items = inline_items;
-        id
-    }
-
-    /// Pushes `elements` (one node's direct children, as literally written)
-    /// as this node's own children — flattening an [`Element::Fragment`]
-    /// in place, the same way [`Self::push`] already does for a set of
-    /// roots — while also building `inline_items` in the same pass, since
-    /// only here (not in a separate text-only walk like [`collect_text`])
-    /// does a nested [`Element::Node`] already have the [`NodeId`]
-    /// `InlineItem::Element` needs to reference.
-    fn push_children(
-        &mut self,
-        elements: &[Element],
-        parent: NodeId,
-        children: &mut Vec<NodeId>,
-        inline_items: &mut Vec<InlineItem>,
-    ) {
-        for element in elements {
             match element {
                 Element::Node(node) => {
-                    let child_id = self.push_node(node, Some(parent));
-                    children.push(child_id);
-                    inline_items.push(InlineItem::Element(child_id));
+                    let id = self.nodes.len();
+                    self.nodes.push(ArenaNode {
+                        tag: node.tag,
+                        classes: class_list(&node.attrs),
+                        id: attr_value(&node.attrs, "id"),
+                        text: collect_text(&node.children),
+                        inline_items: Vec::new(),
+                        handlers: node.handlers.clone(),
+                        parent,
+                        children: Vec::new(),
+                    });
+                    match parent {
+                        Some(p) => {
+                            self.nodes[p].children.push(id);
+                            self.nodes[p].inline_items.push(InlineItem::Element(id));
+                        }
+                        None => self.roots.push(id),
+                    }
+                    stack.push(Frame {
+                        elements: &node.children,
+                        index: 0,
+                        parent: Some(id),
+                    });
                 }
                 Element::Fragment(nested) => {
-                    self.push_children(nested, parent, children, inline_items);
+                    stack.push(Frame {
+                        elements: nested,
+                        index: 0,
+                        parent,
+                    });
                 }
-                Element::Text(value) => match inline_items.last_mut() {
-                    Some(InlineItem::Text(existing)) => existing.push_str(value),
-                    _ => inline_items.push(InlineItem::Text(value.clone())),
-                },
+                Element::Text(value) => {
+                    if let Some(p) = parent {
+                        match self.nodes[p].inline_items.last_mut() {
+                            Some(InlineItem::Text(existing)) => existing.push_str(value),
+                            _ => self.nodes[p]
+                                .inline_items
+                                .push(InlineItem::Text(value.clone())),
+                        }
+                    }
+                }
             }
         }
     }
@@ -179,22 +188,14 @@ impl Arena {
     /// callers that need to locate a node before marking it in an
     /// [`crate::InteractionState`].
     pub fn find(&self, mut predicate: impl FnMut(&Self, NodeId) -> bool) -> Option<NodeId> {
-        fn walk(
-            arena: &Arena,
-            id: NodeId,
-            predicate: &mut impl FnMut(&Arena, NodeId) -> bool,
-        ) -> Option<NodeId> {
-            if predicate(arena, id) {
+        let mut stack: Vec<NodeId> = self.roots.iter().rev().copied().collect();
+        while let Some(id) = stack.pop() {
+            if predicate(self, id) {
                 return Some(id);
             }
-            arena
-                .children(id)
-                .iter()
-                .find_map(|&child| walk(arena, child, predicate))
+            stack.extend(self.children(id).iter().rev());
         }
-        self.roots
-            .iter()
-            .find_map(|&root| walk(self, root, &mut predicate))
+        None
     }
 }
 
@@ -431,5 +432,30 @@ mod tests {
         let tree: Element = view! { <div /> };
         let arena = Arena::build(&tree);
         assert!(arena.inline_items(arena.roots()[0]).is_empty());
+    }
+
+    /// `build`/`find` used to recurse once per tree level and overflow
+    /// the stack well before this depth — an explicit stack fixed that.
+    #[test]
+    fn build_and_find_survive_a_tree_far_deeper_than_the_old_recursion_limit() {
+        let depth = 20_000;
+        let mut tree = Element::node("div", vec![("class".into(), "leaf".into())], vec![]);
+        for _ in 0..depth {
+            tree = Element::node("div", vec![], vec![tree]);
+        }
+
+        let arena = Arena::build(&tree);
+        let leaf = arena
+            .find(|a, id| a.classes(id).iter().any(|c| c == "leaf"))
+            .expect("the leaf must still be reachable at full depth");
+        assert!(arena.children(leaf).is_empty());
+
+        let mut depth_from_leaf = 0;
+        let mut current = leaf;
+        while let Some(parent) = arena.parent(current) {
+            current = parent;
+            depth_from_leaf += 1;
+        }
+        assert_eq!(depth_from_leaf, depth);
     }
 }

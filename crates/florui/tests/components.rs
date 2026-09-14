@@ -10,7 +10,7 @@ fn self_closing_component_has_no_children_field() {
             label: "Open projects".to_string(),
         })
     });
-    let Element::Node(node) = el else {
+    let Element::Node(node) = &el else {
         panic!("expected a node");
     };
     assert_eq!(node.tag, "button");
@@ -29,7 +29,7 @@ fn component_forwards_children_without_a_wrapper() {
             children: Children::from(vec![Element::text("body")]),
         })
     });
-    let Element::Node(node) = el else {
+    let Element::Node(node) = &el else {
         panic!("expected a node");
     };
     assert_eq!(node.tag, "div");
@@ -63,7 +63,7 @@ fn view_calls_components_by_capitalized_tag() {
             </div>
         }
     });
-    let Element::Node(node) = el else {
+    let Element::Node(node) = &el else {
         panic!("expected a node");
     };
     assert_eq!(node.tag, "div");

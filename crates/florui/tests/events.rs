@@ -9,7 +9,7 @@ use florui::prelude::*;
 #[test]
 fn an_event_handler_attribute_is_not_a_string_attr() {
     let el: Element = view! { <button onclick={|| ()}>{"Go"}</button> };
-    let Element::Node(node) = el else {
+    let Element::Node(node) = &el else {
         panic!("expected a node");
     };
     assert!(
@@ -26,7 +26,7 @@ fn calling_the_stored_handler_runs_the_original_closure() {
     let clicked_in_handler = clicked.clone();
     let el: Element = view! { <button onclick={move || clicked_in_handler.set(true)} /> };
 
-    let Element::Node(node) = el else {
+    let Element::Node(node) = &el else {
         panic!("expected a node");
     };
     let (_name, handler) = &node.handlers[0];

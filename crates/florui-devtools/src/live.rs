@@ -119,8 +119,17 @@ fn build_inspector_model(
     // paint path — see `compute_size_causes`'s own doc.
     let causes = compute_size_causes(arena, styles, layouts);
     let mut nodes = Vec::new();
-    for &root in arena.roots() {
-        push_node(arena, styles, layouts, &causes, root, 0, &mut nodes);
+    let mut stack: Vec<(NodeId, usize)> =
+        arena.roots().iter().rev().map(|&root| (root, 0)).collect();
+    while let Some((id, depth)) = stack.pop() {
+        push_node(arena, styles, layouts, &causes, id, depth, &mut nodes);
+        stack.extend(
+            arena
+                .children(id)
+                .iter()
+                .rev()
+                .map(|&child| (child, depth + 1)),
+        );
     }
     InspectorModel {
         nodes,
@@ -179,10 +188,6 @@ fn push_node(
         margin: style.margin,
         size_cause: causes.get(&id).map(format_size_cause),
     });
-
-    for &child in arena.children(id) {
-        push_node(arena, styles, layouts, causes, child, depth + 1, out);
-    }
 }
 
 /// A node's border box (content expanded by its own padding and border) in

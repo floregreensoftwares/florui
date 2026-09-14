@@ -100,16 +100,17 @@ pub fn paint_to_buffer(
     // reused across every text-bearing node — matching florui_layout's own
     // per-pass `Font::load_embedded` convention.
     let mut font = Font::load_embedded();
-    for &root in arena.roots() {
-        paint_node(&mut buffer, arena, styles, layouts, &mut font, root);
+    let mut stack: Vec<NodeId> = arena.roots().iter().rev().copied().collect();
+    while let Some(node) = stack.pop() {
+        paint_node(&mut buffer, arena, styles, layouts, &mut font, node);
+        stack.extend(arena.children(node).iter().rev());
     }
     buffer
 }
 
-/// Paints `node`'s own background and text, then its children in source
-/// order, so an overlapping later node always wins over an earlier one —
-/// real document-order painting rather than a heuristic (e.g. sorting by
-/// box area) that only happens to agree with it for pure containment.
+/// Paints `node`'s own background and text — document-order painting
+/// (an overlapping later node always wins) comes from the caller's own
+/// pre-order walk over the whole tree, not from this function recursing.
 fn paint_node(
     buffer: &mut Canvas,
     arena: &Arena,
@@ -208,9 +209,6 @@ fn paint_node(
                 );
             }
         }
-    }
-    for &child in arena.children(node) {
-        paint_node(buffer, arena, styles, layouts, font, child);
     }
 }
 
@@ -709,8 +707,8 @@ mod tests {
     #[test]
     fn a_real_inline_formatting_context_paints_ink_from_both_the_text_and_the_inline_element() {
         // `Element::node`/`Element::text` directly — real mixed inline
-        // content, which `view!` has no
-        // ergonomic syntax for. Before this, `florui-paint` painted
+        // content, which `view!` has no ergonomic syntax for. Before
+        // real inline formatting context support, `florui-paint` painted
         // a node with element children using only `arena.text_content`,
         // which flattens through nested elements and would have silently
         // dropped "B" — this test is exactly what would have caught that:
@@ -787,5 +785,29 @@ mod tests {
                 assert_eq!(pixel_rgb(&buffer, px, py), [0x1e, 0x1e, 0x22]);
             }
         }
+    }
+
+    /// `paint_node` used to recurse once per tree level; iterative now.
+    /// 1,200, matching florui-layout's own equivalent test: past the
+    /// original 1,000-deep crash report, but not far past it — Stylo's
+    /// own cascade is quadratic-ish in depth for a single-chain tree, so
+    /// this test's own runtime bounds the depth chosen here, not a stack
+    /// limit (`compute_layout`'s `stacker`-based fix covers that part).
+    #[test]
+    fn paint_to_buffer_survives_a_tree_far_deeper_than_the_old_recursion_limit() {
+        let depth = 1_200;
+        let mut tree = Element::node("div", vec![("class".into(), "leaf".into())], vec![]);
+        for _ in 0..depth {
+            tree = Element::node("div", vec![], vec![tree]);
+        }
+        let css = ".leaf { width: 5px; height: 5px; background-color: #ff0000; }";
+
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let layouts = florui_layout::compute_layout(&arena, &styles, Size::MAX_CONTENT).unwrap();
+
+        let buffer = paint_to_buffer(5, 5, Rgba::opaque(0, 0, 0), &arena, &styles, &layouts);
+        assert_eq!(pixel_rgb(&buffer, 0, 0), [0xff, 0x00, 0x00]);
     }
 }
