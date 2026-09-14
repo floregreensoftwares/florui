@@ -1,0 +1,102 @@
+# Florui
+
+Native Rust interfaces, with the expressiveness of CSS.
+
+Florui is an early-stage UI framework exploring a familiar way to build native applications: composable Rust components, JSX-inspired markup, and CSS stylesheets.
+
+Its goal is to reproduce the layout and visual behavior of the Web through a native rendering engine. Chromium serves as a reference for comparison tests; it is not embedded in the native application.
+
+## Status
+
+Florui is in early development. The repository currently provides a minimal native preview host, CSS fixture reload, and development diagnostics. It is not yet a usable application framework.
+
+The preview renders a single element and reads a limited `body { background-color: ... }` fixture. It does not implement general CSS parsing, cascade, layout, or the planned component API. The bootstrap renderer uses CPU pixels; the production GPU pipeline is still planned.
+
+## Intended authoring experience
+
+Components own their styles and compose through ordinary Rust imports. The proposed declarative macro is `view!`.
+
+**Design example — not implemented yet:**
+
+```rust
+use florui::prelude::*;
+
+stylesheet!("./button.css");
+
+#[component]
+pub fn Button(label: String) -> Element {
+    view! {
+        <button class="button">{label}</button>
+    }
+}
+```
+
+```css
+.button {
+    padding: 10px 16px;
+    border: none;
+    border-radius: 8px;
+    background: #42734f;
+    color: white;
+    font: inherit;
+}
+
+.button:hover {
+    background: #345c3e;
+}
+```
+
+The planned build integration collects component stylesheets automatically, so application entry points do not need to register every component's CSS.
+
+## Run the development preview
+
+Install Rust through rustup and the native build tools for your platform. The repository pins Rust 1.94.0 in `rust-toolchain.toml`. Initial development and CI focus on Windows; other platforms are not yet validated.
+
+From the repository root:
+
+```sh
+cargo run -p florui-cli -- dev
+```
+
+Edit the color in [`fixtures/dev/app.css`](fixtures/dev/app.css) and save to update the preview. Reload failures are reported while the preview retains its last valid revision.
+
+To use a different fixture:
+
+```sh
+cargo run -p florui-cli -- dev --fixture path/to/app.css
+```
+
+The fixture must follow the same limited format. A desktop session is required to open the preview window.
+
+Only `dev` is currently implemented. The CLI also declares `new`, `test`, `compare`, and `build`, but these commands are placeholders and return an error.
+
+## Direction
+
+- **CSS fidelity:** implement style, layout, text, and painting with explicit compatibility coverage and reproducible visual comparisons.
+- **Composition:** user-defined components, typed props, hooks, context, and owned async work.
+- **Development tools first:** CSS hot reload, an inspector, source-linked diagnostics, and profiling to support development of the engine itself.
+- **Complete interaction:** text editing, keyboard navigation, accessibility, and overlays alongside visual rendering.
+- **Shared authoring for Web:** a planned DOM backend using Rust/WebAssembly, separate from the native rendering pipeline.
+
+Pixel-perfect output is a testing goal for controlled fixtures, not a current claim of complete CSS support or identical rendering across all platforms. Performance claims will require published measurements.
+
+## Development checks
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo test --workspace --doc
+```
+
+Keep changes focused and distinguish implemented behavior from proposals. Bug reports are most useful with reproduction steps, environment details, and a minimal fixture. Visual reports should include the expected and actual output.
+
+## License
+
+Unless otherwise noted, Florui's original code and documentation are licensed
+under either the [MIT License](LICENSE-MIT) or the
+[Apache License, Version 2.0](LICENSE-APACHE), at your option.
+
+Third-party code and assets retain their own licenses. Bundled fonts are
+covered by the license files shipped alongside them; dependencies such as
+Stylo retain their upstream licensing terms.
