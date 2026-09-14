@@ -65,10 +65,18 @@ pub enum FontFamily {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextMetrics {
-    /// The width of the text with no wrapping applied.
+    /// The widest line's width — the whole (unwrapped) text's width for
+    /// [`Font::measure`], or the widest of however many lines
+    /// [`Font::measure_wrapped`] wrapped it into.
     pub width: f32,
-    /// The height of the (single, unwrapped) line.
+    /// The full height across every line.
     pub height: f32,
+    /// Offset from the very top of the text block down to the *first*
+    /// line's baseline — constant for a given family/size regardless of
+    /// content or how many lines wrapping produced, since it comes from
+    /// the font's own ascent metric, not from what the text says. This is
+    /// what CSS's `align-items: baseline` aligns flex items by.
+    pub baseline: f32,
 }
 
 /// One glyph, positioned relative to the text's own top-left origin
@@ -205,10 +213,18 @@ impl Font {
             None => TextMetrics {
                 width: 0.0,
                 height: 0.0,
+                baseline: 0.0,
             },
             Some(layout) => TextMetrics {
                 width: layout.width(),
                 height: layout.height(),
+                // The first line's own baseline offset is already relative
+                // to the top of the whole block, since nothing precedes it.
+                baseline: layout
+                    .lines()
+                    .next()
+                    .map(|line| line.metrics().baseline)
+                    .unwrap_or(0.0),
             },
         }
     }
@@ -401,7 +417,8 @@ mod tests {
             metrics,
             TextMetrics {
                 width: 0.0,
-                height: 0.0
+                height: 0.0,
+                baseline: 0.0,
             }
         );
     }
@@ -537,7 +554,8 @@ mod tests {
             metrics,
             TextMetrics {
                 width: 0.0,
-                height: 0.0
+                height: 0.0,
+                baseline: 0.0,
             }
         );
     }
@@ -605,5 +623,55 @@ mod tests {
             "the emoji glyph must come from neither embedded font"
         );
         assert_ne!(font_data, EMBEDDED_MONOSPACE_FONT);
+    }
+
+    #[test]
+    fn baseline_sits_strictly_between_the_top_and_the_bottom_of_the_line() {
+        let mut font = Font::load_embedded();
+        let metrics = font.measure(FontFamily::SansSerif, "Hg", 16.0);
+        assert!(
+            metrics.baseline > 0.0 && metrics.baseline < metrics.height,
+            "the baseline ({}) must fall strictly within the line's own height (0..{})",
+            metrics.baseline,
+            metrics.height
+        );
+    }
+
+    #[test]
+    fn baseline_does_not_depend_on_the_text_content() {
+        // Purely a font-metric property (the ascent above the baseline) —
+        // two different strings at the same family/size must report the
+        // same baseline offset even though their widths differ.
+        let mut font = Font::load_embedded();
+        let short = font.measure(FontFamily::SansSerif, "x", 16.0);
+        let long = font.measure(FontFamily::SansSerif, "Testing Baseline", 16.0);
+        assert_eq!(short.baseline, long.baseline);
+        assert_ne!(short.width, long.width, "sanity check: these really differ");
+    }
+
+    #[test]
+    fn baseline_scales_with_font_size() {
+        let mut font = Font::load_embedded();
+        let small = font.measure(FontFamily::SansSerif, "Hg", 16.0);
+        let large = font.measure(FontFamily::SansSerif, "Hg", 32.0);
+        assert!(large.baseline > small.baseline);
+    }
+
+    #[test]
+    fn baseline_is_the_same_whether_or_not_the_text_wraps() {
+        // The ascent above the baseline comes from the font itself, not
+        // from how many lines the content wrapped into — the first line's
+        // baseline offset from the very top of the block must be identical
+        // either way.
+        let mut font = Font::load_embedded();
+        let unwrapped = font.measure(FontFamily::SansSerif, "one two three", 16.0);
+        let one_word = font.measure(FontFamily::SansSerif, "one", 16.0);
+        let wrapped =
+            font.measure_wrapped(FontFamily::SansSerif, "one two three", 16.0, one_word.width);
+        assert!(
+            wrapped.height > unwrapped.height,
+            "sanity check: this must actually have wrapped onto more than one line"
+        );
+        assert_eq!(unwrapped.baseline, wrapped.baseline);
     }
 }
