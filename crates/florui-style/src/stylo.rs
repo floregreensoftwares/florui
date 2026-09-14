@@ -896,6 +896,16 @@ fn to_computed_style(values: &ComputedValues) -> ComputedStyle {
                 color,
             ),
         },
+        grid_template_columns: to_grid_template_tracks(&position.grid_template_columns),
+        grid_template_rows: to_grid_template_tracks(&position.grid_template_rows),
+        grid_column: (
+            to_grid_placement(&position.grid_column_start),
+            to_grid_placement(&position.grid_column_end),
+        ),
+        grid_row: (
+            to_grid_placement(&position.grid_row_start),
+            to_grid_placement(&position.grid_row_end),
+        ),
     }
 }
 
@@ -926,6 +936,72 @@ fn to_border_side(
     }
 }
 
+/// A `grid-template-columns`/`-rows` track list down to what this crate
+/// resolves — see [`crate::cascade::GridTrackSize`]'s own doc for the
+/// bound (`repeat()`, `grid-template-areas`, `subgrid`, and `masonry`
+/// aren't read back, only a plain track list).
+fn to_grid_template_tracks(
+    component: &style::values::computed::GridTemplateComponent,
+) -> Vec<crate::cascade::GridTrackSize> {
+    use style::values::generics::grid::{GridTemplateComponent, TrackListValue};
+
+    let GridTemplateComponent::TrackList(list) = component else {
+        return Vec::new();
+    };
+    list.values
+        .iter()
+        .filter_map(|value| match value {
+            TrackListValue::TrackSize(size) => Some(to_grid_track_size(size)),
+            // `repeat()` isn't expanded into concrete tracks in this slice.
+            TrackListValue::TrackRepeat(_) => None,
+        })
+        .collect()
+}
+
+fn to_grid_track_size(size: &style::values::computed::TrackSize) -> crate::cascade::GridTrackSize {
+    use style::values::generics::grid::TrackSize;
+    match size {
+        TrackSize::Breadth(breadth) => to_grid_track_breadth(breadth),
+        // Only the max side is read back — real CSS's own "in all cases,
+        // treat auto and fit-content() as max-content, except..." leaves
+        // the min side mostly informational for this crate's purposes.
+        TrackSize::Minmax(_, max) => to_grid_track_breadth(max),
+        TrackSize::FitContent(_) => crate::cascade::GridTrackSize::Auto,
+    }
+}
+
+fn to_grid_track_breadth(
+    breadth: &style::values::computed::TrackBreadth,
+) -> crate::cascade::GridTrackSize {
+    use crate::cascade::GridTrackSize as FlorGridTrackSize;
+    use style::values::generics::grid::TrackBreadth;
+    match breadth {
+        TrackBreadth::Breadth(lp) => lp
+            .to_length()
+            .map(|length| FlorGridTrackSize::Length(length.px()))
+            .unwrap_or(FlorGridTrackSize::Auto),
+        TrackBreadth::Fr(fraction) => FlorGridTrackSize::Fr(*fraction),
+        TrackBreadth::Auto => FlorGridTrackSize::Auto,
+        TrackBreadth::MinContent => FlorGridTrackSize::MinContent,
+        TrackBreadth::MaxContent => FlorGridTrackSize::MaxContent,
+    }
+}
+
+/// A `grid-{row,column}-{start,end}` line down to what this crate resolves
+/// — see [`crate::cascade::GridPlacement`]'s own doc for the bound (named
+/// lines fall back to `Auto`).
+fn to_grid_placement(line: &style::values::computed::GridLine) -> crate::cascade::GridPlacement {
+    use crate::cascade::GridPlacement as FlorGridPlacement;
+    if line.is_auto() || !line.ident.0.is_empty() {
+        return FlorGridPlacement::Auto;
+    }
+    if line.is_span {
+        FlorGridPlacement::Span(line.line_num.max(1) as u16)
+    } else {
+        FlorGridPlacement::Line(line.line_num as i16)
+    }
+}
+
 /// `Display`'s own `inside()`/`outside()` split matches real CSS's
 /// two-value `display` syntax — see [`FlorDisplay`]'s own doc for why this
 /// crate conflates both into one field. `inline-block` is
@@ -949,6 +1025,7 @@ fn to_display(display: style::values::computed::Display) -> FlorDisplay {
         (DisplayOutside::Inline, DisplayInside::FlowRoot) => FlorDisplay::InlineBlock,
         (DisplayOutside::Inline, _) => FlorDisplay::Inline,
         (_, DisplayInside::Flex) => FlorDisplay::Flex,
+        (_, DisplayInside::Grid) => FlorDisplay::Grid,
         _ => FlorDisplay::Block,
     }
 }

@@ -41,7 +41,7 @@ mod tree;
 
 pub use cascade::{
     BorderSide, ComputedStyle, ContentAlignment, Display, Edges, FlexDirection, FlexWrap,
-    FontFamily, ItemAlignment, compute,
+    FontFamily, GridPlacement, GridTrackSize, ItemAlignment, compute,
 };
 pub use color::{ColorParseError, Rgba, parse_hex_color};
 pub use error::StyleError;

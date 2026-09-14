@@ -107,7 +107,7 @@ mod tests {
         let arena = Arena::build(&tag_markup);
         let rules = parse_stylesheet("").unwrap();
         let computed = compute(&arena, &rules, &InteractionState::new());
-        computed[&arena.roots()[0]]
+        computed[&arena.roots()[0]].clone()
     }
 
     #[test]
@@ -229,7 +229,7 @@ mod tests {
         let arena = Arena::build(&tree);
         let rules = parse_stylesheet("* { font-size: 40px; }").unwrap();
         let computed = compute(&arena, &rules, &InteractionState::new());
-        let style = computed[&arena.roots()[0]];
+        let style = &computed[&arena.roots()[0]];
         assert_close(style.font_size, 40.0, "author-overridden font-size");
     }
 }

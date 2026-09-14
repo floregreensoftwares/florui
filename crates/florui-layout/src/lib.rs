@@ -691,7 +691,54 @@ fn to_taffy_style(style: Option<&ComputedStyle>) -> taffy::Style {
             top: LengthPercentage::length(style.border.top.width),
             bottom: LengthPercentage::length(style.border.bottom.width),
         },
+        // Only meaningful when `display` above is `Grid`, the same way the
+        // flex-* fields above are only meaningful for `Flex` — Taffy
+        // ignores them otherwise, so setting them unconditionally is safe.
+        grid_template_columns: to_grid_template_tracks(&style.grid_template_columns),
+        grid_template_rows: to_grid_template_tracks(&style.grid_template_rows),
+        // These two instead describe how *this node itself* is placed
+        // within its *parent's* grid — meaningful only when this node's
+        // parent has `display: grid`, regardless of this node's own
+        // `display`, the same as `align_self` above.
+        grid_column: to_grid_placement_line(style.grid_column),
+        grid_row: to_grid_placement_line(style.grid_row),
         ..Default::default()
+    }
+}
+
+fn to_grid_template_tracks(
+    tracks: &[florui_style::GridTrackSize],
+) -> Vec<GridTemplateComponent<String>> {
+    tracks
+        .iter()
+        .map(|&track| GridTemplateComponent::Single(to_track_sizing_function(track)))
+        .collect()
+}
+
+fn to_track_sizing_function(track: florui_style::GridTrackSize) -> TrackSizingFunction {
+    match track {
+        florui_style::GridTrackSize::Length(px) => length(px),
+        florui_style::GridTrackSize::Fr(fraction) => fr(fraction),
+        florui_style::GridTrackSize::Auto => auto(),
+        florui_style::GridTrackSize::MinContent => min_content(),
+        florui_style::GridTrackSize::MaxContent => max_content(),
+    }
+}
+
+fn to_grid_placement_line(
+    value: (florui_style::GridPlacement, florui_style::GridPlacement),
+) -> Line<GridPlacement> {
+    Line {
+        start: to_grid_placement(value.0),
+        end: to_grid_placement(value.1),
+    }
+}
+
+fn to_grid_placement(value: florui_style::GridPlacement) -> GridPlacement {
+    match value {
+        florui_style::GridPlacement::Auto => GridPlacement::Auto,
+        florui_style::GridPlacement::Line(index) => line(index),
+        florui_style::GridPlacement::Span(count) => span(count),
     }
 }
 
@@ -713,6 +760,7 @@ fn to_display(value: StyleDisplay) -> Display {
     match value {
         StyleDisplay::Block => Display::Block,
         StyleDisplay::Flex => Display::Flex,
+        StyleDisplay::Grid => Display::Grid,
         // Reached only for a node that did *not* qualify for
         // `needs_inline_layout` (e.g. it sits at the tree root, where real
         // CSS also blockifies `display: inline` — see `florui_style`'s own
@@ -1676,5 +1724,134 @@ mod tests {
             layouts[&p].height,
             small_only.height
         );
+    }
+
+    #[test]
+    fn grid_template_columns_sizes_tracks_from_lengths_and_fr_units() {
+        let tree: Element = view! {
+            <div class="grid">
+                <div class="a" />
+                <div class="b" />
+            </div>
+        };
+        let (arena, layouts) = layout_for(
+            &tree,
+            "
+            .grid { display: grid; width: 300px; height: 50px; \
+             grid-template-columns: 100px 1fr; }
+            .a { height: 50px; }
+            .b { height: 50px; }
+            ",
+        );
+        let grid = arena.roots()[0];
+        let a = arena.children(grid)[0];
+        let b = arena.children(grid)[1];
+
+        assert_eq!(layouts[&a].width, 100.0, "the fixed 100px column");
+        assert_eq!(
+            layouts[&b].width, 200.0,
+            "the 1fr column takes all remaining space: 300 - 100"
+        );
+        assert_eq!(layouts[&b].x, 100.0, "b starts right where a's column ends");
+    }
+
+    #[test]
+    fn grid_template_rows_sizes_tracks_the_same_way() {
+        let tree: Element = view! {
+            <div class="grid">
+                <div class="a" />
+                <div class="b" />
+            </div>
+        };
+        let (arena, layouts) = layout_for(
+            &tree,
+            "
+            .grid { display: grid; width: 50px; height: 300px; \
+             grid-template-rows: 100px 1fr; grid-template-columns: 50px; }
+            .a { width: 50px; }
+            .b { width: 50px; }
+            ",
+        );
+        let grid = arena.roots()[0];
+        let a = arena.children(grid)[0];
+        let b = arena.children(grid)[1];
+
+        assert_eq!(layouts[&a].height, 100.0);
+        assert_eq!(layouts[&b].height, 200.0, "300 - 100");
+        assert_eq!(layouts[&b].y, 100.0);
+    }
+
+    #[test]
+    fn grid_column_places_an_item_at_an_explicit_line() {
+        let tree: Element = view! {
+            <div class="grid">
+                <div class="placed" />
+            </div>
+        };
+        let (arena, layouts) = layout_for(
+            &tree,
+            "
+            .grid { display: grid; width: 300px; height: 50px; \
+             grid-template-columns: 100px 100px 100px; }
+            .placed { grid-column: 3 / 4; height: 50px; }
+            ",
+        );
+        let grid = arena.roots()[0];
+        let placed = arena.children(grid)[0];
+
+        assert_eq!(
+            layouts[&placed].x, 200.0,
+            "the 3rd column starts after the first two 100px columns"
+        );
+        assert_eq!(layouts[&placed].width, 100.0);
+    }
+
+    #[test]
+    fn grid_row_span_places_an_item_across_multiple_rows() {
+        let tree: Element = view! {
+            <div class="grid">
+                <div class="spans" />
+            </div>
+        };
+        let (arena, layouts) = layout_for(
+            &tree,
+            "
+            .grid { display: grid; width: 50px; height: 300px; \
+             grid-template-rows: 100px 100px 100px; grid-template-columns: 50px; }
+            .spans { grid-row: 1 / span 2; width: 50px; }
+            ",
+        );
+        let grid = arena.roots()[0];
+        let spans = arena.children(grid)[0];
+
+        assert_eq!(
+            layouts[&spans].height, 200.0,
+            "spanning 2 of the 100px rows"
+        );
+    }
+
+    #[test]
+    fn gap_adds_space_between_grid_tracks() {
+        let tree: Element = view! {
+            <div class="grid">
+                <div class="a" />
+                <div class="b" />
+            </div>
+        };
+        let (arena, layouts) = layout_for(
+            &tree,
+            "
+            .grid { display: grid; width: 210px; height: 50px; \
+             grid-template-columns: 100px 100px; column-gap: 10px; }
+            .a { height: 50px; }
+            .b { height: 50px; }
+            ",
+        );
+        let grid = arena.roots()[0];
+        let a = arena.children(grid)[0];
+        let b = arena.children(grid)[1];
+
+        assert_eq!(layouts[&a].x, 0.0);
+        assert_eq!(layouts[&b].x, 110.0, "a's 100px column + 10px column-gap");
     }
 }
