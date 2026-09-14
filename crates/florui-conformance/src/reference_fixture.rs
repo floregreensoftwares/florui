@@ -1,6 +1,7 @@
-//! Loads a reference fixture: an HTML/CSS pair plus a manifest describing
-//! viewport, DPR, and a neutral expected result, per this project's fixture
-//! contract.
+//! Loads a reference fixture: an HTML/CSS pair (the Chromium side) plus a
+//! [`FloruiSpec`] (the same element, rendered through Florui's own real
+//! style/layout/paint pipeline — see [`crate::engine`]) and a manifest
+//! tying the two together.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -24,47 +25,28 @@ impl ViewportSpec {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InsetsSpec {
-    pub top: u32,
-    pub right: u32,
-    pub bottom: u32,
-    pub left: u32,
-}
-
-impl InsetsSpec {
-    /// Converts these CSS-pixel insets to the physical-pixel [`Insets`]
-    /// Florui's engine functions expect, scaling by `device_pixel_ratio`.
-    ///
-    /// There is deliberately no `From<InsetsSpec> for Insets`: a
-    /// DPR-unaware conversion silently produces the wrong physical box at
-    /// any `device_pixel_ratio != 1.0`, which is exactly the kind of bug
-    /// real DPR validation exists to catch.
-    pub fn to_physical(self, device_pixel_ratio: f64) -> florui_devtools::scene::Insets {
-        let scale = |value: u32| (f64::from(value) * device_pixel_ratio).round() as u32;
-        florui_devtools::scene::Insets {
-            top: scale(self.top),
-            right: scale(self.right),
-            bottom: scale(self.bottom),
-            left: scale(self.left),
-        }
-    }
-}
-
-/// States the fixture's expected canvas/element colors and geometry
-/// literally, mirroring the numbers already written in its own CSS.
+/// The same element under test, rendered through Florui's own real
+/// style/layout/paint pipeline (see [`crate::engine::render_fixture`])
+/// instead of the Chromium HTML/CSS pair — no expected pixel/geometry
+/// values are hand-typed anywhere in this crate any more: both sides are
+/// real renders, compared against each other by [`crate::pixels`]/
+/// [`crate::geometry`].
 ///
-/// Expected results must be a neutral description, without using the
-/// layout implementation itself to generate expected output — and Florui
-/// has no real cascade or layout yet to derive them from. This is a
-/// documented stopgap: once real style/layout exists, this field should be
-/// deleted and the engine side computed from the same CSS Chromium reads,
-/// instead of duplicated by hand here.
+/// `tag`/`text` describe the single element under test (wrapped in a
+/// synthetic `<div>` matching the HTML side's `<body>`, so a bare
+/// `<span>`'s real inline-vs-block distinction isn't lost to Stylo's own
+/// root-element blockification — see `florui_style::stylo`'s
+/// `to_display` doc for that rule). `css` is real author CSS through the
+/// same `florui_style::parse_stylesheet` path an application uses; empty
+/// for a bare-element fixture, so the framework's own default stylesheet
+/// is what's actually under test.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExpectedResult {
-    pub canvas_color: String,
-    pub element_color: String,
-    pub insets_css_px: InsetsSpec,
+pub struct FloruiSpec {
+    pub tag: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub css: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -85,7 +67,12 @@ pub struct FixtureManifest {
     pub css: String,
     pub element_id: String,
     pub viewport: ViewportSpec,
-    pub expected: ExpectedResult,
+    /// Written into the Chromium HTML/CSS pair's own `body`
+    /// `background-color` *and* passed as Florui's own `paint_to_buffer`
+    /// canvas color — one declared value for both renders, rather than
+    /// two hand-typed strings that could silently drift apart.
+    pub canvas_color: String,
+    pub florui: FloruiSpec,
     pub classification: Classification,
 }
 
@@ -193,11 +180,8 @@ mod tests {
             "css": "style.css",
             "element_id": "el",
             "viewport": { "width_css_px": 100, "height_css_px": 80, "device_pixel_ratio": 1.0 },
-            "expected": {
-                "canvas_color": "#111111",
-                "element_color": "#222222",
-                "insets_css_px": { "top": 1, "right": 2, "bottom": 3, "left": 4 }
-            },
+            "canvas_color": "#111111",
+            "florui": { "tag": "div", "text": "", "css": "" },
             "classification": { "kind": "exact" }
         }"##
     }
@@ -217,7 +201,7 @@ mod tests {
         let fixture = load_reference_fixture(&dir).unwrap();
         assert_eq!(fixture.manifest.id, "test-fixture");
         assert_eq!(fixture.manifest.viewport.width_css_px, 100);
-        assert_eq!(fixture.manifest.expected.insets_css_px.left, 4);
+        assert_eq!(fixture.manifest.florui.tag, "div");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -254,45 +238,5 @@ mod tests {
         };
         assert_eq!(viewport.width_physical_px(), 640);
         assert_eq!(viewport.height_physical_px(), 480);
-    }
-
-    #[test]
-    fn insets_to_physical_scales_every_edge_independently() {
-        let insets = InsetsSpec {
-            top: 8,
-            right: 24,
-            bottom: 40,
-            left: 56,
-        };
-        let physical = insets.to_physical(2.0);
-        assert_eq!(
-            physical,
-            florui_devtools::scene::Insets {
-                top: 16,
-                right: 48,
-                bottom: 80,
-                left: 112,
-            }
-        );
-    }
-
-    #[test]
-    fn insets_to_physical_is_identity_at_dpr_one() {
-        let insets = InsetsSpec {
-            top: 8,
-            right: 24,
-            bottom: 40,
-            left: 56,
-        };
-        let physical = insets.to_physical(1.0);
-        assert_eq!(
-            physical,
-            florui_devtools::scene::Insets {
-                top: 8,
-                right: 24,
-                bottom: 40,
-                left: 56,
-            }
-        );
     }
 }

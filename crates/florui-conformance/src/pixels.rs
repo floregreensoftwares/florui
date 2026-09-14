@@ -149,6 +149,34 @@ pub fn overlay_images(reference: &RgbaImage, result: &RgbaImage) -> RgbaImage {
     })
 }
 
+/// A red/cyan anaglyph of `reference` against `result` — `reference`'s own
+/// luminance in the red channel, `result`'s in green+blue. Where the two
+/// agree, red and cyan cancel out to a neutral gray; where they don't, the
+/// mismatching region shows up as a colored fringe (reference brighter:
+/// reddish; result brighter: cyan-ish) — a glance tells you *whether* two
+/// renders line up, which [`overlay_images`]'s own 50/50 blend (still
+/// useful for "what does the misplaced region actually look like") doesn't
+/// make as immediately legible.
+///
+/// Precondition: both images have the same dimensions, the same as
+/// [`overlay_images`].
+pub fn anaglyph_overlay(reference: &RgbaImage, result: &RgbaImage) -> RgbaImage {
+    let (width, height) = reference.dimensions();
+    RgbaImage::from_fn(width, height, |x, y| {
+        let reference_luminance = luminance(*reference.get_pixel(x, y));
+        let result_luminance = luminance(*result.get_pixel(x, y));
+        ImageRgba([reference_luminance, result_luminance, result_luminance, 255])
+    })
+}
+
+/// Perceptual (ITU-R BT.601) luminance of one RGB pixel, ignoring alpha —
+/// both this crate's own images are always fully opaque in practice (a
+/// Chromium screenshot, or Florui's own canvas filled before painting).
+fn luminance(pixel: ImageRgba<u8>) -> u8 {
+    let [r, g, b, _a] = pixel.0;
+    (0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)).round() as u8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +243,48 @@ mod tests {
         let b = solid(2, 2, [200, 100, 50, 255]);
         let overlay = overlay_images(&a, &b);
         assert_eq!(*overlay.get_pixel(0, 0), ImageRgba([100, 50, 25, 255]));
+    }
+
+    #[test]
+    fn anaglyph_overlay_of_identical_images_is_neutral_gray() {
+        // Same luminance on both sides means red == green == blue: a
+        // perfect match reads as gray, with no colored fringe at all.
+        let a = solid(2, 2, [128, 128, 128, 255]);
+        let b = solid(2, 2, [128, 128, 128, 255]);
+        let overlay = anaglyph_overlay(&a, &b);
+        let pixel = overlay.get_pixel(0, 0).0;
+        assert_eq!(pixel[0], pixel[1]);
+        assert_eq!(pixel[1], pixel[2]);
+    }
+
+    #[test]
+    fn anaglyph_overlay_of_a_mismatch_produces_a_colored_fringe() {
+        // reference darker than result: red channel (reference) stays low,
+        // green/blue (result) go high — a cyan-leaning pixel, not gray.
+        let reference = solid(2, 2, [0, 0, 0, 255]);
+        let result = solid(2, 2, [255, 255, 255, 255]);
+        let overlay = anaglyph_overlay(&reference, &result);
+        let pixel = overlay.get_pixel(0, 0).0;
+        assert_eq!(pixel[0], 0, "reference's own luminance in the red channel");
+        assert_eq!(pixel[1], 255, "result's own luminance in green and blue");
+        assert_eq!(pixel[2], 255);
+        assert_ne!(pixel[0], pixel[1], "a real mismatch must not read as gray");
+    }
+
+    #[test]
+    fn anaglyph_overlay_reads_perceptual_luminance_not_a_flat_average() {
+        // Pure green is perceptually much brighter than pure blue at equal
+        // channel value — a flat (r+g+b)/3 average would treat them as
+        // identical luminance; BT.601 weighting must not.
+        let green = solid(1, 1, [0, 255, 0, 255]);
+        let blue = solid(1, 1, [0, 0, 255, 255]);
+        let overlay = anaglyph_overlay(&green, &blue);
+        let pixel = overlay.get_pixel(0, 0).0;
+        assert!(
+            pixel[0] > pixel[1],
+            "green's luminance (red channel here) must read brighter than blue's \
+             (green/blue channels here): got {pixel:?}"
+        );
     }
 
     #[test]

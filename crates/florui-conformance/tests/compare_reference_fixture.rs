@@ -1,6 +1,10 @@
-//! End-to-end check against a real Chromium binary: launches it, captures
-//! `fixtures/reference/inset-rect-exact`, and compares it against Florui's
-//! own render of the same insets.
+//! End-to-end check against a real Chromium binary: for each fixture
+//! under `fixtures/reference/`, launches Chromium, captures its HTML/CSS,
+//! and compares it against Florui's own real style/layout/paint render of
+//! the same bare element (see `florui_conformance::engine`) — the actual
+//! proof that the framework's default element stylesheet (`h1`–`h6`'s
+//! font-size/margin scale, `p`'s margin, block display) matches a real
+//! browser, not just that its CSS numbers look plausible.
 //!
 //! `#[ignore]`d because no Chromium revision is pinned/vendored for CI in
 //! this slice (see `driver.rs`'s `ChromiumOptions::executable` docs). Run
@@ -15,33 +19,38 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use florui_conformance::driver::{ChromiumDriver, ChromiumOptions};
-use florui_conformance::geometry::{BoxGeometryPx, compare_geometry};
+use florui_conformance::engine::render_fixture;
+use florui_conformance::geometry::compare_geometry;
 use florui_conformance::pixels::{PixelDiffOptions, compare_pixels};
 use florui_conformance::reference_fixture::load_reference_fixture;
-use florui_devtools::scene::{element_box, render_rgba8_inset};
+use florui_conformance::report::{Outcome, classify};
 
-fn fixture_dir() -> PathBuf {
+fn fixture_dir(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
         .join("fixtures")
         .join("reference")
-        .join("inset-rect-exact")
+        .join(name)
 }
 
-#[test]
-#[ignore = "requires a real Chromium binary, set FLORUI_CHROMIUM_TEST to run"]
-fn exact_fixture_matches_chromium() {
+/// Loads `name`'s fixture, captures it in a real Chromium instance,
+/// renders the equivalent bare element through Florui's own real
+/// pipeline, and asserts the two match per the fixture's own declared
+/// [`florui_conformance::reference_fixture::Classification`].
+fn run_fixture(name: &str) {
     let Some(chromium) = std::env::var_os("FLORUI_CHROMIUM_TEST") else {
         panic!(
             "set FLORUI_CHROMIUM_TEST to a Chrome/Edge/Chromium executable path to run this test"
         );
     };
 
-    let fixture = load_reference_fixture(&fixture_dir()).expect("fixture should load");
+    let fixture = load_reference_fixture(&fixture_dir(name)).expect("fixture should load");
 
-    let profile_dir =
-        std::env::temp_dir().join(format!("florui-conformance-it-{}", std::process::id()));
+    let profile_dir = std::env::temp_dir().join(format!(
+        "florui-conformance-it-{name}-{}",
+        std::process::id()
+    ));
     let driver = ChromiumDriver::launch(ChromiumOptions {
         executable: PathBuf::from(chromium),
         user_data_dir: profile_dir.clone(),
@@ -53,57 +62,61 @@ fn exact_fixture_matches_chromium() {
     let capture = driver.capture(&fixture).expect("capture should succeed");
 
     let viewport = &fixture.manifest.viewport;
-    let insets = fixture
-        .manifest
-        .expected
-        .insets_css_px
-        .to_physical(viewport.device_pixel_ratio);
-    let engine_pixels = render_rgba8_inset(
-        viewport.width_physical_px(),
-        viewport.height_physical_px(),
-        parse_hex(&fixture.manifest.expected.canvas_color),
-        parse_hex(&fixture.manifest.expected.element_color),
-        insets,
+    assert_eq!(
+        viewport.device_pixel_ratio, 1.0,
+        "florui_conformance::engine only supports device_pixel_ratio 1.0 so far — \
+         see its own module doc"
     );
-    let engine_image = image::RgbaImage::from_raw(
-        viewport.width_physical_px(),
-        viewport.height_physical_px(),
-        engine_pixels,
+    let engine = render_fixture(
+        &fixture.manifest.florui,
+        &fixture.manifest.canvas_color,
+        viewport.width_css_px,
+        viewport.height_css_px,
     )
-    .expect("engine pixels should match declared dimensions");
+    .expect("engine render should succeed");
 
-    let pixel_report = compare_pixels(&capture.image, &engine_image, &PixelDiffOptions::default())
+    let pixel_report = compare_pixels(&capture.image, &engine.image, &PixelDiffOptions::default())
         .expect("dimensions should match");
-    assert!(
-        pixel_report.summary.is_exact_match(),
-        "expected zero pixel diff, got {} differing pixels ({:.2}%)",
-        pixel_report.summary.differing_pixels,
-        pixel_report.summary.percent_different
-    );
+    // 1.5px of geometry tolerance: measured live against Chromium, every
+    // one of this slice's 8 fixtures landed at or under 1.0px of its own
+    // accord (each engine's own float rounding in text shaping/line-height
+    // math), so this leaves real headroom above what was actually
+    // observed rather than sitting right at that boundary.
+    let geometry_report =
+        compare_geometry(capture.element_box_css_px, engine.element_box_css_px, 1.5);
 
-    let engine_box = element_box(
-        viewport.width_physical_px(),
-        viewport.height_physical_px(),
-        insets,
-    )
-    .expect("box should fit the viewport");
-    let engine_box_css_px = BoxGeometryPx::from_physical(
-        engine_box.x,
-        engine_box.y,
-        engine_box.width,
-        engine_box.height,
-        viewport.device_pixel_ratio,
-    );
-    let geometry_report = compare_geometry(capture.element_box_css_px, engine_box_css_px, 0.0);
-    assert!(
-        geometry_report.within_tolerance,
-        "geometry mismatch: reference {:?} vs engine {:?} (max delta {}px)",
-        geometry_report.reference, geometry_report.engine, geometry_report.max_axis_delta_px
+    let outcome = classify(
+        &fixture.manifest.classification,
+        &pixel_report.summary,
+        &geometry_report,
     );
 
     std::fs::remove_dir_all(&profile_dir).ok();
+
+    assert_eq!(
+        outcome,
+        Outcome::Pass,
+        "fixture {name} failed — pixels: {:?}, geometry: {:?}",
+        pixel_report.summary,
+        geometry_report
+    );
 }
 
-fn parse_hex(hex: &str) -> florui_devtools::color::Rgba {
-    florui_devtools::color::parse_hex_color(hex).expect("fixture colors must be valid hex")
+macro_rules! fixture_test {
+    ($test_name:ident, $fixture_id:literal) => {
+        #[test]
+        #[ignore = "requires a real Chromium binary, set FLORUI_CHROMIUM_TEST to run"]
+        fn $test_name() {
+            run_fixture($fixture_id);
+        }
+    };
 }
+
+fixture_test!(div_default_matches_chromium, "div-default");
+fixture_test!(p_default_matches_chromium, "p-default");
+fixture_test!(h1_default_matches_chromium, "h1-default");
+fixture_test!(h2_default_matches_chromium, "h2-default");
+fixture_test!(h3_default_matches_chromium, "h3-default");
+fixture_test!(h4_default_matches_chromium, "h4-default");
+fixture_test!(h5_default_matches_chromium, "h5-default");
+fixture_test!(h6_default_matches_chromium, "h6-default");

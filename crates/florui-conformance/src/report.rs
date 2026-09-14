@@ -17,6 +17,9 @@ pub struct ArtifactPaths {
     pub result: PathBuf,
     pub diff: PathBuf,
     pub overlay: PathBuf,
+    /// The red/cyan anaglyph (`pixels::anaglyph_overlay`) — a real match
+    /// reads as gray at a glance, a mismatch as a colored fringe.
+    pub anaglyph: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,7 +123,6 @@ mod tests {
     use super::*;
     use crate::geometry::{BoxGeometryPx, compare_geometry};
     use crate::pixels::{PixelDiffOptions, compare_pixels};
-    use crate::reference_fixture::InsetsSpec;
     use image::{Rgba as ImageRgba, RgbaImage};
 
     fn solid(color: [u8; 4]) -> RgbaImage {
@@ -233,6 +235,7 @@ mod tests {
                 result: PathBuf::from("result.png"),
                 diff: PathBuf::from("diff.png"),
                 overlay: PathBuf::from("overlay.png"),
+                anaglyph: PathBuf::from("anaglyph.png"),
             },
             outcome: Outcome::Pass,
         };
@@ -242,19 +245,5 @@ mod tests {
         assert_eq!(round_tripped.fixture_id, report.fixture_id);
         assert_eq!(round_tripped.outcome, report.outcome);
         assert_eq!(round_tripped.geometry, report.geometry);
-    }
-
-    #[test]
-    fn insets_spec_is_serializable_field_of_expected_result() {
-        // Regression guard: InsetsSpec must stay plain-struct-shaped (not
-        // tagged) since manifest.json authors it by hand.
-        let insets = InsetsSpec {
-            top: 8,
-            right: 24,
-            bottom: 40,
-            left: 56,
-        };
-        let json = serde_json::to_string(&insets).unwrap();
-        assert_eq!(json, r#"{"top":8,"right":24,"bottom":40,"left":56}"#);
     }
 }
