@@ -48,7 +48,10 @@ use style::{Atom, LocalName};
 use stylo_atoms::Atom as WeakAtom;
 use stylo_dom::ElementState;
 
-use crate::cascade::{ComputedStyle, Edges};
+use crate::cascade::{
+    ComputedStyle, ContentAlignment, Display as FlorDisplay, Edges, FlexDirection, FlexWrap,
+    ItemAlignment,
+};
 use crate::color::Rgba;
 use crate::interaction::InteractionState;
 use crate::stylesheet_parse::Rule;
@@ -845,6 +848,131 @@ fn to_computed_style(values: &ComputedValues) -> ComputedStyle {
             left: to_length(&padding.padding_left),
         },
         font_size: font.font_size.computed_size.0.px(),
+        display: to_display(values.get_box().display),
+        flex_direction: to_flex_direction(position.flex_direction),
+        flex_wrap: to_flex_wrap(position.flex_wrap),
+        justify_content: to_content_alignment(position.justify_content.0),
+        align_content: to_content_alignment(position.align_content.0),
+        align_items: to_item_alignment(position.align_items.0),
+        align_self: to_item_alignment(position.align_self.0.0),
+        flex_grow: position.flex_grow.0,
+        flex_shrink: position.flex_shrink.0,
+        flex_basis: to_flex_basis(&position.flex_basis),
+        column_gap: to_gap(&position.column_gap),
+        row_gap: to_gap(&position.row_gap),
+    }
+}
+
+/// `Display`'s own `inside()`/`outside()` split matches real CSS's
+/// two-value `display` syntax; only the *inside* half (how a node lays out
+/// its own children) matters to this crate — `outside` (how this node
+/// itself participates in its parent's formatting context: inline vs.
+/// block) isn't tracked in [`ComputedStyle`] yet.
+fn to_display(display: style::values::computed::Display) -> FlorDisplay {
+    use style::values::specified::box_::DisplayInside;
+    match display.inside() {
+        DisplayInside::Flex => FlorDisplay::Flex,
+        _ => FlorDisplay::Block,
+    }
+}
+
+fn to_flex_direction(value: style::computed_values::flex_direction::T) -> FlexDirection {
+    use style::computed_values::flex_direction::T;
+    match value {
+        T::Row => FlexDirection::Row,
+        T::RowReverse => FlexDirection::RowReverse,
+        T::Column => FlexDirection::Column,
+        T::ColumnReverse => FlexDirection::ColumnReverse,
+    }
+}
+
+fn to_flex_wrap(value: style::computed_values::flex_wrap::T) -> FlexWrap {
+    use style::computed_values::flex_wrap::T;
+    match value {
+        T::Nowrap => FlexWrap::NoWrap,
+        T::Wrap => FlexWrap::Wrap,
+        T::WrapReverse => FlexWrap::WrapReverse,
+    }
+}
+
+/// Shared by `justify-content`/`align-content`, both a `ContentDistribution`
+/// in Stylo — `normal` (no fallback alignment declared) maps to `None`,
+/// distinct from every explicit keyword.
+fn to_content_alignment(
+    value: style::values::specified::align::ContentDistribution,
+) -> Option<ContentAlignment> {
+    use style::values::specified::align::AlignFlags;
+    match value.primary().value() {
+        AlignFlags::START => Some(ContentAlignment::Start),
+        AlignFlags::END => Some(ContentAlignment::End),
+        AlignFlags::LEFT => Some(ContentAlignment::Start),
+        AlignFlags::RIGHT => Some(ContentAlignment::End),
+        AlignFlags::FLEX_START => Some(ContentAlignment::FlexStart),
+        AlignFlags::FLEX_END => Some(ContentAlignment::FlexEnd),
+        AlignFlags::CENTER => Some(ContentAlignment::Center),
+        AlignFlags::STRETCH => Some(ContentAlignment::Stretch),
+        AlignFlags::SPACE_BETWEEN => Some(ContentAlignment::SpaceBetween),
+        AlignFlags::SPACE_AROUND => Some(ContentAlignment::SpaceAround),
+        AlignFlags::SPACE_EVENLY => Some(ContentAlignment::SpaceEvenly),
+        _ => None,
+    }
+}
+
+/// Shared by `align-items`/`align-self`, both an `AlignFlags` in Stylo —
+/// `auto`/`normal` map to `None`, meaning "defer to the container's own
+/// `align-items`" for `align-self`, or "stretch" for `align-items` (Taffy's
+/// own default already matches CSS's real initial value there, so
+/// `florui-layout` can supply that default itself rather than this
+/// function inventing one).
+fn to_item_alignment(value: style::values::specified::align::AlignFlags) -> Option<ItemAlignment> {
+    use style::values::specified::align::AlignFlags;
+    match value.value() {
+        AlignFlags::STRETCH => Some(ItemAlignment::Stretch),
+        AlignFlags::FLEX_START => Some(ItemAlignment::FlexStart),
+        AlignFlags::FLEX_END => Some(ItemAlignment::FlexEnd),
+        AlignFlags::SELF_START => Some(ItemAlignment::Start),
+        AlignFlags::SELF_END => Some(ItemAlignment::End),
+        AlignFlags::START => Some(ItemAlignment::Start),
+        AlignFlags::END => Some(ItemAlignment::End),
+        AlignFlags::LEFT => Some(ItemAlignment::Start),
+        AlignFlags::RIGHT => Some(ItemAlignment::End),
+        AlignFlags::CENTER => Some(ItemAlignment::Center),
+        AlignFlags::BASELINE => Some(ItemAlignment::Baseline),
+        _ => None,
+    }
+}
+
+/// `flex-basis` shares `width`/`height`'s own generated size type
+/// (`content` aside) — see [`to_optional_length`] for the same fallback
+/// reasoning on anything this crate can't yet resolve to one pixel value.
+fn to_flex_basis(
+    value: &style::values::generics::flex::GenericFlexBasis<
+        style::values::generics::length::GenericSize<
+            style::values::generics::NonNegative<style::values::computed::LengthPercentage>,
+        >,
+    >,
+) -> Option<f32> {
+    use style::values::generics::flex::GenericFlexBasis;
+    match value {
+        GenericFlexBasis::Content => None,
+        GenericFlexBasis::Size(size) => to_optional_length(size),
+    }
+}
+
+/// `column-gap`/`row-gap` share this generated type — `normal` (the CSS
+/// initial value) is `0px`, same as this crate's own [`ComputedStyle::padding`]
+/// treats anything it can't resolve to one pixel value.
+fn to_gap(
+    value: &style::values::generics::length::GenericLengthPercentageOrNormal<
+        style::values::generics::NonNegative<style::values::computed::LengthPercentage>,
+    >,
+) -> f32 {
+    use style::values::generics::length::GenericLengthPercentageOrNormal;
+    match value {
+        GenericLengthPercentageOrNormal::LengthPercentage(lp) => {
+            lp.0.to_length().map(|length| length.px()).unwrap_or(0.0)
+        }
+        GenericLengthPercentageOrNormal::Normal => 0.0,
     }
 }
 
