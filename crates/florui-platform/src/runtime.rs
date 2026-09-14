@@ -17,6 +17,8 @@ use florui_reactive::{DirtyFlag, Scope, provide_context};
 use florui_style::{Arena, ComputedStyle, InteractionState, NodeId, Rule, StyleError};
 use taffy::prelude::*;
 
+use crate::size_observer::SizeObserverRegistry;
+
 pub struct UiRuntime {
     scope: Scope,
     dirty: DirtyFlag,
@@ -37,6 +39,10 @@ pub struct UiRuntime {
     /// callback a [`florui_reactive::Signal::set`] anywhere under the root
     /// already uses.
     executor: Rc<LocalExecutor>,
+    /// Reachable by [`crate::use_committed_size`] via context, the same
+    /// way `executor` is. Notified after each [`Self::update`]'s own
+    /// layout, once real geometry for that render exists.
+    size_observers: Rc<SizeObserverRegistry>,
 }
 
 impl UiRuntime {
@@ -71,6 +77,7 @@ impl UiRuntime {
             styles: HashMap::new(),
             layouts: HashMap::new(),
             executor: Rc::new(LocalExecutor::new()),
+            size_observers: Rc::new(SizeObserverRegistry::new()),
         };
         runtime.update(viewport);
         runtime
@@ -113,8 +120,10 @@ impl UiRuntime {
     /// without rendering again.
     pub fn update(&mut self, viewport: Size<AvailableSpace>) {
         let executor = Rc::clone(&self.executor);
+        let size_observers = Rc::clone(&self.size_observers);
         let tree = self.scope.render(|| {
             provide_context(Rc::clone(&executor) as Rc<dyn Executor>);
+            provide_context(Rc::clone(&size_observers));
             (self.root)()
         });
         // Lets any resource the render just started (or a prior task's
@@ -124,6 +133,9 @@ impl UiRuntime {
         self.styles = florui_style::compute(&self.arena, &self.rules, &self.interaction);
         self.layouts = florui_layout::compute_layout(&self.arena, &self.styles, viewport)
             .expect("this tree's explicit sizes never produce a layout failure");
+        // After layout, not before: a committed-size observer must see
+        // this render's own real geometry, not the previous one's.
+        self.size_observers.notify(&self.arena, &self.layouts);
     }
 
     /// The geometry computed by the most recent [`Self::update`].
@@ -190,6 +202,7 @@ mod tests {
     use florui_reactive::{Resource, use_resource};
 
     use super::*;
+    use crate::use_committed_size;
 
     fn viewport() -> Size<AvailableSpace> {
         Size {
@@ -414,5 +427,95 @@ mod tests {
         runtime.clear_dirty();
         runtime.update(viewport());
         assert_eq!(status_text(find_status(&runtime), &runtime), "content");
+    }
+
+    #[test]
+    fn use_committed_size_notifies_after_layout_and_coalesces_unchanged_sizes() {
+        let sizes = Rc::new(RefCell::new(Vec::<(f32, f32)>::new()));
+        let sizes_for_root = Rc::clone(&sizes);
+
+        let root = move || {
+            let sizes = Rc::clone(&sizes_for_root);
+            let long = use_signal(|| false);
+            let toggle = long.clone();
+            let text = if long.get() {
+                "a much longer run of text than before"
+            } else {
+                "short"
+            };
+            use_committed_size("box", move |w, h| sizes.borrow_mut().push((w, h)));
+            view! {
+                <div>
+                    <div id="box">{text}</div>
+                    <button onclick={move || toggle.set(true)} />
+                </div>
+            }
+        };
+
+        let mut runtime = UiRuntime::with_rules(Vec::new(), root, Size::MAX_CONTENT);
+        assert_eq!(
+            sizes.borrow().len(),
+            1,
+            "the very first layout already has a committed size to report"
+        );
+        let (short_width, _) = sizes.borrow()[0];
+
+        let button = runtime
+            .geometry()
+            .0
+            .find(|a, id| a.tag(id) == "button")
+            .unwrap();
+        runtime.dispatch_click(button);
+        runtime.update(Size::MAX_CONTENT);
+
+        assert_eq!(
+            sizes.borrow().len(),
+            2,
+            "the text grew wider, so the observer must fire again"
+        );
+        let (long_width, _) = sizes.borrow()[1];
+        assert!(
+            long_width > short_width,
+            "the longer text must measure wider than the short one"
+        );
+
+        // Nothing changed this time — must not renotify.
+        runtime.update(Size::MAX_CONTENT);
+        assert_eq!(
+            sizes.borrow().len(),
+            2,
+            "an unchanged committed size must not renotify"
+        );
+    }
+
+    #[test]
+    fn use_committed_size_stops_firing_once_its_scope_unmounts() {
+        let sizes = Rc::new(RefCell::new(0));
+        let sizes_for_root = Rc::clone(&sizes);
+        let show = Rc::new(Cell::new(true));
+        let show_for_root = Rc::clone(&show);
+
+        let root = move || {
+            let sizes = Rc::clone(&sizes_for_root);
+            if show_for_root.get() {
+                use_child_scope_keyed("observed", move || {
+                    use_committed_size("box", move |_, _| *sizes.borrow_mut() += 1);
+                    view! { <div id="box">{"content"}</div> }
+                })
+            } else {
+                view! { <div /> }
+            }
+        };
+
+        let mut runtime = UiRuntime::with_rules(Vec::new(), root, viewport());
+        assert_eq!(*sizes.borrow(), 1);
+
+        show.set(false);
+        runtime.update(viewport());
+        assert_eq!(
+            *sizes.borrow(),
+            1,
+            "unmounting the observing scope must dispose its attachment, not fire it again"
+        );
     }
 }
