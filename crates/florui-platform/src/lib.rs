@@ -8,8 +8,10 @@
 //! can disable it (`default-features = false`).
 
 mod runtime;
+mod size_observer;
 
 pub use runtime::UiRuntime;
+pub use size_observer::{SizeObserverRegistry, use_committed_size};
 
 #[cfg(feature = "desktop")]
 mod desktop;
