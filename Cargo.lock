@@ -1172,11 +1172,15 @@ name = "florui-conformance"
 version = "0.1.0"
 dependencies = [
  "chromiumoxide",
- "florui-devtools",
+ "florui",
+ "florui-layout",
+ "florui-paint",
+ "florui-style",
  "futures",
  "image",
  "serde",
  "serde_json",
+ "taffy",
  "tokio",
  "url",
 ]

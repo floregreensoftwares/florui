@@ -6,6 +6,7 @@
 //! runtime crate.
 
 pub mod driver;
+pub mod engine;
 pub mod geometry;
 pub mod pin;
 pub mod pixels;

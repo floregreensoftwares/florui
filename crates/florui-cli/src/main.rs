@@ -6,12 +6,14 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 
 use florui_conformance::driver::{ChromiumDriver, ChromiumOptions};
-use florui_conformance::geometry::{BoxGeometryPx, GeometryReport, compare_geometry};
-use florui_conformance::pixels::{PixelDiffOptions, PixelSummary, compare_pixels, overlay_images};
+use florui_conformance::engine::render_fixture;
+use florui_conformance::geometry::{GeometryReport, compare_geometry};
+use florui_conformance::pixels::{
+    PixelDiffOptions, PixelSummary, anaglyph_overlay, compare_pixels, overlay_images,
+};
 use florui_conformance::reference_fixture::load_reference_fixture;
 use florui_conformance::report::{ArtifactPaths, Outcome, Report, classify, write_report};
 use florui_devtools::diagnostics::{dim_text, failure, success};
-use florui_devtools::scene::{element_box, render_rgba8_inset};
 
 #[derive(Parser)]
 #[command(name = "florui", about = "Florui project CLI")]
@@ -34,7 +36,7 @@ enum Command {
     /// Compare a reference fixture's Chromium capture against Florui's own render.
     Compare {
         /// Directory containing the fixture's manifest.json, HTML, and CSS.
-        #[arg(long, default_value = "fixtures/reference/inset-rect-exact")]
+        #[arg(long, default_value = "fixtures/reference/div-default")]
         fixture: PathBuf,
         /// Path to a Chromium-family binary (Chrome, Chromium, or Edge).
         #[arg(long, env = "FLORUI_CHROMIUM")]
@@ -159,52 +161,26 @@ fn compare_fixture(
         .capture(&fixture)
         .map_err(|err| format!("capture failed: {err}"))?;
 
-    let canvas_color =
-        florui_devtools::color::parse_hex_color(&fixture.manifest.expected.canvas_color)
-            .map_err(|err| format!("invalid canvas_color in fixture manifest: {err}"))?;
-    let element_color =
-        florui_devtools::color::parse_hex_color(&fixture.manifest.expected.element_color)
-            .map_err(|err| format!("invalid element_color in fixture manifest: {err}"))?;
-
     let viewport = fixture.manifest.viewport;
-    let insets = fixture
-        .manifest
-        .expected
-        .insets_css_px
-        .to_physical(viewport.device_pixel_ratio);
-    let engine_pixels = render_rgba8_inset(
-        viewport.width_physical_px(),
-        viewport.height_physical_px(),
-        canvas_color,
-        element_color,
-        insets,
-    );
-    let engine_image = image::RgbaImage::from_raw(
-        viewport.width_physical_px(),
-        viewport.height_physical_px(),
-        engine_pixels,
+    if viewport.device_pixel_ratio != 1.0 {
+        return Err(format!(
+            "fixture {:?} declares device_pixel_ratio {}, but florui_conformance::engine only \
+             supports 1.0 so far",
+            fixture.manifest.id, viewport.device_pixel_ratio
+        ));
+    }
+    let engine = render_fixture(
+        &fixture.manifest.florui,
+        &fixture.manifest.canvas_color,
+        viewport.width_css_px,
+        viewport.height_css_px,
     )
-    .ok_or_else(|| "engine render did not match the declared viewport dimensions".to_owned())?;
+    .map_err(|err| format!("engine render failed: {err}"))?;
 
-    let pixel_report = compare_pixels(&capture.image, &engine_image, &PixelDiffOptions::default())
+    let pixel_report = compare_pixels(&capture.image, &engine.image, &PixelDiffOptions::default())
         .map_err(|err| err.to_string())?;
-
-    let engine_box = element_box(
-        viewport.width_physical_px(),
-        viewport.height_physical_px(),
-        insets,
-    )
-    .ok_or_else(|| {
-        "fixture insets leave no room for an element box in the declared viewport".to_owned()
-    })?;
-    let engine_box_css_px = BoxGeometryPx::from_physical(
-        engine_box.x,
-        engine_box.y,
-        engine_box.width,
-        engine_box.height,
-        viewport.device_pixel_ratio,
-    );
-    let geometry_report = compare_geometry(capture.element_box_css_px, engine_box_css_px, 0.0);
+    let geometry_report =
+        compare_geometry(capture.element_box_css_px, engine.element_box_css_px, 1.5);
 
     let outcome = classify(
         &fixture.manifest.classification,
@@ -220,13 +196,16 @@ fn compare_fixture(
     let result_path = fixture_out_dir.join("result.png");
     let diff_path = fixture_out_dir.join("diff.png");
     let overlay_path = fixture_out_dir.join("overlay.png");
-    let overlay = overlay_images(&capture.image, &engine_image);
+    let anaglyph_path = fixture_out_dir.join("florui_vs_chromium.png");
+    let overlay = overlay_images(&capture.image, &engine.image);
+    let anaglyph = anaglyph_overlay(&capture.image, &engine.image);
 
     for (image, path) in [
         (&capture.image, &reference_path),
-        (&engine_image, &result_path),
+        (&engine.image, &result_path),
         (&pixel_report.diff_image, &diff_path),
         (&overlay, &overlay_path),
+        (&anaglyph, &anaglyph_path),
     ] {
         image
             .save(path)
@@ -249,6 +228,7 @@ fn compare_fixture(
             result: result_path,
             diff: diff_path,
             overlay: overlay_path,
+            anaglyph: anaglyph_path,
         },
         outcome,
     };

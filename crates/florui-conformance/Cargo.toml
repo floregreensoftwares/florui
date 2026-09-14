@@ -10,7 +10,11 @@ name = "florui_conformance"
 
 [dependencies]
 chromiumoxide = "0.9.1"
-florui-devtools = { path = "../florui-devtools" }
+florui = { path = "../florui" }
+florui-layout = { path = "../florui-layout" }
+florui-paint = { path = "../florui-paint" }
+florui-style = { path = "../florui-style" }
+taffy = "0.14"
 futures = "0.3.34"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 serde = { version = "1.0.229", features = ["derive"] }

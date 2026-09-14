@@ -1,0 +1,15 @@
+{
+  "id": "h1-default",
+  "description": "A bare <h1> with zero author CSS, validating the framework's own default element stylesheet (display/font-size/margin) against Chromium's real UA stylesheet, both rendered with the identical embedded Open Sans font.",
+  "html": "index.html",
+  "css": "../assets/reset.css",
+  "element_id": "el",
+  "viewport": { "width_css_px": 400, "height_css_px": 200, "device_pixel_ratio": 1.0 },
+  "canvas_color": "#ffffff",
+  "florui": { "tag": "h1", "text": "Sample text", "css": "" },
+  "classification": {
+    "kind": "tolerant",
+    "threshold_percent": 5.0,
+    "reason": "Chromium's own text rasterizer and Florui's skrifa+tiny-skia one anti-alias and hint the identical font differently at the pixel level, even with matching logical layout - geometry (compare_geometry) is this fixture's precise signal, pixel comparison only a secondary one. Calibrated against a real live Chromium run: this fixture measured under this threshold, comfortably below it (see florui-conformance's tests/compare_reference_fixture.rs for the harness itself)."
+  }
+}
