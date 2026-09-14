@@ -127,6 +127,22 @@ fn paint_node(
             fill_rect(buffer, x, y, layout.width, layout.height, background);
         }
 
+        let no_border_side = florui_style::BorderSide {
+            width: 0.0,
+            color: Rgba::TRANSPARENT,
+        };
+        let no_border = florui_style::Edges {
+            top: no_border_side,
+            right: no_border_side,
+            bottom: no_border_side,
+            left: no_border_side,
+        };
+        let border = style.map_or(no_border, |s| s.border);
+        // Painted on top of the background, before content — real CSS's
+        // own painting order for a normal-flow box with no stacking
+        // context (background, then border, then content).
+        paint_border(buffer, x, y, layout.width, layout.height, border);
+
         let color = style.map_or(Rgba::opaque(0, 0, 0), |s| s.color);
         let no_padding = florui_style::Edges {
             top: 0.0,
@@ -135,13 +151,20 @@ fn paint_node(
             left: 0.0,
         };
         let padding = style.map_or(no_padding, |s| s.padding);
+        // Content starts inside both the border and the padding — the same
+        // content-box math `florui_layout`'s own `to_taffy_style` doc
+        // describes for sizing applies to painting's own offset too.
+        let content_x = x + border.left.width + padding.left;
+        let content_y = y + border.top.width + padding.top;
         // The box's own final content width, whatever layout resolved it
         // to (wrapped or not) — shaping at exactly this width always
         // reproduces what layout already measured: an intrinsically
         // unwrapped box is already exactly as wide as its one line, so
         // wrapping "at" that width changes nothing, and a box layout
         // wrapped to fit stays wrapped identically here.
-        let content_width = (layout.width - padding.left - padding.right).max(0.0);
+        let content_width =
+            (layout.width - border.left.width - border.right.width - padding.left - padding.right)
+                .max(0.0);
 
         if florui_layout::is_inline_formatting_context(arena, styles, node) {
             // A real mixed text/inline-element node: rebuilt and
@@ -159,13 +182,7 @@ fn paint_node(
                 node,
                 content_width,
             ) {
-                paint_shaped_runs(
-                    buffer,
-                    &shaped.runs,
-                    x + padding.left,
-                    y + padding.top,
-                    color,
-                );
+                paint_shaped_runs(buffer, &shaped.runs, content_x, content_y, color);
             }
         } else {
             let text = arena.text_content(node);
@@ -182,8 +199,8 @@ fn paint_node(
                         font_size,
                         font_family,
                         color,
-                        x: x + padding.left,
-                        y: y + padding.top,
+                        x: content_x,
+                        y: content_y,
                         wrap_width: content_width,
                     },
                 );
@@ -208,6 +225,51 @@ fn fill_rect(buffer: &mut Canvas, x: f32, y: f32, width: f32, height: f32, color
     paint.set_color_rgba8(color.r, color.g, color.b, color.a);
     paint.anti_alias = false;
     buffer.fill_rect(rect, &paint, Transform::identity(), None);
+}
+
+/// Paints `border`'s four sides as flat rectangles at the box's own outer
+/// edges — `(x, y, width, height)` is the whole border-box, matching
+/// `fill_rect`'s own background call in [`paint_node`]. A zero-width side
+/// (real CSS's own invisible default; see [`florui_style::BorderSide`]'s
+/// doc) paints nothing. No border-radius or per-corner miter join yet —
+/// `florui_style::BorderSide` has neither — so adjacent sides simply
+/// overlap by their own width at each corner, which a flat single color
+/// per side (this crate's only supported case, real CSS's own `solid`)
+/// paints identically to a mitered corner anyway.
+fn paint_border(
+    buffer: &mut Canvas,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    border: florui_style::Edges<florui_style::BorderSide>,
+) {
+    if border.top.width > 0.0 {
+        fill_rect(buffer, x, y, width, border.top.width, border.top.color);
+    }
+    if border.bottom.width > 0.0 {
+        fill_rect(
+            buffer,
+            x,
+            y + height - border.bottom.width,
+            width,
+            border.bottom.width,
+            border.bottom.color,
+        );
+    }
+    if border.left.width > 0.0 {
+        fill_rect(buffer, x, y, border.left.width, height, border.left.color);
+    }
+    if border.right.width > 0.0 {
+        fill_rect(
+            buffer,
+            x + width - border.right.width,
+            y,
+            border.right.width,
+            height,
+            border.right.color,
+        );
+    }
 }
 
 /// Shapes `text` (wrapped at `wrap_width`, matching whatever content width
@@ -385,6 +447,66 @@ mod tests {
         assert_eq!(pixel_rgb(&buffer, 5, 5), [0x1e, 0x1e, 0x22]);
         // Inside the button (offset by the card's padding).
         assert_eq!(pixel_rgb(&buffer, 15, 15), [0x42, 0x73, 0x4f]);
+    }
+
+    #[test]
+    fn a_border_paints_its_own_color_at_the_boxs_outer_edge() {
+        let tree: Element = view! { <div class="box" /> };
+        let css = "
+            .box {
+                width: 20px; height: 20px; background-color: #1e1e22;
+                border-top-width: 4px; border-top-style: solid; border-top-color: #ff0000;
+                border-left-width: 4px; border-left-style: solid; border-left-color: #ff0000;
+            }
+        ";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let layouts = florui_layout::compute_layout(&arena, &styles, Size::MAX_CONTENT).unwrap();
+
+        let node = arena.roots()[0];
+        let width = layouts[&node].width.ceil() as u32;
+        let height = layouts[&node].height.ceil() as u32;
+        let buffer = paint_to_buffer(
+            width,
+            height,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+        );
+
+        // Inside the 4px border strip, on both the top and left edges.
+        assert_eq!(pixel_rgb(&buffer, 10, 1), [0xff, 0, 0], "top border");
+        assert_eq!(pixel_rgb(&buffer, 1, 10), [0xff, 0, 0], "left border");
+        // Past the border, into the content-box background — not still
+        // border color, and not the canvas's own clear color either.
+        assert_eq!(pixel_rgb(&buffer, 10, 10), [0x1e, 0x1e, 0x22]);
+    }
+
+    #[test]
+    fn a_border_style_of_none_paints_no_border_despite_an_explicit_width() {
+        let tree: Element = view! { <div class="box" /> };
+        let css = "
+            .box {
+                width: 20px; height: 20px; background-color: #1e1e22;
+                border-top-width: 4px; border-top-color: #ff0000;
+            }
+        ";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let layouts = florui_layout::compute_layout(&arena, &styles, Size::MAX_CONTENT).unwrap();
+
+        let buffer = paint_to_buffer(20, 20, Rgba::opaque(0, 0, 0), &arena, &styles, &layouts);
+        // No border-style declared means border-style: none, real CSS's
+        // own initial value — every pixel is the flat background color,
+        // including the strip a rendered border would have occupied.
+        for py in 0..20 {
+            for px in 0..20 {
+                assert_eq!(pixel_rgb(&buffer, px, py), [0x1e, 0x1e, 0x22]);
+            }
+        }
     }
 
     #[test]

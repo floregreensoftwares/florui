@@ -24,9 +24,13 @@
 //! `florui_layout`'s own module doc for that algorithm's exact, honest
 //! bound (one level of mixed inline content; a plain `Inline` child, e.g.
 //! a bare `<span>`, doesn't get its own box yet, only `InlineBlock`).
-//! `button`'s default border/padding appearance still needs a `border`
-//! property `ComputedStyle` doesn't have yet — tracked separately, not
-//! attempted here.
+//!
+//! `button`'s `1px solid #767676` border approximates Chromium's actual
+//! default control border color (a `ButtonBorder`/`buttonborder` system
+//! color, not invented) the same way the embedded sans-serif font
+//! approximates Arial — a real, fixed value rather than querying the OS's
+//! own theme, which this crate has no mechanism for. Default padding isn't
+//! added here yet — tracked separately, not attempted in this slice.
 
 use std::sync::LazyLock;
 
@@ -45,6 +49,7 @@ const CSS: &str = "
 
     button {
         display: inline-block;
+        border: 1px solid #767676;
     }
 
     h1 { font-size: 2em; margin-top: 0.67em; margin-bottom: 0.67em; }
@@ -140,6 +145,39 @@ mod tests {
 
         assert_eq!(computed[&span].display, Display::Inline);
         assert_eq!(computed[&button].display, Display::InlineBlock);
+    }
+
+    #[test]
+    fn button_resolves_a_visible_default_border_on_every_side_with_zero_author_css() {
+        let tree: Element = view! {
+            <div>
+                <button />
+            </div>
+        };
+        let arena = Arena::build(&tree);
+        let div = arena.roots()[0];
+        let button = arena.children(div)[0];
+        let rules = parse_stylesheet("").unwrap();
+        let computed = compute(&arena, &rules, &InteractionState::new());
+
+        let border = computed[&button].border;
+        for side in [border.top, border.right, border.bottom, border.left] {
+            assert_close(side.width, 1.0, "button border-width");
+            assert_eq!(side.color, crate::color::Rgba::opaque(0x76, 0x76, 0x76));
+        }
+    }
+
+    #[test]
+    fn div_has_no_default_border() {
+        let style = computed_style_of(view! { <div /> });
+        for side in [
+            style.border.top,
+            style.border.right,
+            style.border.bottom,
+            style.border.left,
+        ] {
+            assert_eq!(side.width, 0.0, "div has no default border, unlike button");
+        }
     }
 
     #[test]

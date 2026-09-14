@@ -118,6 +118,22 @@ pub enum ItemAlignment {
     Baseline,
 }
 
+/// One side's resolved border — solid-only, the minimum needed for a
+/// visible default control outline (`stylesheets.md`'s own scope for this
+/// property). Real CSS's other border styles (`dashed`, `dotted`, `double`,
+/// …) still parse and cascade correctly through Stylo; this crate paints
+/// every non-`none`/`hidden` style as a plain solid line, the same
+/// "supported syntax, simplified rendering" tradeoff `stylesheet_parse`'s
+/// own doc already documents for other unrendered CSS. `width` is always
+/// `0.0` for `border-style: none`/`hidden` (real CSS's own initial style,
+/// which makes a border invisible regardless of its width/color) — a
+/// zero-width side needs no separate "is it visible" flag downstream.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BorderSide {
+    pub width: f32,
+    pub color: Rgba,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ComputedStyle {
     pub background_color: Rgba,
@@ -181,6 +197,9 @@ pub struct ComputedStyle {
     pub column_gap: f32,
     /// `row-gap`, the same on the other axis.
     pub row_gap: f32,
+    /// `border-*-width`/`-style`/`-color` per side — see [`BorderSide`]'s
+    /// own doc for the solid-only scope and the `none`/`hidden` collapse.
+    pub border: Edges<BorderSide>,
 }
 
 /// Resolves every node in `arena` against `rules` and `state` — real
@@ -668,5 +687,83 @@ mod tests {
         let overridden = spans.next().unwrap();
         assert_eq!(computed[&inherited].font_family, FontFamily::Monospace);
         assert_eq!(computed[&overridden].font_family, FontFamily::SansSerif);
+    }
+
+    #[test]
+    fn border_resolves_width_and_color_per_side_from_real_css() {
+        let tree: Element = view! { <div class="card" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".card { border-top-width: 2px; border-top-style: solid; border-top-color: #ff0000; \
+             border-left-width: 3px; border-left-style: solid; border-left-color: #00ff00; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        let border = computed[&node].border;
+        assert_eq!(border.top.width, 2.0);
+        assert_eq!(border.top.color, Rgba::opaque(0xff, 0x00, 0x00));
+        assert_eq!(border.left.width, 3.0);
+        assert_eq!(border.left.color, Rgba::opaque(0x00, 0xff, 0x00));
+    }
+
+    /// Real CSS's own initial `border-style` is `none`, which makes a
+    /// border invisible regardless of any `border-width`/`border-color`
+    /// also set — an explicit width with no style set must still resolve
+    /// to a `0.0`-width side, not a visible one.
+    #[test]
+    fn a_border_with_no_style_declared_is_invisible_despite_an_explicit_width() {
+        let tree: Element = view! { <div class="card" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".card { border-top-width: 5px; border-top-color: #ff0000; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(
+            computed[&node].border.top.width, 0.0,
+            "no border-style means border-style: none, which is always invisible"
+        );
+    }
+
+    /// `border-style: none` explicitly set must behave the same as never
+    /// setting a style at all.
+    #[test]
+    fn a_border_explicitly_set_to_none_is_invisible() {
+        let tree: Element = view! { <div class="card" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".card { border-top-width: 5px; border-top-style: none; border-top-color: #ff0000; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].border.top.width, 0.0);
+    }
+
+    #[test]
+    fn border_color_of_currentcolor_resolves_against_this_elements_own_color() {
+        let tree: Element = view! { <div class="card" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".card { color: #123456; border-top-width: 1px; border-top-style: solid; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(
+            computed[&node].border.top.color,
+            Rgba::opaque(0x12, 0x34, 0x56),
+            "no border-color declared means currentcolor, the real CSS initial value"
+        );
+    }
+
+    #[test]
+    fn border_defaults_to_invisible_on_every_side_with_zero_author_css() {
+        let tree: Element = view! { <div /> };
+        let (arena, computed) = styles(&tree, "", &InteractionState::new());
+        let node = arena.roots()[0];
+        let border = computed[&node].border;
+        assert_eq!(border.top.width, 0.0);
+        assert_eq!(border.right.width, 0.0);
+        assert_eq!(border.bottom.width, 0.0);
+        assert_eq!(border.left.width, 0.0);
     }
 }
