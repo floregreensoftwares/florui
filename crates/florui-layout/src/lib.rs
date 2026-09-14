@@ -24,6 +24,23 @@
 //! settle it. A leaf with no text still lays out at `0x0` when it has no
 //! explicit size, since there is nothing to measure it from.
 //!
+//! Real inline formatting context, for a container whose children mix
+//! text with `display: inline`/`inline-block` elements
+//! (`<p>Hello <span>world</span>!</p>`) — Taffy itself has no inline
+//! display mode at all, so this is a genuinely separate algorithm built on
+//! [`florui_text::Font::shape_inline`]'s real multi-style text wrapping
+//! and in-flow boxes, not a translation onto an existing Taffy algorithm
+//! the way flex was. See [`needs_inline_layout`]'s own doc for the exact,
+//! honest bound: one level of mixed inline content (an `Inline`/
+//! `InlineBlock` child must itself be a leaf), every element child must be
+//! inline-level (a block/flex sibling mixed in falls back to the older,
+//! coarser block-only behavior rather than partially-correct output), and
+//! a plain `Inline` child does not get its own [`BoxLayout`] yet — only
+//! its text, mixed into its container's one inline-formatting-context box;
+//! only `InlineBlock` children (real `display: inline-block`, e.g. a
+//! `<button>`) get an exact one, sized to their own content and positioned
+//! within the flow.
+//!
 //! Taffy positions are relative to the parent's content box, matching
 //! Taffy's own convention; see [`absolute_position`] to accumulate them
 //! into a position relative to the layout root.
@@ -32,7 +49,8 @@ use std::collections::HashMap;
 
 use florui_style::{
     Arena, ComputedStyle, ContentAlignment, Display as StyleDisplay,
-    FlexDirection as StyleFlexDirection, FlexWrap as StyleFlexWrap, ItemAlignment, NodeId,
+    FlexDirection as StyleFlexDirection, FlexWrap as StyleFlexWrap, InlineItem as StyleInlineItem,
+    ItemAlignment, NodeId,
 };
 use taffy::prelude::*;
 use taffy::{Baselines, compute_leaf_layout};
@@ -77,6 +95,245 @@ fn to_text_font_family(value: florui_style::FontFamily) -> florui_text::FontFami
     }
 }
 
+/// One piece of a container's real inline formatting context, already
+/// resolved down to what [`florui_text::Font::shape_inline`] needs — built
+/// once in [`build_node`], reused by both the measure closure and the
+/// post-layout pass that positions each `Box` item's own [`BoxLayout`].
+#[derive(Clone)]
+enum InlineContentItem {
+    Text {
+        text: String,
+        font_size: f32,
+        font_family: florui_text::FontFamily,
+    },
+    /// A real `display: inline-block` child, flowing as one atomic box —
+    /// `child` is the arena node this box's own [`BoxLayout`] belongs to.
+    Box {
+        child: NodeId,
+        width: f32,
+        height: f32,
+    },
+}
+
+fn to_inline_content(item: &InlineContentItem) -> florui_text::InlineContent<'_> {
+    match item {
+        InlineContentItem::Text {
+            text,
+            font_size,
+            font_family,
+        } => florui_text::InlineContent::Text {
+            text,
+            font_size: *font_size,
+            family: *font_family,
+        },
+        InlineContentItem::Box {
+            child,
+            width,
+            height,
+        } => florui_text::InlineContent::Box {
+            id: *child as u64,
+            width: *width,
+            height: *height,
+        },
+    }
+}
+
+/// A Taffy leaf's own context: either plain single-style text (unchanged
+/// from before this slice), or a real inline formatting context — mixed
+/// text and inline-level element children, laid out as wrapped lines via
+/// [`florui_text::Font::shape_inline`] rather than Taffy's own block
+/// algorithm, which has no inline display mode at all (see this module's
+/// own top-level doc).
+enum LeafContext {
+    Text(TextContext),
+    Inline(Vec<InlineContentItem>),
+}
+
+/// What [`compute_layout`]'s measure closure needs to recompute a leaf's
+/// baseline after [`compute_leaf_layout`] returns — extracted from
+/// [`LeafContext`] before it's moved into the inner measure closure, same
+/// pattern the plain-text case already used before this slice.
+enum BaselineSource {
+    Text(String, f32, florui_text::FontFamily),
+    Inline(Vec<InlineContentItem>),
+}
+
+/// Whether `node`'s own children should be laid out as a real inline
+/// formatting context (mixed text and inline-level elements sharing
+/// wrapped lines) rather than Taffy's own block/flex algorithm — real
+/// mixed content (`<p>Hello <span>world</span>!</p>`), not a block
+/// container that merely happens to have an inline-display child among
+/// otherwise block/flex siblings.
+///
+/// Bounded, documented rather than silently wrong, matching this crate's
+/// established pattern of shipping a real but scoped slice: every element
+/// child must itself be `Inline`/`InlineBlock` (a block/flex sibling mixed
+/// into the same content falls back to the old block-only behavior — the
+/// same pre-existing gap where a node's own direct text is dropped when it
+/// also has element children, not a new one this slice introduces), and
+/// every such child must itself be a leaf with no element children of its
+/// own (one level of mixed inline content, not arbitrarily deep
+/// inline-in-inline-in-inline nesting — see this crate's own top-level
+/// scope doc for why).
+fn needs_inline_layout(
+    arena: &Arena,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    node: NodeId,
+) -> bool {
+    let items = arena.inline_items(node);
+    if items.is_empty() {
+        return false;
+    }
+
+    let mut has_real_inline_content = false;
+    for item in items {
+        match item {
+            StyleInlineItem::Text(text) => {
+                if !text.trim().is_empty() {
+                    has_real_inline_content = true;
+                }
+            }
+            StyleInlineItem::Element(child) => match styles.get(child).map(|s| s.display) {
+                Some(StyleDisplay::Inline) | Some(StyleDisplay::InlineBlock) => {
+                    has_real_inline_content = true;
+                    if !arena.children(*child).is_empty() {
+                        return false;
+                    }
+                }
+                _ => return false,
+            },
+        }
+    }
+    has_real_inline_content
+}
+
+/// An inline-block child's own intrinsic content size: its own explicit
+/// `width`/`height` where set, falling back to its own unwrapped text
+/// measurement — a bounded shrink-to-fit (real CSS's actual shrink-to-fit
+/// algorithm also considers the line's own remaining space; this crate
+/// does not yet, the same kind of documented bound as
+/// [`needs_inline_layout`]'s own one-level restriction). `measure_inline_block_intrinsic_size`
+/// only runs for a child [`needs_inline_layout`] already required to be a
+/// leaf, so its own direct text (not `inline_items`) is exactly what it
+/// has to measure.
+fn measure_inline_block_intrinsic_size(
+    font: &mut florui_text::Font,
+    arena: &Arena,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    child: NodeId,
+) -> (f32, f32) {
+    let style = styles.get(&child);
+    let text = arena.text_content(child);
+    let font_size = style.map_or(16.0, |s| s.font_size);
+    let font_family = style.map_or(florui_text::FontFamily::SansSerif, |s| {
+        to_text_font_family(s.font_family)
+    });
+    let measured = if text.is_empty() {
+        florui_text::TextMetrics {
+            width: 0.0,
+            height: 0.0,
+            baseline: 0.0,
+        }
+    } else {
+        font.measure(font_family, text, font_size)
+    };
+    let width = style.and_then(|s| s.width).unwrap_or(measured.width);
+    let height = style.and_then(|s| s.height).unwrap_or(measured.height);
+    (width, height)
+}
+
+/// Builds `node`'s own [`InlineContentItem`] sequence from
+/// [`Arena::inline_items`] — a bare text item inherits the container's own
+/// font (real CSS: a text node has no style of its own), while an
+/// `Inline`/`InlineBlock` element child uses *its own* resolved font, the
+/// same as a real styled `<span>`.
+fn build_inline_content_items(
+    font: &mut florui_text::Font,
+    arena: &Arena,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    node: NodeId,
+) -> Vec<InlineContentItem> {
+    let container_style = styles.get(&node);
+    let container_font_size = container_style.map_or(16.0, |s| s.font_size);
+    let container_font_family = container_style.map_or(florui_text::FontFamily::SansSerif, |s| {
+        to_text_font_family(s.font_family)
+    });
+
+    arena
+        .inline_items(node)
+        .iter()
+        .filter_map(|item| match item {
+            StyleInlineItem::Text(text) => Some(InlineContentItem::Text {
+                text: text.clone(),
+                font_size: container_font_size,
+                font_family: container_font_family,
+            }),
+            StyleInlineItem::Element(child) => {
+                let child_style = styles.get(child);
+                if child_style.map(|s| s.display) == Some(StyleDisplay::InlineBlock) {
+                    let (width, height) =
+                        measure_inline_block_intrinsic_size(font, arena, styles, *child);
+                    Some(InlineContentItem::Box {
+                        child: *child,
+                        width,
+                        height,
+                    })
+                } else {
+                    let text = arena.text_content(*child);
+                    if text.is_empty() {
+                        None
+                    } else {
+                        let font_size = child_style.map_or(container_font_size, |s| s.font_size);
+                        let font_family = child_style.map_or(container_font_family, |s| {
+                            to_text_font_family(s.font_family)
+                        });
+                        Some(InlineContentItem::Text {
+                            text: text.to_string(),
+                            font_size,
+                            font_family,
+                        })
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
+/// Whether `node` is a real inline formatting context per this crate's own
+/// layout decision — `florui-paint` needs the identical predicate so its
+/// own painting matches exactly what [`compute_layout`] actually did for
+/// this node, rather than duplicating (and risking drifting from) this
+/// logic in a second crate.
+pub fn is_inline_formatting_context(
+    arena: &Arena,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    node: NodeId,
+) -> bool {
+    needs_inline_layout(arena, styles, node)
+}
+
+/// Shapes `node`'s own real inline formatting context at `wrap_width` —
+/// the same content [`compute_layout`] itself measured this node with,
+/// rebuilt fresh here since `florui-paint` doesn't share layout's own
+/// internal `TaffyTree` — so `florui-paint` can paint its mixed-style
+/// glyph runs. Only meaningful when [`is_inline_formatting_context`] is
+/// true for `node`; returns `None` otherwise (nothing to shape).
+pub fn shape_inline_formatting_context(
+    font: &mut florui_text::Font,
+    arena: &Arena,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    node: NodeId,
+    wrap_width: f32,
+) -> Option<florui_text::InlineLayout> {
+    if !needs_inline_layout(arena, styles, node) {
+        return None;
+    }
+    let items = build_inline_content_items(font, arena, styles, node);
+    let content: Vec<florui_text::InlineContent<'_>> =
+        items.iter().map(to_inline_content).collect();
+    Some(font.shape_inline(&content, Some(wrap_width)))
+}
+
 /// Computes block-layout geometry for every node in `arena`, using
 /// `styles` for sizing/spacing. `available` is the space the layout root
 /// itself is given (e.g. the preview window's content area).
@@ -85,11 +342,33 @@ pub fn compute_layout(
     styles: &HashMap<NodeId, ComputedStyle>,
     available: Size<AvailableSpace>,
 ) -> Result<HashMap<NodeId, BoxLayout>, LayoutError> {
-    let mut tree: TaffyTree<TextContext> = TaffyTree::new();
+    let mut tree: TaffyTree<LeafContext> = TaffyTree::new();
     let mut taffy_ids: HashMap<NodeId, taffy::NodeId> = HashMap::new();
+    // Every inline-formatting-context leaf built below, so the second pass
+    // after layout can derive its `Box` items' own `BoxLayout` entries —
+    // see that pass's own comment for why they aren't ordinary Taffy nodes.
+    let mut inline_leaves: Vec<(NodeId, Vec<InlineContentItem>)> = Vec::new();
+
+    // Fresh every call, not cached across renders — a real app-registered
+    // extra font (`florui_text::Font::register`, e.g. for a script neither
+    // embedded font covers) has no way to reach this instance yet, since
+    // nothing here persists one across calls to register it on. Until that
+    // wiring exists, "font updates invalidate dependent layout" holds
+    // trivially at this layer: there is nothing long-lived here to go
+    // stale in the first place.
+    let mut font = florui_text::Font::load_embedded();
 
     for &root in arena.roots() {
-        build_node(arena, styles, root, &mut tree, &mut taffy_ids).map_err(LayoutError)?;
+        build_node(
+            &mut font,
+            arena,
+            styles,
+            root,
+            &mut tree,
+            &mut taffy_ids,
+            &mut inline_leaves,
+        )
+        .map_err(LayoutError)?;
     }
 
     // A synthetic block container wraps every root so multiple top-level
@@ -106,33 +385,27 @@ pub fn compute_layout(
         )
         .map_err(LayoutError)?;
 
-    // Fresh every call, not cached across renders — a real app-registered
-    // extra font (`florui_text::Font::register`, e.g. for a script neither
-    // embedded font covers) has no way to reach this instance yet, since
-    // nothing here persists one across calls to register it on. Until that
-    // wiring exists, "font updates invalidate dependent layout" holds
-    // trivially at this layer: there is nothing long-lived here to go
-    // stale in the first place.
-    let mut font = florui_text::Font::load_embedded();
     tree.compute_layout_with_measure(
         synthetic_root,
         available,
         |inputs, _node_id, context, style| {
             // `compute_leaf_layout`'s own measure closure only ever
             // returns a `Size` — extract what the baseline needs from
-            // `context` first (cheap: a string clone plus two copy
-            // fields), since the closure below moves `context` into
-            // `measure` and it isn't available again after.
-            let baseline_source = context
-                .as_ref()
-                .map(|c| (c.text.clone(), c.font_size, c.font_family));
+            // `context` first, since the closure below moves `context`
+            // into `measure_leaf` and it isn't available again after.
+            let baseline_source = context.as_ref().map(|c| match c {
+                LeafContext::Text(t) => {
+                    BaselineSource::Text(t.text.clone(), t.font_size, t.font_family)
+                }
+                LeafContext::Inline(items) => BaselineSource::Inline(items.clone()),
+            });
 
             let mut output = compute_leaf_layout(
                 inputs,
                 style,
                 |_, _| 0.0,
                 |known_dimensions, available_space| {
-                    measure(&mut font, context, known_dimensions, available_space)
+                    measure_leaf(&mut font, context, known_dimensions, available_space)
                 },
             );
 
@@ -143,8 +416,17 @@ pub fn compute_layout(
             // an explicitly-sized text box by its text's baseline, not by
             // treating it as baseline-less. Wrap width is irrelevant here:
             // see `florui_text::TextMetrics::baseline`'s own doc for why.
-            if let Some((text, font_size, font_family)) = baseline_source {
-                let baseline = font.measure(font_family, &text, font_size).baseline;
+            if let Some(source) = baseline_source {
+                let baseline = match source {
+                    BaselineSource::Text(text, font_size, font_family) => {
+                        font.measure(font_family, &text, font_size).baseline
+                    }
+                    BaselineSource::Inline(items) => {
+                        let content: Vec<florui_text::InlineContent<'_>> =
+                            items.iter().map(to_inline_content).collect();
+                        font.shape_inline(&content, None).baseline
+                    }
+                };
                 output.baselines = Baselines::from_first(Some(baseline));
             }
             output
@@ -165,6 +447,61 @@ pub fn compute_layout(
             },
         );
     }
+
+    // Second pass: an inline-formatting-context leaf's own `Box` items
+    // (real `display: inline-block` children) are not Taffy nodes of their
+    // own — they were absorbed into their container's single leaf above,
+    // since Taffy has no inline display mode to give them one — so their
+    // own `BoxLayout` is derived here instead, by rerunning the exact same
+    // real inline layout at the container's now-final resolved width.
+    // Deterministic, not a guess: the same width always produces the same
+    // wrap points and box positions, and this is exactly the width
+    // `measure_leaf` would also have used for Taffy's own final "perform
+    // layout" call on this same leaf.
+    for (container, items) in &inline_leaves {
+        let tid = taffy_ids[container];
+        let layout = tree.layout(tid).map_err(LayoutError)?;
+        let content: Vec<florui_text::InlineContent<'_>> =
+            items.iter().map(to_inline_content).collect();
+        let shaped = font.shape_inline(&content, Some(layout.size.width));
+
+        let container_style = styles.get(container);
+        // A `Box` item's own position comes back from `shape_inline`
+        // relative to the container's content-box origin — matching the
+        // same "includes the parent's own padding" convention every other
+        // `BoxLayout` entry already uses (see `absolute_position`'s own
+        // accumulation), the container's own padding is added here.
+        let padding_left = container_style.map_or(0.0, |s| s.padding.left);
+        let padding_top = container_style.map_or(0.0, |s| s.padding.top);
+
+        let box_sizes: HashMap<NodeId, (f32, f32)> = items
+            .iter()
+            .filter_map(|item| match item {
+                InlineContentItem::Box {
+                    child,
+                    width,
+                    height,
+                } => Some((*child, (*width, *height))),
+                InlineContentItem::Text { .. } => None,
+            })
+            .collect();
+
+        for positioned in shaped.boxes {
+            let child = positioned.id as NodeId;
+            if let Some(&(width, height)) = box_sizes.get(&child) {
+                result.insert(
+                    child,
+                    BoxLayout {
+                        x: positioned.x + padding_left,
+                        y: positioned.y + padding_top,
+                        width,
+                        height,
+                    },
+                );
+            }
+        }
+    }
+
     Ok(result)
 }
 
@@ -182,9 +519,9 @@ pub fn compute_layout(
 /// against. A genuine min-content query (the width of the single longest
 /// unbreakable word) isn't distinguished from that case yet; see
 /// `florui_text`'s own module docs for that tracked gap.
-fn measure(
+fn measure_leaf(
     font: &mut florui_text::Font,
-    context: Option<&mut TextContext>,
+    context: Option<&mut LeafContext>,
     known_dimensions: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
 ) -> Size<f32> {
@@ -197,24 +534,46 @@ fn measure(
         AvailableSpace::MinContent | AvailableSpace::MaxContent => None,
     });
 
-    let metrics = match wrap_width {
-        Some(width) => {
-            font.measure_wrapped(context.font_family, &context.text, context.font_size, width)
+    match context {
+        LeafContext::Text(text_context) => {
+            let metrics = match wrap_width {
+                Some(width) => font.measure_wrapped(
+                    text_context.font_family,
+                    &text_context.text,
+                    text_context.font_size,
+                    width,
+                ),
+                None => font.measure(
+                    text_context.font_family,
+                    &text_context.text,
+                    text_context.font_size,
+                ),
+            };
+            Size {
+                width: metrics.width,
+                height: metrics.height,
+            }
         }
-        None => font.measure(context.font_family, &context.text, context.font_size),
-    };
-    Size {
-        width: metrics.width,
-        height: metrics.height,
+        LeafContext::Inline(items) => {
+            let content: Vec<florui_text::InlineContent<'_>> =
+                items.iter().map(to_inline_content).collect();
+            let result = font.shape_inline(&content, wrap_width);
+            Size {
+                width: result.width,
+                height: result.height,
+            }
+        }
     }
 }
 
 fn build_node(
+    font: &mut florui_text::Font,
     arena: &Arena,
     styles: &HashMap<NodeId, ComputedStyle>,
     node: NodeId,
-    tree: &mut TaffyTree<TextContext>,
+    tree: &mut TaffyTree<LeafContext>,
     taffy_ids: &mut HashMap<NodeId, taffy::NodeId>,
+    inline_leaves: &mut Vec<(NodeId, Vec<InlineContentItem>)>,
 ) -> Result<taffy::NodeId, taffy::TaffyError> {
     let style = to_taffy_style(styles.get(&node));
     let arena_children = arena.children(node);
@@ -232,17 +591,22 @@ fn build_node(
                 });
             tree.new_leaf_with_context(
                 style,
-                TextContext {
+                LeafContext::Text(TextContext {
                     text: text.to_string(),
                     font_size,
                     font_family,
-                },
+                }),
             )?
         }
+    } else if needs_inline_layout(arena, styles, node) {
+        let items = build_inline_content_items(font, arena, styles, node);
+        let id = tree.new_leaf_with_context(style, LeafContext::Inline(items.clone()))?;
+        inline_leaves.push((node, items));
+        id
     } else {
         let children: Vec<taffy::NodeId> = arena_children
             .iter()
-            .map(|&child| build_node(arena, styles, child, tree, taffy_ids))
+            .map(|&child| build_node(font, arena, styles, child, tree, taffy_ids, inline_leaves))
             .collect::<Result<_, _>>()?;
         tree.new_with_children(style, &children)?
     };
@@ -323,6 +687,16 @@ fn to_display(value: StyleDisplay) -> Display {
     match value {
         StyleDisplay::Block => Display::Block,
         StyleDisplay::Flex => Display::Flex,
+        // Reached only for a node that did *not* qualify for
+        // `needs_inline_layout` (e.g. it sits at the tree root, where real
+        // CSS also blockifies `display: inline` — see `florui_style`'s own
+        // `to_display`/blockification doc — or a bound this slice doesn't
+        // yet cover, like a mixed block+inline sibling). Falling back to
+        // Taffy's block algorithm for its own children matches what real
+        // CSS does for `inline-block`'s own children too; a plain `inline`
+        // node reaching here is rarer (mainly the blockified-root case)
+        // and gets the same fallback rather than a crash.
+        StyleDisplay::Inline | StyleDisplay::InlineBlock => Display::Block,
     }
 }
 
@@ -648,7 +1022,17 @@ mod tests {
     }
 
     #[test]
-    fn nested_text_is_measured_on_its_own_node_not_the_ancestor() {
+    fn nested_inline_text_sizes_its_containers_real_inline_formatting_context() {
+        // `span` is a real `display: inline` element (the framework's own
+        // default stylesheet, not a hand-rolled special case) — a `<div>`
+        // whose only content is one inline element establishes a real
+        // inline formatting context for it, the same as a real browser,
+        // rather than giving `span` its own standalone block box the way
+        // this crate did before real inline layout existed. A plain
+        // `Inline` child doesn't get its own `BoxLayout` in this slice
+        // (see this module's own top-level doc for the bound) — its text
+        // instead sizes its container's one inline-formatting-context box,
+        // which is what this test now checks instead of `span`'s own.
         let tree: Element = view! {
             <div>
                 <span>{"Hi"}</span>
@@ -656,15 +1040,14 @@ mod tests {
         };
         let (arena, layouts) = layout_for(&tree, "");
         let card = arena.roots()[0];
-        let span = arena.children(card)[0];
 
         let expected = florui_text::Font::load_embedded().measure(
             florui_text::FontFamily::SansSerif,
             "Hi",
             16.0,
         );
-        assert_close(layouts[&span].width, expected.width);
-        assert_close(layouts[&span].height, expected.height);
+        assert_close(layouts[&card].width, expected.width);
+        assert_close(layouts[&card].height, expected.height);
     }
 
     #[test]
@@ -1027,6 +1410,182 @@ mod tests {
              (small starts at {}, big at {})",
             layouts[&small].y,
             layouts[&big].y
+        );
+    }
+
+    #[test]
+    fn inline_text_flows_beside_a_short_inline_element_when_it_fits_on_one_line() {
+        // Real mixed inline content — `Element::node`/`Element::text`
+        // directly, the same construction `florui_style::tree`'s own
+        // interleaving tests use, since `view!` has no ergonomic syntax
+        // for bare text directly adjacent to a child element.
+        let tree = Element::node(
+            "p",
+            vec![],
+            vec![
+                Element::text("Hello "),
+                Element::node("span", vec![], vec![Element::text("world")]),
+                Element::text("!"),
+            ],
+        );
+        let mut font = florui_text::Font::load_embedded();
+        let one_line = font.measure(florui_text::FontFamily::SansSerif, "Hello world!", 16.0);
+
+        let (arena, layouts) = layout_for(&tree, "");
+        let p = arena.roots()[0];
+
+        assert_close(layouts[&p].height, one_line.height);
+        assert_close(layouts[&p].width, one_line.width);
+    }
+
+    #[test]
+    fn text_wraps_to_a_new_line_around_an_inline_element_when_it_does_not_fit() {
+        let tree = Element::node(
+            "div",
+            vec![("class".to_string(), "narrow".to_string())],
+            vec![Element::node(
+                "p",
+                vec![],
+                vec![
+                    Element::text("Hello "),
+                    Element::node("span", vec![], vec![Element::text("world")]),
+                    Element::text("!"),
+                ],
+            )],
+        );
+        let mut font = florui_text::Font::load_embedded();
+        let first_word = font.measure(florui_text::FontFamily::SansSerif, "Hello", 16.0);
+        let one_line = font.measure(florui_text::FontFamily::SansSerif, "Hello world!", 16.0);
+
+        // Wide enough for "Hello" but not for "Hello world!" — the inline
+        // span's own "world!" (no space before "!") must wrap to a second
+        // line, the same as real CSS wrapping around/beside an inline
+        // element.
+        let css = format!(".narrow {{ width: {}px; }}", first_word.width + 1.0);
+        let (arena, layouts) = layout_for(&tree, &css);
+        let div = arena.roots()[0];
+        let p = arena.children(div)[0];
+
+        assert!(
+            layouts[&p].height > one_line.height,
+            "the inline span's \"world!\" must have wrapped to a second line: \
+             p height {}, one unwrapped line's height {}",
+            layouts[&p].height,
+            one_line.height
+        );
+    }
+
+    #[test]
+    fn an_inline_elements_own_long_text_wraps_across_multiple_lines_within_the_flow() {
+        let tree = Element::node(
+            "div",
+            vec![("class".to_string(), "narrow".to_string())],
+            vec![Element::node(
+                "p",
+                vec![],
+                vec![Element::node(
+                    "span",
+                    vec![],
+                    vec![Element::text("one two three four five six seven")],
+                )],
+            )],
+        );
+        let mut font = florui_text::Font::load_embedded();
+        let one_word = font.measure(florui_text::FontFamily::SansSerif, "one", 16.0);
+        let unwrapped = font.measure(
+            florui_text::FontFamily::SansSerif,
+            "one two three four five six seven",
+            16.0,
+        );
+
+        let css = format!(".narrow {{ width: {}px; }}", one_word.width + 5.0);
+        let (arena, layouts) = layout_for(&tree, &css);
+        let div = arena.roots()[0];
+        let p = arena.children(div)[0];
+
+        assert!(
+            layouts[&p].height > unwrapped.height,
+            "a narrow enough container must wrap the inline span's own long text \
+             across multiple lines: p height {}, one unwrapped line's height {}",
+            layouts[&p].height,
+            unwrapped.height
+        );
+    }
+
+    #[test]
+    fn inline_block_sizes_to_its_own_content_while_flowing_inline() {
+        let tree = Element::node(
+            "p",
+            vec![],
+            vec![
+                Element::text("Click "),
+                Element::node("button", vec![], vec![Element::text("here")]),
+            ],
+        );
+        let mut font = florui_text::Font::load_embedded();
+        let preceding = font.measure(florui_text::FontFamily::SansSerif, "Click ", 16.0);
+        let button_text = font.measure(florui_text::FontFamily::SansSerif, "here", 16.0);
+
+        let (arena, layouts) = layout_for(&tree, "");
+        let p = arena.roots()[0];
+        let button = arena.children(p)[0];
+
+        // Sized to its own content, not stretched to the container's width
+        // the way a block child would be.
+        assert_close(layouts[&button].width, button_text.width);
+        assert_close(layouts[&button].height, button_text.height);
+
+        // Flowing inline: positioned after the preceding text on the same
+        // line, not stacked below it as its own block box.
+        assert!(
+            layouts[&button].x > preceding.width - 1.0,
+            "the button must sit after \"Click \" (x = {}), not at the line's start",
+            layouts[&button].x
+        );
+        assert!(
+            layouts[&button].y < button_text.height,
+            "the button must share the first line, not be pushed onto a line of its \
+             own (y = {})",
+            layouts[&button].y
+        );
+    }
+
+    #[test]
+    fn line_height_grows_with_the_tallest_mixed_font_size_run() {
+        let tree = Element::node(
+            "p",
+            vec![],
+            vec![
+                Element::text("Hg "),
+                Element::node(
+                    "span",
+                    vec![("class".to_string(), "big".to_string())],
+                    vec![Element::text("Hg")],
+                ),
+            ],
+        );
+        let mut font = florui_text::Font::load_embedded();
+        let small_only = font.measure(florui_text::FontFamily::SansSerif, "Hg Hg", 16.0);
+        let big_alone = font.measure(florui_text::FontFamily::SansSerif, "Hg", 48.0);
+
+        let (arena, layouts) = layout_for(&tree, ".big { font-size: 48px; }");
+        let p = arena.roots()[0];
+
+        // Taffy rounds final layout to whole pixels (see `assert_close`'s
+        // own doc), so this compares with the same sub-pixel tolerance
+        // rather than a strict `>=`.
+        assert!(
+            layouts[&p].height >= big_alone.height - 1.0,
+            "a line containing a 48px run must be at least as tall as that run's own \
+             single-line height (p height {}, 48px line height {})",
+            layouts[&p].height,
+            big_alone.height
+        );
+        assert!(
+            layouts[&p].height > small_only.height,
+            "must be taller than an all-16px line: p height {}, all-16px height {}",
+            layouts[&p].height,
+            small_only.height
         );
     }
 }

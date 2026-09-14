@@ -18,15 +18,15 @@
 //! rather than attempting every HTML element up front.
 //!
 //! `span { display: inline; }` and `button { display: inline-block; }`
-//! parse and cascade correctly today — Stylo resolves them like it would
-//! any other value — but [`crate::cascade::Display`] only distinguishes
-//! `Block`/`Flex` so far, so both currently read back as `Block` once
-//! `florui-layout` consumes them, and `florui-layout` has no inline
-//! formatting context yet regardless. Real, not fake: the cascade is
-//! correct now; the layout consequence lands once both of those exist.
-//! `button`'s default border/padding appearance needs a `border` property
-//! `ComputedStyle` doesn't have yet — tracked separately, not attempted
-//! here.
+//! resolve to [`crate::cascade::Display::Inline`]/`InlineBlock` (added
+//! alongside `florui-layout`'s own real inline formatting context), and
+//! genuinely flow inline rather than stacking as blocks — see
+//! `florui_layout`'s own module doc for that algorithm's exact, honest
+//! bound (one level of mixed inline content; a plain `Inline` child, e.g.
+//! a bare `<span>`, doesn't get its own box yet, only `InlineBlock`).
+//! `button`'s default border/padding appearance still needs a `border`
+//! property `ComputedStyle` doesn't have yet — tracked separately, not
+//! attempted here.
 
 use std::sync::LazyLock;
 
@@ -115,25 +115,31 @@ mod tests {
         assert_close(style.margin.bottom.unwrap(), 16.0, "p margin-bottom");
     }
 
-    /// `span`/`button` resolve `display: inline`/`inline-block` in Stylo's
-    /// real cascade correctly today, but [`Display`] only distinguishes
-    /// `Block`/`Flex` so far (see this module's own doc comment) — both
-    /// currently read back as `Block` until real inline/inline-block support adds the missing
-    /// variants, at which point this test's expectation must change to
-    /// `Display::Inline`/`Display::InlineBlock`. Written this way
-    /// deliberately, not as an oversight: it pins today's honest
-    /// intermediate behavior so that change is a visible, intentional
-    /// update rather than a silent one.
+    /// Nested under a `<div>`, not at the tree root — real CSS blockifies a
+    /// root element's `display` regardless of what it's authored as
+    /// (<https://drafts.csswg.org/css-display/#blockify>; Stylo applies
+    /// this on its own, not something this crate implements), so a bare
+    /// `<span>`/`<button>` with no parent would read back as `Block` for a
+    /// reason that has nothing to do with this module's own rules — nesting
+    /// them is what actually exercises `span { display: inline; }`/
+    /// `button { display: inline-block; }`.
     #[test]
-    fn span_and_button_currently_read_back_as_block_pending_inline_layout() {
-        assert_eq!(
-            computed_style_of(view! { <span /> }).display,
-            Display::Block
-        );
-        assert_eq!(
-            computed_style_of(view! { <button /> }).display,
-            Display::Block
-        );
+    fn span_and_button_resolve_inline_and_inline_block() {
+        let tree: Element = view! {
+            <div>
+                <span />
+                <button />
+            </div>
+        };
+        let arena = Arena::build(&tree);
+        let div = arena.roots()[0];
+        let span = arena.children(div)[0];
+        let button = arena.children(div)[1];
+        let rules = parse_stylesheet("").unwrap();
+        let computed = compute(&arena, &rules, &InteractionState::new());
+
+        assert_eq!(computed[&span].display, Display::Inline);
+        assert_eq!(computed[&button].display, Display::InlineBlock);
     }
 
     #[test]

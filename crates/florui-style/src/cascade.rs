@@ -40,13 +40,33 @@ pub enum FontFamily {
     Monospace,
 }
 
-/// A container's own layout algorithm. Only these two exist so far; grid is
-/// planned as its own later addition on top of this same field.
+/// How this node participates in its parent's formatting context
+/// (`Block`/`Inline`/`InlineBlock`, real CSS's `display-outside` plus
+/// `inline-block`'s special case), *and*, for `Block`/`Flex`, which
+/// algorithm lays out its own children (real CSS's `display-inside`) —
+/// this crate conflates the two into one field rather than splitting them
+/// the way real CSS's two-value `display` syntax does, since nothing here
+/// yet needs an `outside`/`inside` combination beyond the four this enum
+/// already names. `Inline`'s own children (if it somehow has element
+/// children, not just text) and `InlineBlock`'s own children both use the
+/// same `Block` algorithm real CSS itself uses for both — grid is planned
+/// as its own later addition alongside `Flex`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Display {
     #[default]
     Block,
     Flex,
+    /// `display: inline` — participates in a surrounding inline formatting
+    /// context (mixed with text and other inline-level siblings, wrapping
+    /// at the container's available width) rather than stacking as its own
+    /// block. See `florui-layout`'s own module docs for this slice's
+    /// documented bounds (one level of mixed inline content, no bidi, no
+    /// `vertical-align` beyond baseline).
+    Inline,
+    /// `display: inline-block` — participates inline like [`Self::Inline`],
+    /// but as a single opaque box sized from its own content (like a block
+    /// box would be), not fragmented across lines.
+    InlineBlock,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

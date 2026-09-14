@@ -1,4 +1,12 @@
+/* Its three children (two spans, one button) are all real inline-level
+   elements (the framework's own default stylesheet) — an explicit column
+   flex container is what actually stacks them vertically now that real
+   inline layout exists; without it they would flow inline like real CSS,
+   not stack, the same as a browser given this exact markup with no layout
+   declared for it. */
 .counter {
+    display: flex;
+    flex-direction: column;
     width: 160px;
     padding-top: 16px;
     padding-right: 16px;

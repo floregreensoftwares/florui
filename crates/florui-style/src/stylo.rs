@@ -871,14 +871,28 @@ fn to_computed_style(values: &ComputedValues) -> ComputedStyle {
 }
 
 /// `Display`'s own `inside()`/`outside()` split matches real CSS's
-/// two-value `display` syntax; only the *inside* half (how a node lays out
-/// its own children) matters to this crate — `outside` (how this node
-/// itself participates in its parent's formatting context: inline vs.
-/// block) isn't tracked in [`ComputedStyle`] yet.
+/// two-value `display` syntax — see [`FlorDisplay`]'s own doc for why this
+/// crate conflates both into one field. `inline-block` is
+/// `DisplayOutside::Inline` + `DisplayInside::FlowRoot` (real CSS's own
+/// encoding, not a guess); every other inline-outside value maps to
+/// `Inline`, and everything else falls through to `inside()` alone.
+///
+/// Stylo blockifies `outside()` on its own for contexts real CSS also
+/// blockifies in (the root element, a flex/grid item, floats, absolute
+/// positioning — <https://drafts.csswg.org/css-display/#blockify>) — a
+/// `<span>` with no parent (a bare tree root) or a direct flex-item child
+/// genuinely computes `outside: Block` even with `display: inline`
+/// authored, the same as a real browser. Caught directly while writing this
+/// slice's own tests: a `<span>` at tree root read back as `Block`, which
+/// briefly looked like a bug in this function before nesting it under a
+/// `<div>` (the realistic case) showed `Inline` as expected — Stylo was
+/// already correct.
 fn to_display(display: style::values::computed::Display) -> FlorDisplay {
-    use style::values::specified::box_::DisplayInside;
-    match display.inside() {
-        DisplayInside::Flex => FlorDisplay::Flex,
+    use style::values::specified::box_::{DisplayInside, DisplayOutside};
+    match (display.outside(), display.inside()) {
+        (DisplayOutside::Inline, DisplayInside::FlowRoot) => FlorDisplay::InlineBlock,
+        (DisplayOutside::Inline, _) => FlorDisplay::Inline,
+        (_, DisplayInside::Flex) => FlorDisplay::Flex,
         _ => FlorDisplay::Block,
     }
 }
