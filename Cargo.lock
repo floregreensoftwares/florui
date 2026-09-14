@@ -1247,6 +1247,7 @@ dependencies = [
  "florui-conformance",
  "florui-devtools",
  "image",
+ "notify",
  "serde",
  "serde_json",
 ]
