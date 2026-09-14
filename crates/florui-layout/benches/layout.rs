@@ -91,14 +91,13 @@ fn bench_block_tree(c: &mut Criterion) {
     group.finish();
 }
 
-/// 1,000 was the plan's own default second tier, but a naive 1,000-deep
-/// chain genuinely stack-overflows this process: `Arena::build` and
-/// `compute_layout`'s `build_node` both recurse once per tree depth, with
-/// no iterative fallback. That is a real, tracked limitation this
-/// benchmark surfaced, not something fixed here — turning arena
-/// construction and layout's tree walk from recursive to iterative is a
-/// broader change than establishing this baseline harness owes. 300 is
-/// deep enough to show real scaling cost without crashing the bench run.
+/// 1,000 was the original second tier, but a naive 1,000-deep chain
+/// genuinely stack-overflows this process. `Arena::build` and
+/// `compute_layout`'s own `build_node` are iterative now, not the cause
+/// anymore — the remaining cause is `taffy::TaffyTree::compute_layout_
+/// with_measure` itself recursing once per depth internally, third-party
+/// code this crate doesn't control. 300 stays comfortably under that
+/// limit while still showing real scaling cost.
 fn bench_deep_tree(c: &mut Criterion) {
     let mut group = c.benchmark_group("layout/deep_tree");
     group.sample_size(20);

@@ -42,7 +42,7 @@ use proc_macro::TokenStream;
 ///         name: "Ada".to_string(),
 ///     })
 /// });
-/// let Element::Node(node) = el else {
+/// let Element::Node(node) = &el else {
 ///     panic!("expected a node");
 /// };
 /// assert_eq!(node.tag, "p");
@@ -111,7 +111,7 @@ pub fn stylesheet(input: TokenStream) -> TokenStream {
 ///     </div>
 /// };
 ///
-/// let Element::Node(node) = el else {
+/// let Element::Node(node) = &el else {
 ///     panic!("expected a node");
 /// };
 /// assert_eq!(node.tag, "div");

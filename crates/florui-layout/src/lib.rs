@@ -44,6 +44,14 @@
 //! Taffy positions are relative to the parent's content box, matching
 //! Taffy's own convention; see [`absolute_position`] to accumulate them
 //! into a position relative to the layout root.
+//!
+//! A very deep tree (hundreds of nested levels) is slow to style: Stylo's
+//! own cascade appears quadratic-ish in depth for a single-chain tree,
+//! not something this crate causes or has fixed. It no longer *crashes*
+//! that deep, though — `compute_layout` grows its own stack via
+//! `stacker` before running Taffy's real layout algorithms, which
+//! recurse once per tree depth internally and would otherwise overflow
+//! the default stack well under 1,000 levels.
 
 use std::collections::HashMap;
 
@@ -54,6 +62,21 @@ use florui_style::{
 };
 use taffy::prelude::*;
 use taffy::{Baselines, compute_leaf_layout};
+
+/// Checked before Taffy's own recursive layout algorithms run — if less
+/// than this much stack remains, `stacker` allocates a fresh
+/// [`RECURSION_STACK_SIZE`]-byte segment first rather than let a deep
+/// tree overflow the one it was already on. Deliberately larger than a
+/// typical thread's whole default stack (a few MB), so this effectively
+/// always grows rather than gambling that whatever happened to be left
+/// over from the caller's own stack is enough for Taffy's own recursion —
+/// a real, measured need: 2 MB of headroom still wasn't enough for it at
+/// only ~1,200 levels.
+const RECURSION_RED_ZONE: usize = 8 * 1024 * 1024;
+/// Comfortably deeper than any tree a real UI produces — sized against
+/// this crate's own 20,000-deep test elsewhere in the workspace, not
+/// picked arbitrarily.
+const RECURSION_STACK_SIZE: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BoxLayout {
@@ -395,54 +418,62 @@ pub fn compute_layout(
         )
         .map_err(LayoutError)?;
 
-    tree.compute_layout_with_measure(
-        synthetic_root,
-        available,
-        |inputs, _node_id, context, style| {
-            // `compute_leaf_layout`'s own measure closure only ever
-            // returns a `Size` — extract what the baseline needs from
-            // `context` first, since the closure below moves `context`
-            // into `measure_leaf` and it isn't available again after.
-            let baseline_source = context.as_ref().map(|c| match c {
-                LeafContext::Text(t) => {
-                    BaselineSource::Text(t.text.clone(), t.font_size, t.font_weight, t.font_family)
+    // Taffy's own block/flex/grid algorithms recurse once per tree depth
+    // internally — third-party code this crate doesn't control, and deep
+    // enough to overflow the default stack well under 1,000 levels.
+    stacker::maybe_grow(RECURSION_RED_ZONE, RECURSION_STACK_SIZE, || {
+        tree.compute_layout_with_measure(
+            synthetic_root,
+            available,
+            |inputs, _node_id, context, style| {
+                // `compute_leaf_layout`'s own measure closure only ever
+                // returns a `Size` — extract what the baseline needs from
+                // `context` first, since the closure below moves `context`
+                // into `measure_leaf` and it isn't available again after.
+                let baseline_source = context.as_ref().map(|c| match c {
+                    LeafContext::Text(t) => BaselineSource::Text(
+                        t.text.clone(),
+                        t.font_size,
+                        t.font_weight,
+                        t.font_family,
+                    ),
+                    LeafContext::Inline(items) => BaselineSource::Inline(items.clone()),
+                });
+
+                let mut output = compute_leaf_layout(
+                    inputs,
+                    style,
+                    |_, _| 0.0,
+                    |known_dimensions, available_space| {
+                        measure_leaf(&mut font, context, known_dimensions, available_space)
+                    },
+                );
+
+                // Set regardless of `run_mode`: `compute_leaf_layout` skips
+                // calling its own measure closure when both dimensions are
+                // already known (an explicit width *and* height), but a
+                // baseline is still meaningful there — real CSS still aligns
+                // an explicitly-sized text box by its text's baseline, not by
+                // treating it as baseline-less. Wrap width is irrelevant here:
+                // see `florui_text::TextMetrics::baseline`'s own doc for why.
+                if let Some(source) = baseline_source {
+                    let baseline = match source {
+                        BaselineSource::Text(text, font_size, font_weight, font_family) => {
+                            font.measure(font_family, &text, font_size, font_weight)
+                                .baseline
+                        }
+                        BaselineSource::Inline(items) => {
+                            let content: Vec<florui_text::InlineContent<'_>> =
+                                items.iter().map(to_inline_content).collect();
+                            font.shape_inline(&content, None).baseline
+                        }
+                    };
+                    output.baselines = Baselines::from_first(Some(baseline));
                 }
-                LeafContext::Inline(items) => BaselineSource::Inline(items.clone()),
-            });
-
-            let mut output = compute_leaf_layout(
-                inputs,
-                style,
-                |_, _| 0.0,
-                |known_dimensions, available_space| {
-                    measure_leaf(&mut font, context, known_dimensions, available_space)
-                },
-            );
-
-            // Set regardless of `run_mode`: `compute_leaf_layout` skips
-            // calling its own measure closure when both dimensions are
-            // already known (an explicit width *and* height), but a
-            // baseline is still meaningful there — real CSS still aligns
-            // an explicitly-sized text box by its text's baseline, not by
-            // treating it as baseline-less. Wrap width is irrelevant here:
-            // see `florui_text::TextMetrics::baseline`'s own doc for why.
-            if let Some(source) = baseline_source {
-                let baseline = match source {
-                    BaselineSource::Text(text, font_size, font_weight, font_family) => {
-                        font.measure(font_family, &text, font_size, font_weight)
-                            .baseline
-                    }
-                    BaselineSource::Inline(items) => {
-                        let content: Vec<florui_text::InlineContent<'_>> =
-                            items.iter().map(to_inline_content).collect();
-                        font.shape_inline(&content, None).baseline
-                    }
-                };
-                output.baselines = Baselines::from_first(Some(baseline));
-            }
-            output
-        },
-    )
+                output
+            },
+        )
+    })
     .map_err(LayoutError)?;
 
     let mut result = HashMap::with_capacity(taffy_ids.len());
@@ -579,55 +610,86 @@ fn measure_leaf(
     }
 }
 
+/// One step of [`build_node`]'s walk: `Visit` a node (leaves resolve
+/// immediately; a container defers itself behind its own children), or
+/// `Build` a container once every child already has a [`taffy::NodeId`].
+enum BuildStep {
+    Visit(NodeId),
+    Build(NodeId),
+}
+
+/// Builds `root`'s whole subtree into `tree`, returning its own
+/// [`taffy::NodeId`]. An explicit stack, not one call frame per tree
+/// level — `Build(node)` is pushed before its children's `Visit` steps,
+/// so the stack's LIFO order still builds every child before its parent.
 fn build_node(
     font: &mut florui_text::Font,
     arena: &Arena,
     styles: &HashMap<NodeId, ComputedStyle>,
-    node: NodeId,
+    root: NodeId,
     tree: &mut TaffyTree<LeafContext>,
     taffy_ids: &mut HashMap<NodeId, taffy::NodeId>,
     inline_leaves: &mut Vec<(NodeId, Vec<InlineContentItem>)>,
 ) -> Result<taffy::NodeId, taffy::TaffyError> {
-    let style = to_taffy_style(styles.get(&node));
-    let arena_children = arena.children(node);
+    let mut stack = vec![BuildStep::Visit(root)];
 
-    let id = if arena_children.is_empty() {
-        let text = arena.text_content(node);
-        if text.is_empty() {
-            tree.new_leaf(style)?
-        } else {
-            let font_size = styles.get(&node).map_or(16.0, |s| s.font_size);
-            let font_weight = styles.get(&node).map_or(400.0, |s| s.font_weight);
-            let font_family = styles
-                .get(&node)
-                .map_or(florui_text::FontFamily::SansSerif, |s| {
-                    to_text_font_family(s.font_family)
-                });
-            tree.new_leaf_with_context(
-                style,
-                LeafContext::Text(TextContext {
-                    text: text.to_string(),
-                    font_size,
-                    font_weight,
-                    font_family,
-                }),
-            )?
+    while let Some(step) = stack.pop() {
+        match step {
+            BuildStep::Visit(node) => {
+                let arena_children = arena.children(node);
+                let id = if arena_children.is_empty() {
+                    let style = to_taffy_style(styles.get(&node));
+                    let text = arena.text_content(node);
+                    if text.is_empty() {
+                        tree.new_leaf(style)?
+                    } else {
+                        let font_size = styles.get(&node).map_or(16.0, |s| s.font_size);
+                        let font_weight = styles.get(&node).map_or(400.0, |s| s.font_weight);
+                        let font_family = styles
+                            .get(&node)
+                            .map_or(florui_text::FontFamily::SansSerif, |s| {
+                                to_text_font_family(s.font_family)
+                            });
+                        tree.new_leaf_with_context(
+                            style,
+                            LeafContext::Text(TextContext {
+                                text: text.to_string(),
+                                font_size,
+                                font_weight,
+                                font_family,
+                            }),
+                        )?
+                    }
+                } else if needs_inline_layout(arena, styles, node) {
+                    let style = to_taffy_style(styles.get(&node));
+                    let items = build_inline_content_items(font, arena, styles, node);
+                    let id =
+                        tree.new_leaf_with_context(style, LeafContext::Inline(items.clone()))?;
+                    inline_leaves.push((node, items));
+                    id
+                } else {
+                    stack.push(BuildStep::Build(node));
+                    for &child in arena_children.iter().rev() {
+                        stack.push(BuildStep::Visit(child));
+                    }
+                    continue;
+                };
+                taffy_ids.insert(node, id);
+            }
+            BuildStep::Build(node) => {
+                let style = to_taffy_style(styles.get(&node));
+                let children: Vec<taffy::NodeId> = arena
+                    .children(node)
+                    .iter()
+                    .map(|child| taffy_ids[child])
+                    .collect();
+                let id = tree.new_with_children(style, &children)?;
+                taffy_ids.insert(node, id);
+            }
         }
-    } else if needs_inline_layout(arena, styles, node) {
-        let items = build_inline_content_items(font, arena, styles, node);
-        let id = tree.new_leaf_with_context(style, LeafContext::Inline(items.clone()))?;
-        inline_leaves.push((node, items));
-        id
-    } else {
-        let children: Vec<taffy::NodeId> = arena_children
-            .iter()
-            .map(|&child| build_node(font, arena, styles, child, tree, taffy_ids, inline_leaves))
-            .collect::<Result<_, _>>()?;
-        tree.new_with_children(style, &children)?
-    };
+    }
 
-    taffy_ids.insert(node, id);
-    Ok(id)
+    Ok(taffy_ids[&root])
 }
 
 fn to_taffy_style(style: Option<&ComputedStyle>) -> taffy::Style {
@@ -855,29 +917,17 @@ pub fn hit_test(
     y: f32,
 ) -> Option<NodeId> {
     let mut hit = None;
-    for &root in arena.roots() {
-        hit_test_node(arena, layouts, root, x, y, &mut hit);
+    let mut stack: Vec<NodeId> = arena.roots().iter().rev().copied().collect();
+    while let Some(node) = stack.pop() {
+        if let Some(&layout) = layouts.get(&node) {
+            let (ax, ay) = absolute_position(arena, layouts, node);
+            if x >= ax && x < ax + layout.width && y >= ay && y < ay + layout.height {
+                hit = Some(node);
+            }
+        }
+        stack.extend(arena.children(node).iter().rev());
     }
     hit
-}
-
-fn hit_test_node(
-    arena: &Arena,
-    layouts: &HashMap<NodeId, BoxLayout>,
-    node: NodeId,
-    x: f32,
-    y: f32,
-    hit: &mut Option<NodeId>,
-) {
-    if let Some(&layout) = layouts.get(&node) {
-        let (ax, ay) = absolute_position(arena, layouts, node);
-        if x >= ax && x < ax + layout.width && y >= ay && y < ay + layout.height {
-            hit.replace(node);
-        }
-    }
-    for &child in arena.children(node) {
-        hit_test_node(arena, layouts, child, x, y, hit);
-    }
 }
 
 /// An explanation for why a flex item's final width doesn't match what
@@ -2029,6 +2079,38 @@ mod tests {
         assert!(
             !causes.contains_key(&text),
             "a row with plenty of room never needed to shrink anything"
+        );
+    }
+
+    /// `build_node`/`hit_test` used to recurse once per tree level; both
+    /// are iterative now. Taffy's own `compute_layout_with_measure` still
+    /// recurses per depth internally (third-party code, not rewritten
+    /// here) and would overflow the stack somewhere between 300 and 500 —
+    /// `compute_layout`'s own `stacker::maybe_grow` wrapper covers that.
+    /// 1,200 (past the original 1,000-deep crash report) rather than
+    /// something far higher: Stylo's own cascade is quadratic-ish in
+    /// depth for a single-chain tree (a separate, real, undiagnosed cost
+    /// — see this crate's own top-level scope doc), so this test's own
+    /// runtime, not a stack limit, is what bounds the depth chosen here.
+    #[test]
+    fn compute_layout_and_hit_test_survive_a_tree_far_deeper_than_the_old_recursion_limit() {
+        let depth = 1_200;
+        let mut tree = Element::node("div", vec![("class".into(), "leaf".into())], vec![]);
+        for _ in 0..depth {
+            tree = Element::node("div", vec![], vec![tree]);
+        }
+        let (arena, layouts) = layout_for(&tree, ".leaf { width: 10px; height: 10px; }");
+
+        let leaf = arena
+            .find(|a, id| a.classes(id).iter().any(|c| c == "leaf"))
+            .unwrap();
+        assert_close(layouts[&leaf].width, 10.0);
+
+        let hit = hit_test(&arena, &layouts, 5.0, 5.0);
+        assert_eq!(
+            hit,
+            Some(leaf),
+            "the leaf sits at the origin at every depth"
         );
     }
 }

@@ -158,9 +158,10 @@ impl StyloTree {
     }
 
     fn collect_order(arena: &Arena, id: NodeId, order: &mut Vec<NodeId>) {
-        order.push(id);
-        for &child in arena.children(id) {
-            Self::collect_order(arena, child, order);
+        let mut stack = vec![id];
+        while let Some(id) = stack.pop() {
+            order.push(id);
+            stack.extend(arena.children(id).iter().rev());
         }
     }
 
