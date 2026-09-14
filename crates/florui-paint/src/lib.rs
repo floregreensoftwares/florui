@@ -138,14 +138,24 @@ fn paint_node(
                 left: 0.0,
             };
             let padding = style.map_or(no_padding, |s| s.padding);
+            // The box's own final content width, whatever layout resolved
+            // it to (wrapped or not) — shaping at exactly this width always
+            // reproduces what layout already measured: an intrinsically
+            // unwrapped box is already exactly as wide as its one line, so
+            // wrapping "at" that width changes nothing, and a box layout
+            // wrapped to fit stays wrapped identically here.
+            let content_width = (layout.width - padding.left - padding.right).max(0.0);
             paint_text(
                 buffer,
                 font,
-                text,
-                font_size,
-                color,
-                x + padding.left,
-                y + padding.top,
+                TextPaint {
+                    text,
+                    font_size,
+                    color,
+                    x: x + padding.left,
+                    y: y + padding.top,
+                    wrap_width: content_width,
+                },
             );
         }
     }
@@ -169,21 +179,32 @@ fn fill_rect(buffer: &mut Canvas, x: f32, y: f32, width: f32, height: f32, color
     buffer.fill_rect(rect, &paint, Transform::identity(), None);
 }
 
-/// Shapes `text` and fills each glyph's outline at `(x, y)` — the top-left
-/// of the line, in the same coordinate space as [`fill_rect`] — with
-/// `color`. Skips a run whose font data doesn't parse, or an individual
-/// glyph with no outline (e.g. genuinely missing from the font); a partial
-/// render beats aborting the whole paint over one bad glyph.
-fn paint_text(
-    buffer: &mut Canvas,
-    font: &mut Font,
-    text: &str,
+/// Shapes `text` (wrapped at `wrap_width`, matching whatever content width
+/// layout already resolved this box to) and fills each glyph's outline at
+/// `(x, y)` — the top-left of the whole shaped block, in the same
+/// coordinate space as [`fill_rect`] — with `color`. Skips a run whose font
+/// data doesn't parse, or an individual glyph with no outline (e.g.
+/// genuinely missing from the font); a partial render beats aborting the
+/// whole paint over one bad glyph.
+struct TextPaint<'a> {
+    text: &'a str,
     font_size: f32,
     color: Rgba,
     x: f32,
     y: f32,
-) {
-    let shaped = font.shape(text, font_size);
+    wrap_width: f32,
+}
+
+fn paint_text(buffer: &mut Canvas, font: &mut Font, params: TextPaint<'_>) {
+    let TextPaint {
+        text,
+        font_size,
+        color,
+        x,
+        y,
+        wrap_width,
+    } = params;
+    let shaped = font.shape_wrapped(text, font_size, wrap_width);
     let mut builder = PathBuilder::new();
 
     for run in &shaped.runs {
