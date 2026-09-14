@@ -30,7 +30,10 @@
 
 use std::collections::HashMap;
 
-use florui_style::{Arena, ComputedStyle, NodeId};
+use florui_style::{
+    Arena, ComputedStyle, ContentAlignment, Display as StyleDisplay,
+    FlexDirection as StyleFlexDirection, FlexWrap as StyleFlexWrap, ItemAlignment, NodeId,
+};
 use taffy::compute_leaf_layout;
 use taffy::prelude::*;
 
@@ -187,7 +190,7 @@ fn to_taffy_style(style: Option<&ComputedStyle>) -> taffy::Style {
     };
 
     taffy::Style {
-        display: Display::Block,
+        display: to_display(style.display),
         // Real CSS's actual default (before any reset stylesheet opts into
         // border-box) is content-box: padding adds to a declared width/
         // height rather than being carved out of it. Taffy's own default is
@@ -203,6 +206,25 @@ fn to_taffy_style(style: Option<&ComputedStyle>) -> taffy::Style {
             top: to_length_percentage_auto(style.margin.top),
             bottom: to_length_percentage_auto(style.margin.bottom),
         },
+        // These four only affect *this node's own children*, and only take
+        // effect at all when `display` above is `Flex` — Taffy ignores them
+        // for a block container, so setting them unconditionally is safe.
+        flex_direction: to_flex_direction(style.flex_direction),
+        flex_wrap: to_flex_wrap(style.flex_wrap),
+        justify_content: to_content_alignment(style.justify_content),
+        align_content: to_content_alignment(style.align_content),
+        align_items: to_item_alignment(style.align_items),
+        gap: Size {
+            width: LengthPercentage::length(style.column_gap),
+            height: LengthPercentage::length(style.row_gap),
+        },
+        // These three instead describe how *this node itself* behaves as a
+        // flex item — meaningful only when this node's *parent* is a flex
+        // container, regardless of this node's own `display`.
+        align_self: to_item_alignment(style.align_self),
+        flex_grow: style.flex_grow,
+        flex_shrink: style.flex_shrink,
+        flex_basis: to_dimension(style.flex_basis),
         padding: Rect {
             left: LengthPercentage::length(style.padding.left),
             right: LengthPercentage::length(style.padding.right),
@@ -225,6 +247,60 @@ fn to_length_percentage_auto(value: Option<f32>) -> LengthPercentageAuto {
         Some(length) => LengthPercentageAuto::length(length),
         None => LengthPercentageAuto::auto(),
     }
+}
+
+fn to_display(value: StyleDisplay) -> Display {
+    match value {
+        StyleDisplay::Block => Display::Block,
+        StyleDisplay::Flex => Display::Flex,
+    }
+}
+
+fn to_flex_direction(value: StyleFlexDirection) -> FlexDirection {
+    match value {
+        StyleFlexDirection::Row => FlexDirection::Row,
+        StyleFlexDirection::RowReverse => FlexDirection::RowReverse,
+        StyleFlexDirection::Column => FlexDirection::Column,
+        StyleFlexDirection::ColumnReverse => FlexDirection::ColumnReverse,
+    }
+}
+
+fn to_flex_wrap(value: StyleFlexWrap) -> FlexWrap {
+    match value {
+        StyleFlexWrap::NoWrap => FlexWrap::NoWrap,
+        StyleFlexWrap::Wrap => FlexWrap::Wrap,
+        StyleFlexWrap::WrapReverse => FlexWrap::WrapReverse,
+    }
+}
+
+/// Shared by `justify-content`/`align-content` — Taffy's own `JustifyContent`
+/// is a type alias of `AlignContent`, so one conversion serves both fields.
+fn to_content_alignment(value: Option<ContentAlignment>) -> Option<AlignContent> {
+    value.map(|value| match value {
+        ContentAlignment::Start => AlignContent::START,
+        ContentAlignment::End => AlignContent::END,
+        ContentAlignment::FlexStart => AlignContent::FLEX_START,
+        ContentAlignment::FlexEnd => AlignContent::FLEX_END,
+        ContentAlignment::Center => AlignContent::CENTER,
+        ContentAlignment::Stretch => AlignContent::STRETCH,
+        ContentAlignment::SpaceBetween => AlignContent::SPACE_BETWEEN,
+        ContentAlignment::SpaceAround => AlignContent::SPACE_AROUND,
+        ContentAlignment::SpaceEvenly => AlignContent::SPACE_EVENLY,
+    })
+}
+
+/// Shared by `align-items`/`align-self` — Taffy's own `AlignSelf` is a type
+/// alias of `AlignItems`, so one conversion serves both fields.
+fn to_item_alignment(value: Option<ItemAlignment>) -> Option<AlignItems> {
+    value.map(|value| match value {
+        ItemAlignment::Stretch => AlignItems::STRETCH,
+        ItemAlignment::FlexStart => AlignItems::FLEX_START,
+        ItemAlignment::FlexEnd => AlignItems::FLEX_END,
+        ItemAlignment::Start => AlignItems::START,
+        ItemAlignment::End => AlignItems::END,
+        ItemAlignment::Center => AlignItems::CENTER,
+        ItemAlignment::Baseline => AlignItems::BASELINE,
+    })
 }
 
 /// Accumulates `node`'s ancestors' [`BoxLayout`] offsets into a position
@@ -504,5 +580,215 @@ mod tests {
         let expected = florui_text::Font::load_embedded().measure("Hi", 16.0);
         assert_close(layouts[&span].width, expected.width);
         assert_close(layouts[&span].height, expected.height);
+    }
+
+    #[test]
+    fn a_flex_row_lays_out_children_left_to_right() {
+        let tree: Element = view! {
+            <div class="row">
+                <div class="a" />
+                <div class="b" />
+            </div>
+        };
+        let (arena, layouts) = layout_for(
+            &tree,
+            "
+            .row { display: flex; width: 300px; height: 50px; }
+            .a { width: 100px; height: 50px; }
+            .b { width: 80px; height: 50px; }
+            ",
+        );
+        let row = arena.roots()[0];
+        let a = arena.children(row)[0];
+        let b = arena.children(row)[1];
+
+        assert_eq!(layouts[&a].x, 0.0);
+        assert_eq!(layouts[&b].x, 100.0, "b starts right where a's 100px ends");
+        assert_eq!(
+            layouts[&a].y, 0.0,
+            "a flex row keeps children on the same cross-axis line by default"
+        );
+    }
+
+    #[test]
+    fn a_flex_column_lays_out_children_top_to_bottom() {
+        let tree: Element = view! {
+            <div class="col">
+                <div class="a" />
+                <div class="b" />
+            </div>
+        };
+        let (arena, layouts) = layout_for(
+            &tree,
+            "
+            .col { display: flex; flex-direction: column; width: 100px; height: 300px; }
+            .a { width: 100px; height: 40px; }
+            .b { width: 100px; height: 20px; }
+            ",
+        );
+        let col = arena.roots()[0];
+        let a = arena.children(col)[0];
+        let b = arena.children(col)[1];
+
+        assert_eq!(layouts[&a].y, 0.0);
+        assert_eq!(layouts[&b].y, 40.0, "b starts right where a's 40px ends");
+    }
+
+    #[test]
+    fn justify_content_space_between_pushes_children_to_the_edges() {
+        let tree: Element = view! {
+            <div class="row">
+                <div class="a" />
+                <div class="b" />
+            </div>
+        };
+        let (arena, layouts) = layout_for(
+            &tree,
+            "
+            .row { display: flex; justify-content: space-between; width: 300px; height: 50px; }
+            .a { width: 50px; height: 50px; }
+            .b { width: 50px; height: 50px; }
+            ",
+        );
+        let row = arena.roots()[0];
+        let a = arena.children(row)[0];
+        let b = arena.children(row)[1];
+
+        assert_eq!(
+            layouts[&a].x, 0.0,
+            "the first child stays flush with the start"
+        );
+        assert_eq!(
+            layouts[&b].x, 250.0,
+            "the last child is flush with the end: 300 container - 50 own width"
+        );
+    }
+
+    #[test]
+    fn align_items_center_centers_a_shorter_child_on_the_cross_axis() {
+        let tree: Element = view! {
+            <div class="row">
+                <div class="short" />
+            </div>
+        };
+        let (arena, layouts) = layout_for(
+            &tree,
+            "
+            .row { display: flex; align-items: center; width: 100px; height: 100px; }
+            .short { width: 20px; height: 20px; }
+            ",
+        );
+        let row = arena.roots()[0];
+        let short = arena.children(row)[0];
+
+        assert_eq!(
+            layouts[&short].y, 40.0,
+            "centered in a 100px-tall row: (100 - 20) / 2"
+        );
+    }
+
+    #[test]
+    fn flex_grow_distributes_remaining_space_proportionally() {
+        let tree: Element = view! {
+            <div class="row">
+                <div class="one" />
+                <div class="two" />
+            </div>
+        };
+        let (arena, layouts) = layout_for(
+            &tree,
+            "
+            .row { display: flex; width: 300px; height: 50px; }
+            .one { flex-grow: 1; height: 50px; }
+            .two { flex-grow: 2; height: 50px; }
+            ",
+        );
+        let row = arena.roots()[0];
+        let one = arena.children(row)[0];
+        let two = arena.children(row)[1];
+
+        assert_eq!(
+            layouts[&one].width, 100.0,
+            "1 share of 300px free space (both start at 0 width)"
+        );
+        assert_eq!(layouts[&two].width, 200.0, "2 shares of the same 300px");
+    }
+
+    #[test]
+    fn flex_shrink_zero_keeps_a_child_at_its_basis_even_when_siblings_overflow() {
+        let tree: Element = view! {
+            <div class="row">
+                <div class="fixed" />
+                <div class="flexible" />
+            </div>
+        };
+        let (arena, layouts) = layout_for(
+            &tree,
+            "
+            .row { display: flex; width: 150px; height: 50px; }
+            .fixed { width: 100px; height: 50px; flex-shrink: 0; }
+            .flexible { width: 100px; height: 50px; }
+            ",
+        );
+        let row = arena.roots()[0];
+        let fixed = arena.children(row)[0];
+
+        assert_eq!(
+            layouts[&fixed].width, 100.0,
+            "flex-shrink: 0 must not shrink even though the row is 50px too narrow \
+             for both children's own widths"
+        );
+    }
+
+    #[test]
+    fn gap_adds_space_between_flex_children_without_affecting_the_first_ones_position() {
+        let tree: Element = view! {
+            <div class="row">
+                <div class="a" />
+                <div class="b" />
+            </div>
+        };
+        let (arena, layouts) = layout_for(
+            &tree,
+            "
+            .row { display: flex; column-gap: 10px; width: 300px; height: 50px; }
+            .a { width: 50px; height: 50px; }
+            .b { width: 50px; height: 50px; }
+            ",
+        );
+        let row = arena.roots()[0];
+        let a = arena.children(row)[0];
+        let b = arena.children(row)[1];
+
+        assert_eq!(layouts[&a].x, 0.0);
+        assert_eq!(layouts[&b].x, 60.0, "a's 50px width + 10px column-gap");
+    }
+
+    /// A node's own `display` never affects how its parent places *it* —
+    /// only how it places its own children.
+    #[test]
+    fn a_block_child_inside_a_flex_row_is_still_laid_out_by_the_flex_algorithm() {
+        let tree: Element = view! {
+            <div class="row">
+                <div class="block-child">
+                    <div class="grandchild" />
+                </div>
+            </div>
+        };
+        let (arena, layouts) = layout_for(
+            &tree,
+            "
+            .row { display: flex; width: 200px; height: 50px; }
+            .block-child { width: 80px; height: 50px; }
+            .grandchild { width: 20px; height: 20px; }
+            ",
+        );
+        let row = arena.roots()[0];
+        let block_child = arena.children(row)[0];
+
+        assert_eq!(
+            layouts[&block_child].x, 0.0,
+            "the flex row still positions its block-display child as a flex item"
+        );
     }
 }

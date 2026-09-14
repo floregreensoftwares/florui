@@ -21,6 +21,64 @@ pub struct Edges<T> {
     pub left: T,
 }
 
+/// A container's own layout algorithm. Only these two exist so far; grid is
+/// planned as its own later addition on top of this same field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Display {
+    #[default]
+    Block,
+    Flex,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FlexDirection {
+    #[default]
+    Row,
+    RowReverse,
+    Column,
+    ColumnReverse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FlexWrap {
+    #[default]
+    NoWrap,
+    Wrap,
+    WrapReverse,
+}
+
+/// Shared by `justify-content`/`align-content` — real CSS resolves both
+/// through the same `content-distribution` value space. `None` means
+/// `normal`: packed at the start with no extra distribution, and (unlike
+/// every other `Option<...>` field here) not the same as an explicit
+/// `flex-start`, since `normal` is genuinely a distinct initial value with
+/// no equivalent keyword of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentAlignment {
+    Start,
+    End,
+    FlexStart,
+    FlexEnd,
+    Center,
+    Stretch,
+    SpaceBetween,
+    SpaceAround,
+    SpaceEvenly,
+}
+
+/// Shared by `align-items`/`align-self` — same reasoning as
+/// [`ContentAlignment`] for why this is `Option`, not a `#[default]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemAlignment {
+    Stretch,
+    FlexStart,
+    FlexEnd,
+    Start,
+    End,
+    Center,
+    Baseline,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ComputedStyle {
     pub background_color: Rgba,
@@ -39,6 +97,48 @@ pub struct ComputedStyle {
     pub padding: Edges<f32>,
     /// Inherits; initial `16.0`.
     pub font_size: f32,
+    /// This node's own layout algorithm, applied to *its children* — a
+    /// leaf's `display` never affects how its own box is placed by its
+    /// parent (that's [`Self::flex_grow`]/[`Self::flex_shrink`]/
+    /// [`Self::flex_basis`]/[`Self::align_self`] instead).
+    pub display: Display,
+    pub flex_direction: FlexDirection,
+    pub flex_wrap: FlexWrap,
+    /// `justify-content`: main-axis distribution of this flex container's
+    /// own children. Meaningless when [`Self::display`] isn't
+    /// [`Display::Flex`].
+    pub justify_content: Option<ContentAlignment>,
+    /// `align-content`: cross-axis distribution across wrapped flex lines.
+    /// Meaningless when [`Self::display`] isn't [`Display::Flex`].
+    pub align_content: Option<ContentAlignment>,
+    /// `align-items`: this flex container's default cross-axis alignment
+    /// for its children, unless a child overrides it with
+    /// [`Self::align_self`]. Meaningless when [`Self::display`] isn't
+    /// [`Display::Flex`].
+    pub align_items: Option<ItemAlignment>,
+    /// `align-self`: this node's *own* cross-axis alignment within
+    /// whichever flex container it's a child of, overriding that
+    /// container's [`Self::align_items`]. Meaningless when this node's
+    /// parent isn't a flex container.
+    pub align_self: Option<ItemAlignment>,
+    /// How much of a flex container's remaining free space this node
+    /// claims, relative to its flex siblings. `0.0` (the CSS initial
+    /// value) means it does not grow.
+    pub flex_grow: f32,
+    /// How much this node shrinks when a flex container's children
+    /// collectively overflow it, relative to its flex siblings. `1.0` is
+    /// the CSS initial value — flex items shrink by default.
+    pub flex_shrink: f32,
+    /// The size a flex item starts from before growing/shrinking
+    /// distributes remaining space. `None` means `auto` (fall back to
+    /// [`Self::width`]/[`Self::height`], on whichever axis is the main
+    /// one).
+    pub flex_basis: Option<f32>,
+    /// `column-gap`, between adjacent children on the main axis for a row
+    /// flex container (or the cross axis for a column one).
+    pub column_gap: f32,
+    /// `row-gap`, the same on the other axis.
+    pub row_gap: f32,
 }
 
 /// Resolves every node in `arena` against `rules` and `state` — real
@@ -321,5 +421,152 @@ mod tests {
         );
         let button = arena.find(|a, id| a.tag(id) == "button").unwrap();
         assert_eq!(computed[&button].background_color, Rgba::TRANSPARENT);
+    }
+
+    #[test]
+    fn display_defaults_to_block() {
+        let tree: Element = view! { <div /> };
+        let (arena, computed) = styles(&tree, "", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].display, Display::Block);
+    }
+
+    #[test]
+    fn display_flex_is_read_back_from_real_css() {
+        let tree: Element = view! { <div class="row" /> };
+        let (arena, computed) = styles(&tree, ".row { display: flex; }", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].display, Display::Flex);
+    }
+
+    #[test]
+    fn display_does_not_inherit() {
+        let tree: Element = view! {
+            <div class="row">
+                <span>{"x"}</span>
+            </div>
+        };
+        let (arena, computed) = styles(&tree, ".row { display: flex; }", &InteractionState::new());
+        let span = arena.find(|a, id| a.tag(id) == "span").unwrap();
+        assert_eq!(
+            computed[&span].display,
+            Display::Block,
+            "a flex container's own display must not leak onto its children"
+        );
+    }
+
+    #[test]
+    fn flex_direction_and_wrap_resolve_from_real_css() {
+        let tree: Element = view! { <div class="row" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".row { flex-direction: column-reverse; flex-wrap: wrap; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].flex_direction, FlexDirection::ColumnReverse);
+        assert_eq!(computed[&node].flex_wrap, FlexWrap::Wrap);
+    }
+
+    #[test]
+    fn flex_direction_and_wrap_default_to_row_and_nowrap() {
+        let tree: Element = view! { <div /> };
+        let (arena, computed) = styles(&tree, "", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].flex_direction, FlexDirection::Row);
+        assert_eq!(computed[&node].flex_wrap, FlexWrap::NoWrap);
+    }
+
+    #[test]
+    fn justify_content_and_align_items_resolve_from_real_css() {
+        let tree: Element = view! { <div class="row" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".row { justify-content: space-between; align-items: center; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(
+            computed[&node].justify_content,
+            Some(ContentAlignment::SpaceBetween)
+        );
+        assert_eq!(computed[&node].align_items, Some(ItemAlignment::Center));
+    }
+
+    #[test]
+    fn justify_content_and_align_items_default_to_none() {
+        let tree: Element = view! { <div /> };
+        let (arena, computed) = styles(&tree, "", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert_eq!(
+            computed[&node].justify_content, None,
+            "CSS's own initial value is `normal`, not an explicit keyword"
+        );
+        assert_eq!(computed[&node].align_items, None);
+    }
+
+    #[test]
+    fn align_self_resolves_independently_of_the_parents_align_items() {
+        let tree: Element = view! {
+            <div class="row">
+                <span class="odd-one-out">{"x"}</span>
+            </div>
+        };
+        let (arena, computed) = styles(
+            &tree,
+            ".row { align-items: flex-start; } .odd-one-out { align-self: flex-end; }",
+            &InteractionState::new(),
+        );
+        let span = arena.find(|a, id| a.tag(id) == "span").unwrap();
+        assert_eq!(computed[&span].align_self, Some(ItemAlignment::FlexEnd));
+    }
+
+    #[test]
+    fn flex_grow_shrink_and_basis_resolve_from_real_css() {
+        let tree: Element = view! { <div class="item" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".item { flex-grow: 2; flex-shrink: 0; flex-basis: 50px; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].flex_grow, 2.0);
+        assert_eq!(computed[&node].flex_shrink, 0.0);
+        assert_eq!(computed[&node].flex_basis, Some(50.0));
+    }
+
+    #[test]
+    fn flex_grow_shrink_and_basis_default_to_css_initial_values() {
+        let tree: Element = view! { <div /> };
+        let (arena, computed) = styles(&tree, "", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].flex_grow, 0.0, "CSS's own initial value");
+        assert_eq!(
+            computed[&node].flex_shrink, 1.0,
+            "flex items shrink by default in real CSS"
+        );
+        assert_eq!(computed[&node].flex_basis, None, "auto by default");
+    }
+
+    #[test]
+    fn gap_resolves_from_real_css() {
+        let tree: Element = view! { <div class="row" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".row { column-gap: 12px; row-gap: 4px; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].column_gap, 12.0);
+        assert_eq!(computed[&node].row_gap, 4.0);
+    }
+
+    #[test]
+    fn gap_defaults_to_zero() {
+        let tree: Element = view! { <div /> };
+        let (arena, computed) = styles(&tree, "", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].column_gap, 0.0);
+        assert_eq!(computed[&node].row_gap, 0.0);
     }
 }

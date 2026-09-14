@@ -38,7 +38,10 @@ mod stylesheet_parse;
 mod stylo;
 mod tree;
 
-pub use cascade::{ComputedStyle, Edges, compute};
+pub use cascade::{
+    ComputedStyle, ContentAlignment, Display, Edges, FlexDirection, FlexWrap, ItemAlignment,
+    compute,
+};
 pub use color::{ColorParseError, Rgba, parse_hex_color};
 pub use error::StyleError;
 pub use interaction::InteractionState;
