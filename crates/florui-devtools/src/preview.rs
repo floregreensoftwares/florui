@@ -24,10 +24,12 @@ use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
+use florui_style::{Edges as StyleEdges, Rgba as StyleRgba};
+
 use crate::color::Rgba;
 use crate::diagnostics::{DevEvent, ElementId, failure, log_event, print_banner};
 use crate::fixture::{Fixture, SourceLocation, load_fixture};
-use crate::inspector::{Inspector, InspectorModel};
+use crate::inspector::{ContentBox, Inspector, InspectorAction, InspectorModel, InspectorNode};
 use crate::scene::{ELEMENT_INSET, ElementBox, element_box, outline_rect, render_0rgb};
 
 /// Canvas color; visually distinct from the element box so the inset
@@ -116,6 +118,7 @@ struct App {
     current: Fixture,
     stale: bool,
     selected: bool,
+    picking: bool,
     last_cursor: Option<(f64, f64)>,
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
@@ -136,6 +139,7 @@ impl App {
             },
             stale: true,
             selected: false,
+            picking: false,
             last_cursor: None,
             window: None,
             surface: None,
@@ -170,12 +174,7 @@ impl App {
             }
         }
         self.set_title();
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
-        if let Some(inspector) = &self.inspector {
-            inspector.request_redraw();
-        }
+        self.request_redraws();
     }
 
     fn set_title(&self) {
@@ -201,26 +200,76 @@ impl App {
         element_box(size.width, size.height, ELEMENT_INSET)
     }
 
+    /// Always one row: this bootstrap loop has only one hard-coded
+    /// element. Padding/border/margin are honestly zero (this loop has no
+    /// such concept, not an unresolved guess).
     fn inspector_model(&self) -> InspectorModel {
+        let content = self.current_element_box().map(|b| ContentBox {
+            x: b.x as f32,
+            y: b.y as f32,
+            width: b.width as f32,
+            height: b.height as f32,
+        });
+        let zero_edges = StyleEdges {
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.0,
+            left: 0.0,
+        };
+        let node = InspectorNode {
+            id: 0,
+            depth: 0,
+            tag: "body".to_string(),
+            display: "block".to_string(),
+            background: StyleRgba {
+                r: self.current.background.r,
+                g: self.current.background.g,
+                b: self.current.background.b,
+                a: self.current.background.a,
+            },
+            content,
+            padding: zero_edges,
+            border: zero_edges,
+            margin: StyleEdges {
+                top: Some(0.0),
+                right: Some(0.0),
+                bottom: Some(0.0),
+                left: Some(0.0),
+            },
+        };
         InspectorModel {
-            element: self.element,
-            selected: self.selected,
+            nodes: vec![node],
+            selected: self.selected.then_some(0),
+            picking: self.picking,
             stale: self.stale,
-            background: self.current.background,
-            background_hex: format!(
-                "#{:02x}{:02x}{:02x}",
-                self.current.background.r, self.current.background.g, self.current.background.b
-            ),
-            source_path: self.fixture_path.clone(),
-            source_location: self.current.background_location,
-            element_box: self.current_element_box(),
         }
     }
 
     fn redraw_inspector(&mut self) {
         let model = self.inspector_model();
-        if let Some(inspector) = &mut self.inspector {
-            inspector.redraw(&model);
+        let Some(inspector) = &mut self.inspector else {
+            return;
+        };
+        match inspector.redraw(&model) {
+            Some(InspectorAction::SelectNode(_)) => {
+                self.selected = true;
+                self.picking = false;
+                self.request_redraws();
+            }
+            Some(InspectorAction::TogglePicking) => {
+                self.picking = !self.picking;
+                self.request_redraws();
+            }
+            None => {}
+        }
+    }
+
+    fn request_redraws(&self) {
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+        if let Some(inspector) = &self.inspector {
+            inspector.request_redraw();
         }
     }
 
@@ -273,19 +322,19 @@ impl App {
         );
     }
 
-    /// Toggles selection when `(x, y)` (physical pixels) falls inside the
-    /// element's box, and clears it on a click elsewhere. Requests a redraw
-    /// of both windows since the highlight and the inspector's tree
-    /// selection both depend on this state.
+    /// Only acts while picking is armed (see [`InspectorModel::picking`]):
+    /// selects when `(x, y)` (physical pixels) falls inside the element's
+    /// box, deselects otherwise, and disarms picking either way.
     fn handle_click(&mut self, x: f64, y: f64) {
+        if !self.picking {
+            return;
+        }
         let hit = self
             .current_element_box()
             .is_some_and(|bounds| bounds.contains(x as u32, y as u32));
         self.selected = hit;
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
-        self.redraw_inspector();
+        self.picking = false;
+        self.request_redraws();
     }
 }
 

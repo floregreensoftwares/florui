@@ -1,43 +1,72 @@
-//! A second native window: a minimal tree/style/box inspector for the
-//! preview's single selectable element.
+//! A second native window: a tree/style/box inspector over a real
+//! `florui-style`/`florui-layout` tree.
 //!
-//! Uses `egui` (via `egui-winit` + `egui-wgpu`) sharing the preview's own
+//! Uses `egui` (via `egui-winit` + `egui-wgpu`) sharing a host's own
 //! `winit` event loop — not `eframe`, which would want to own the loop
-//! itself. `wgpu`/`egui*` are devtools-only dependencies; the preview window
+//! itself. `wgpu`/`egui*` are devtools-only dependencies; a preview window
 //! itself stays on `softbuffer` and never touches a GPU.
 
 use std::fmt;
 use std::num::NonZeroU32;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use egui::ViewportId;
 use egui_wgpu::WgpuError;
 use egui_wgpu::winit::Painter;
+use florui_style::{Edges, NodeId, Rgba};
 use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowId};
 
-use crate::color::Rgba;
-use crate::diagnostics::ElementId;
-use crate::fixture::SourceLocation;
-use crate::scene::ElementBox;
+/// A node's absolute content box, in the same physical-pixel space a host
+/// paints in — parent-relative `florui_layout::BoxLayout` already resolved
+/// via `absolute_position`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContentBox {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// One node's rendering-relevant snapshot, flattened pre-order with `depth`
+/// for tree indentation.
+pub struct InspectorNode {
+    pub id: NodeId,
+    pub depth: usize,
+    pub tag: String,
+    pub display: String,
+    pub background: Rgba,
+    /// `None` when nothing laid this node out (e.g. a plain `display:
+    /// inline` child has no box of its own yet) — not fabricated as zero.
+    pub content: Option<ContentBox>,
+    pub padding: Edges<f32>,
+    pub border: Edges<f32>,
+    /// Declared `margin-*`, not a resolved box: `BoxLayout` doesn't carry
+    /// resolved auto-margins yet.
+    pub margin: Edges<Option<f32>>,
+}
 
 /// Everything the inspector needs to render one frame. Rebuilt by the
-/// caller whenever the fixture reloads or the selection changes; the
-/// inspector itself holds no opinion about *when* it goes stale.
+/// caller whenever the underlying tree renders or the selection changes.
 pub struct InspectorModel {
-    pub element: ElementId,
-    pub selected: bool,
+    /// Pre-order flattened tree — a child always immediately follows its
+    /// parent, with a strictly greater `depth`.
+    pub nodes: Vec<InspectorNode>,
+    pub selected: Option<NodeId>,
+    /// Mirrors a browser devtools' element picker: off by default (a
+    /// preview click does whatever the app does); armed, the next preview
+    /// click selects instead of activating, then disarms itself.
+    pub picking: bool,
     pub stale: bool,
-    pub background: Rgba,
-    pub background_hex: String,
-    pub source_path: PathBuf,
-    pub source_location: SourceLocation,
-    /// `None` when the canvas is too small to fit the configured insets —
-    /// shown honestly rather than as a fabricated zero-sized box.
-    pub element_box: Option<ElementBox>,
+}
+
+/// What the user did with the inspector this frame, if anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InspectorAction {
+    SelectNode(NodeId),
+    TogglePicking,
 }
 
 #[derive(Debug)]
@@ -125,13 +154,22 @@ impl Inspector {
 
     /// Forwards a window event to egui. Returns whether egui consumed it
     /// (the caller should not also act on a consumed event).
+    ///
+    /// Also requests a redraw: `on_window_event` only queues input for the
+    /// next frame, it doesn't run `draw_ui` — without this, a click sits
+    /// unprocessed until some unrelated redraw happens to come along.
     pub fn handle_window_event(&mut self, event: &WindowEvent) -> bool {
         if let WindowEvent::Resized(size) = event {
             self.resize(*size);
         }
-        self.egui_state
+        let consumed = self
+            .egui_state
             .on_window_event(&self.window, event)
-            .consumed
+            .consumed;
+        if !matches!(event, WindowEvent::RedrawRequested) {
+            self.window.request_redraw();
+        }
+        consumed
     }
 
     fn resize(&mut self, size: PhysicalSize<u32>) {
@@ -143,9 +181,14 @@ impl Inspector {
         }
     }
 
-    pub fn redraw(&mut self, model: &InspectorModel) {
+    /// Renders one frame and reports the user's action, if any — the
+    /// caller owns all state and decides what it means.
+    pub fn redraw(&mut self, model: &InspectorModel) -> Option<InspectorAction> {
         let raw_input = self.egui_state.take_egui_input(&self.window);
-        let full_output = self.egui_ctx.run_ui(raw_input, |ui| draw_ui(ui, model));
+        let mut action = None;
+        let full_output = self.egui_ctx.run_ui(raw_input, |ui| {
+            action = draw_ui(ui, model);
+        });
         self.egui_state
             .handle_platform_output(&self.window, full_output.platform_output);
         let clipped_primitives = self
@@ -161,13 +204,43 @@ impl Inspector {
             Vec::new(),
             &self.window,
         );
+        action
     }
 }
 
-fn draw_ui(ui: &mut egui::Ui, model: &InspectorModel) {
+fn format_margin(edge: Option<f32>) -> String {
+    match edge {
+        Some(px) => format!("{px}px"),
+        None => "auto".to_string(),
+    }
+}
+
+fn draw_ui(ui: &mut egui::Ui, model: &InspectorModel) -> Option<InspectorAction> {
+    let mut action = None;
+
+    egui::Panel::top("florui-inspector-toolbar").show(ui, |ui| {
+        ui.horizontal(|ui| {
+            if ui.selectable_label(model.picking, "Pick element").clicked() {
+                action = Some(InspectorAction::TogglePicking);
+            }
+            if model.picking {
+                ui.label("click an element in the preview to select it");
+            }
+        });
+    });
+
     egui::Panel::left("florui-inspector-tree").show(ui, |ui| {
         ui.heading("Tree");
-        let _ = ui.selectable_label(model.selected, format!("body {}", model.element));
+        for node in &model.nodes {
+            ui.horizontal(|ui| {
+                ui.add_space(node.depth as f32 * 12.0);
+                let is_selected = model.selected == Some(node.id);
+                let label = format!("<{}>", node.tag);
+                if ui.selectable_label(is_selected, label).clicked() {
+                    action = Some(InspectorAction::SelectNode(node.id));
+                }
+            });
+        }
     });
 
     egui::CentralPanel::default().show(ui, |ui| {
@@ -176,31 +249,53 @@ fn draw_ui(ui: &mut egui::Ui, model: &InspectorModel) {
             ui.separator();
         }
 
-        ui.heading("Styles");
-        ui.monospace(format!("background-color: {}", model.background_hex));
-        ui.label(format!(
-            "{}:{}",
-            model.source_path.display(),
-            model.source_location
-        ));
+        let selected = model
+            .selected
+            .and_then(|id| model.nodes.iter().find(|node| node.id == id));
 
-        ui.separator();
-        ui.heading("Box model");
-        match model.element_box {
-            Some(b) => {
+        match selected {
+            None => {
+                ui.label("No element selected — click one in the tree or the preview.");
+            }
+            Some(node) => {
+                ui.heading("Styles");
+                ui.monospace(format!("display: {}", node.display));
                 ui.monospace(format!(
-                    "content: {}, {} — {}x{} (physical px)",
-                    b.x, b.y, b.width, b.height
+                    "background-color: #{:02x}{:02x}{:02x}",
+                    node.background.r, node.background.g, node.background.b
+                ));
+
+                ui.separator();
+                ui.heading("Box model");
+                match node.content {
+                    Some(b) => {
+                        ui.monospace(format!(
+                            "content: {}, {} — {}x{} (physical px)",
+                            b.x, b.y, b.width, b.height
+                        ));
+                    }
+                    None => {
+                        ui.label("no box: this node has no layout of its own yet");
+                    }
+                }
+                ui.monospace(format!(
+                    "padding: {} {} {} {} (top right bottom left)",
+                    node.padding.top, node.padding.right, node.padding.bottom, node.padding.left
+                ));
+                ui.monospace(format!(
+                    "border: {} {} {} {} (top right bottom left)",
+                    node.border.top, node.border.right, node.border.bottom, node.border.left
+                ));
+                ui.monospace(format!(
+                    "margin: {} {} {} {} (declared; auto is not yet resolved to a box)",
+                    format_margin(node.margin.top),
+                    format_margin(node.margin.right),
+                    format_margin(node.margin.bottom),
+                    format_margin(node.margin.left),
                 ));
             }
-            None => {
-                ui.label("no box: canvas is too small for the configured insets");
-            }
         }
-        // Not fabricated as zero: this bootstrap engine has no box model
-        // beyond the content rectangle above.
-        ui.label("padding: not implemented yet");
-        ui.label("border: not implemented yet");
-        ui.label("margin: not implemented yet");
     });
+
+    action
 }

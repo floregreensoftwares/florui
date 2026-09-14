@@ -1195,6 +1195,7 @@ dependencies = [
  "florui",
  "florui-layout",
  "florui-paint",
+ "florui-platform",
  "florui-style",
  "image",
  "notify",
@@ -1211,6 +1212,7 @@ version = "0.1.0"
 dependencies = [
  "florui",
  "florui-build",
+ "florui-devtools",
  "florui-layout",
  "florui-paint",
  "florui-platform",
