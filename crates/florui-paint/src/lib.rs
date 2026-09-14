@@ -127,40 +127,67 @@ fn paint_node(
             fill_rect(buffer, x, y, layout.width, layout.height, background);
         }
 
-        let text = arena.text_content(node);
-        if !text.is_empty() {
-            let color = style.map_or(Rgba::opaque(0, 0, 0), |s| s.color);
-            let font_size = style.map_or(16.0, |s| s.font_size);
-            let font_family = style.map_or(florui_text::FontFamily::SansSerif, |s| {
-                to_text_font_family(s.font_family)
-            });
-            let no_padding = florui_style::Edges {
-                top: 0.0,
-                right: 0.0,
-                bottom: 0.0,
-                left: 0.0,
-            };
-            let padding = style.map_or(no_padding, |s| s.padding);
-            // The box's own final content width, whatever layout resolved
-            // it to (wrapped or not) — shaping at exactly this width always
-            // reproduces what layout already measured: an intrinsically
-            // unwrapped box is already exactly as wide as its one line, so
-            // wrapping "at" that width changes nothing, and a box layout
-            // wrapped to fit stays wrapped identically here.
-            let content_width = (layout.width - padding.left - padding.right).max(0.0);
-            paint_text(
-                buffer,
+        let color = style.map_or(Rgba::opaque(0, 0, 0), |s| s.color);
+        let no_padding = florui_style::Edges {
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.0,
+            left: 0.0,
+        };
+        let padding = style.map_or(no_padding, |s| s.padding);
+        // The box's own final content width, whatever layout resolved it
+        // to (wrapped or not) — shaping at exactly this width always
+        // reproduces what layout already measured: an intrinsically
+        // unwrapped box is already exactly as wide as its one line, so
+        // wrapping "at" that width changes nothing, and a box layout
+        // wrapped to fit stays wrapped identically here.
+        let content_width = (layout.width - padding.left - padding.right).max(0.0);
+
+        if florui_layout::is_inline_formatting_context(arena, styles, node) {
+            // A real mixed text/inline-element node: rebuilt and
+            // reshaped fresh here, since this crate doesn't share layout's
+            // own internal Taffy tree — deterministic at the same final
+            // width, the same reasoning `paint_text`'s own doc gives for
+            // the plain single-style case below. Every run paints in this
+            // node's own inherited `color` uniformly — a per-span `color`
+            // override isn't painted differently yet, a documented bound
+            // matching `florui_layout`'s own module doc.
+            if let Some(shaped) = florui_layout::shape_inline_formatting_context(
                 font,
-                TextPaint {
-                    text,
-                    font_size,
-                    font_family,
+                arena,
+                styles,
+                node,
+                content_width,
+            ) {
+                paint_shaped_runs(
+                    buffer,
+                    &shaped.runs,
+                    x + padding.left,
+                    y + padding.top,
                     color,
-                    x: x + padding.left,
-                    y: y + padding.top,
-                    wrap_width: content_width,
-                },
-            );
+                );
+            }
+        } else {
+            let text = arena.text_content(node);
+            if !text.is_empty() {
+                let font_size = style.map_or(16.0, |s| s.font_size);
+                let font_family = style.map_or(florui_text::FontFamily::SansSerif, |s| {
+                    to_text_font_family(s.font_family)
+                });
+                paint_text(
+                    buffer,
+                    font,
+                    TextPaint {
+                        text,
+                        font_size,
+                        font_family,
+                        color,
+                        x: x + padding.left,
+                        y: y + padding.top,
+                        wrap_width: content_width,
+                    },
+                );
+            }
         }
     }
     for &child in arena.children(node) {
@@ -218,9 +245,28 @@ fn paint_text(buffer: &mut Canvas, font: &mut Font, params: TextPaint<'_>) {
         wrap_width,
     } = params;
     let shaped = font.shape_wrapped(font_family, text, font_size, wrap_width);
+    paint_shaped_runs(buffer, &shaped.runs, x, y, color);
+}
+
+/// Fills every glyph across `runs` at `(x, y)` — the top-left of the whole
+/// shaped block, in the same coordinate space as [`fill_rect`] — with
+/// `color`. Shared by [`paint_text`] (single-style text) and a real inline
+/// formatting context's own mixed-style runs, since both end up
+/// with the same `&[florui_text::ShapedRun]` shape to paint, just built
+/// via a different `florui_text::Font` call. Skips a run whose font data
+/// doesn't parse, or an individual glyph with no outline (e.g. genuinely
+/// missing from the font); a partial render beats aborting the whole paint
+/// over one bad glyph.
+fn paint_shaped_runs(
+    buffer: &mut Canvas,
+    runs: &[florui_text::ShapedRun],
+    x: f32,
+    y: f32,
+    color: Rgba,
+) {
     let mut builder = PathBuilder::new();
 
-    for run in &shaped.runs {
+    for run in runs {
         let Ok(font_ref) = FontRef::from_index(run.font.data.data(), run.font.index) else {
             continue;
         };
@@ -474,6 +520,70 @@ mod tests {
             }
         }
         assert!(found_ink, "expected at least one red glyph pixel");
+    }
+
+    #[test]
+    fn a_real_inline_formatting_context_paints_ink_from_both_the_text_and_the_inline_element() {
+        // `Element::node`/`Element::text` directly — real mixed inline
+        // content, which `view!` has no
+        // ergonomic syntax for. Before this, `florui-paint` painted
+        // a node with element children using only `arena.text_content`,
+        // which flattens through nested elements and would have silently
+        // dropped "B" — this test is exactly what would have caught that:
+        // ink must appear on *both* sides of the box, not just the left.
+        let tree = Element::node(
+            "p",
+            vec![],
+            vec![
+                Element::text("A"),
+                Element::node("span", vec![], vec![Element::text("B")]),
+            ],
+        );
+        let css = "p { color: #ff0000; font-size: 40px; }";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let layouts = florui_layout::compute_layout(&arena, &styles, Size::MAX_CONTENT).unwrap();
+
+        let node = arena.roots()[0];
+        let width = layouts[&node].width.ceil() as u32;
+        let height = layouts[&node].height.ceil() as u32;
+        let buffer = paint_to_buffer(
+            width,
+            height,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+        );
+
+        // A lower bar than "fully-opaque red" (the single-glyph "H" test's
+        // own threshold): two adjacent, mostly-curved glyphs like "A"/"B"
+        // at this size can anti-alias every pixel of their outline without
+        // any one pixel reaching full coverage, unlike "H"'s thick straight
+        // strokes — any non-trivial red channel value still distinguishes
+        // real ink from the plain black background.
+        let is_ink = |px: u32, py: u32| pixel_rgb(&buffer, px, py)[0] > 0x20;
+        let half = width / 2;
+        let mut ink_in_left_half = false;
+        let mut ink_in_right_half = false;
+        for py in 0..height {
+            for px in 0..width {
+                if is_ink(px, py) {
+                    if px < half {
+                        ink_in_left_half = true;
+                    } else {
+                        ink_in_right_half = true;
+                    }
+                }
+            }
+        }
+        assert!(ink_in_left_half, "expected ink from \"A\" on the left");
+        assert!(
+            ink_in_right_half,
+            "expected ink from the inline <span>'s own \"B\" on the right — \
+             text_content-only painting would have dropped it entirely"
+        );
     }
 
     #[test]

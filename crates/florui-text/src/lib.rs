@@ -40,8 +40,8 @@
 use std::sync::Arc;
 
 use parley::{
-    FontContext, FontData, FontFamily as ParleyFontFamily, LayoutContext, PositionedLayoutItem,
-    StyleProperty,
+    FontContext, FontData, FontFamily as ParleyFontFamily, InlineBox, InlineBoxKind, LayoutContext,
+    PositionedLayoutItem, StyleProperty,
 };
 use peniko::Blob;
 
@@ -107,6 +107,58 @@ pub struct ShapedText {
     pub runs: Vec<ShapedRun>,
     pub width: f32,
     pub height: f32,
+}
+
+/// One piece of a real inline formatting context, in source order — either
+/// a run of text with its own font (a bare inline run, or a `display:
+/// inline` element's own text), or an opaque box with a pre-measured size
+/// that flows with the surrounding text as one atomic unit (`display:
+/// inline-block`'s real CSS behavior). `id` is the caller's own identifier
+/// (e.g. an arena `NodeId` cast to `u64`), echoed back on the matching
+/// [`PositionedBox`] so the caller can tell which box is which — a
+/// [`InlineContent::Text`] item needs no such echo since this crate does
+/// not yet report a per-run box, only the whole block's own metrics (see
+/// [`Font::shape_inline`]'s own doc for why).
+#[derive(Debug, Clone, Copy)]
+pub enum InlineContent<'a> {
+    Text {
+        text: &'a str,
+        font_size: f32,
+        family: FontFamily,
+    },
+    Box {
+        id: u64,
+        width: f32,
+        height: f32,
+    },
+}
+
+/// Where [`Font::shape_inline`] placed one [`InlineContent::Box`] item,
+/// keyed back to it by `id` — `x`/`y` are relative to the whole inline
+/// block's own top-left origin, the same space [`InlineLayout::width`]/
+/// [`InlineLayout::height`] describe.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PositionedBox {
+    pub id: u64,
+    pub x: f32,
+    pub y: f32,
+}
+
+/// The result of laying out a real inline formatting context — real
+/// multi-style, multi-line text wrapping plus in-flow boxes, via
+/// [Parley's own rich-text and inline-box support](https://docs.rs/parley),
+/// not a hand-rolled line breaker.
+#[derive(Debug, Clone)]
+pub struct InlineLayout {
+    /// The widest line's width.
+    pub width: f32,
+    /// The full height across every line.
+    pub height: f32,
+    /// Offset from the top of the block to the first line's baseline —
+    /// same meaning as [`TextMetrics::baseline`].
+    pub baseline: f32,
+    pub runs: Vec<ShapedRun>,
+    pub boxes: Vec<PositionedBox>,
 }
 
 #[derive(Debug)]
@@ -290,6 +342,146 @@ impl Font {
             runs,
             width: layout.width(),
             height: layout.height(),
+        }
+    }
+
+    /// Lays out a real inline formatting context: `items` in source order,
+    /// each a text run with its own font or an in-flow box with a
+    /// pre-measured size — real multi-style text wrapping mixed with
+    /// atomic boxes, via Parley's own `RangedBuilder::push`/
+    /// `push_inline_box` (checked against Parley 0.11's actual doc example
+    /// for this exact feature, not assumed). `max_width` wraps the same way
+    /// [`Self::measure_wrapped`] does; `None` is a single unconstrained
+    /// line unless a box or line break forces more.
+    ///
+    /// Bounded, not a full inline formatting context: this only reports a
+    /// bounding box back for a [`InlineContent::Box`] item, not for a
+    /// [`InlineContent::Text`] item — a plain `display: inline` element's
+    /// own box (for painting its own background, or hit-testing it
+    /// directly) isn't available from this call, only its text's ink,
+    /// mixed into the block's own `runs`. See `florui_layout`'s own module
+    /// docs for why this bound was chosen and what it costs.
+    pub fn shape_inline(
+        &mut self,
+        items: &[InlineContent<'_>],
+        max_width: Option<f32>,
+    ) -> InlineLayout {
+        let mut text = String::new();
+        for item in items {
+            if let InlineContent::Text { text: run_text, .. } = item {
+                text.push_str(run_text);
+            }
+        }
+        let has_box = items
+            .iter()
+            .any(|item| matches!(item, InlineContent::Box { .. }));
+        if text.is_empty() && !has_box {
+            return InlineLayout {
+                width: 0.0,
+                height: 0.0,
+                baseline: 0.0,
+                runs: Vec::new(),
+                boxes: Vec::new(),
+            };
+        }
+
+        // Resolved before the builder borrows `self` mutably below — only
+        // two possible families exist, so both names are cheap to clone
+        // up front rather than re-borrowing `self` per item.
+        let sans_serif_family_name = self.sans_serif_family_name.clone();
+        let monospace_family_name = self.monospace_family_name.clone();
+        let family_name = |family: FontFamily| match family {
+            FontFamily::SansSerif => &sans_serif_family_name,
+            FontFamily::Monospace => &monospace_family_name,
+        };
+
+        let mut builder = self
+            .layout_cx
+            .ranged_builder(&mut self.font_cx, &text, 1.0, true);
+        // Parley's ranged builder needs a base style to resolve every
+        // range against, even though every byte range with real text below
+        // sets its own font-size/family explicitly — nothing ever actually
+        // renders at this default.
+        builder.push_default(StyleProperty::FontSize(16.0));
+
+        let mut offset = 0usize;
+        for item in items {
+            match item {
+                InlineContent::Text {
+                    text: run_text,
+                    font_size,
+                    family,
+                } => {
+                    let end = offset + run_text.len();
+                    if !run_text.is_empty() {
+                        let family_name = family_name(*family);
+                        builder.push(StyleProperty::FontSize(*font_size), offset..end);
+                        builder.push(
+                            StyleProperty::FontFamily(ParleyFontFamily::named(
+                                family_name.as_str(),
+                            )),
+                            offset..end,
+                        );
+                    }
+                    offset = end;
+                }
+                InlineContent::Box { id, width, height } => {
+                    builder.push_inline_box(InlineBox {
+                        id: *id,
+                        kind: InlineBoxKind::InFlow,
+                        index: offset,
+                        width: *width,
+                        height: *height,
+                    });
+                }
+            }
+        }
+
+        let mut layout: parley::Layout<[u8; 4]> = builder.build(&text);
+        layout.break_all_lines(max_width);
+
+        let mut runs = Vec::new();
+        let mut boxes = Vec::new();
+        for line in layout.lines() {
+            for item in line.items() {
+                match item {
+                    PositionedLayoutItem::GlyphRun(glyph_run) => {
+                        let run = glyph_run.run();
+                        let glyphs = glyph_run
+                            .positioned_glyphs()
+                            .map(|glyph| ShapedGlyph {
+                                id: glyph.id,
+                                x: glyph.x,
+                                y: glyph.y,
+                            })
+                            .collect();
+                        runs.push(ShapedRun {
+                            font: run.font().clone(),
+                            font_size: run.font_size(),
+                            glyphs,
+                        });
+                    }
+                    PositionedLayoutItem::InlineBox(positioned) => {
+                        boxes.push(PositionedBox {
+                            id: positioned.id,
+                            x: positioned.x,
+                            y: positioned.y,
+                        });
+                    }
+                }
+            }
+        }
+
+        InlineLayout {
+            width: layout.width(),
+            height: layout.height(),
+            baseline: layout
+                .lines()
+                .next()
+                .map(|line| line.metrics().baseline)
+                .unwrap_or(0.0),
+            runs,
+            boxes,
         }
     }
 
@@ -673,5 +865,192 @@ mod tests {
             "sanity check: this must actually have wrapped onto more than one line"
         );
         assert_eq!(unwrapped.baseline, wrapped.baseline);
+    }
+
+    #[test]
+    fn shape_inline_of_pure_text_matches_plain_shape() {
+        // A single text item with no boxes must behave exactly like the
+        // plain (non-rich) shaping path — proves the rich-text builder
+        // isn't secretly changing ordinary single-style shaping.
+        let mut font = Font::load_embedded();
+        let plain = font.shape(FontFamily::SansSerif, "Hi", 16.0);
+        let inline = font.shape_inline(
+            &[InlineContent::Text {
+                text: "Hi",
+                font_size: 16.0,
+                family: FontFamily::SansSerif,
+            }],
+            None,
+        );
+        assert_eq!(inline.runs.len(), plain.runs.len());
+        assert_eq!(inline.runs[0].glyphs.len(), plain.runs[0].glyphs.len());
+        assert_eq!(inline.width, plain.width);
+        assert_eq!(inline.height, plain.height);
+    }
+
+    #[test]
+    fn shape_inline_wraps_a_text_run_around_a_box_that_does_not_fit_on_the_same_line() {
+        let mut font = Font::load_embedded();
+        let word = font.measure(FontFamily::SansSerif, "Hello", 16.0);
+
+        // A box wide enough that "Hello" plus the box can't share a line at
+        // this width — must push the box (and nothing else, one item) onto
+        // its own line, growing the total height past one line.
+        let unconstrained = font.shape_inline(
+            &[
+                InlineContent::Text {
+                    text: "Hello ",
+                    font_size: 16.0,
+                    family: FontFamily::SansSerif,
+                },
+                InlineContent::Box {
+                    id: 1,
+                    width: word.width,
+                    height: 30.0,
+                },
+            ],
+            None,
+        );
+        let wrapped = font.shape_inline(
+            &[
+                InlineContent::Text {
+                    text: "Hello ",
+                    font_size: 16.0,
+                    family: FontFamily::SansSerif,
+                },
+                InlineContent::Box {
+                    id: 1,
+                    width: word.width,
+                    height: 30.0,
+                },
+            ],
+            Some(word.width + 1.0),
+        );
+
+        assert!(
+            wrapped.height > unconstrained.height,
+            "the box must have wrapped onto its own line: unconstrained height {}, \
+             wrapped height {}",
+            unconstrained.height,
+            wrapped.height
+        );
+        assert_eq!(wrapped.boxes.len(), 1);
+    }
+
+    #[test]
+    fn shape_inline_reports_a_box_position_relative_to_the_block_origin() {
+        let mut font = Font::load_embedded();
+        let inline = font.shape_inline(
+            &[
+                InlineContent::Text {
+                    text: "Hi ",
+                    font_size: 16.0,
+                    family: FontFamily::SansSerif,
+                },
+                InlineContent::Box {
+                    id: 42,
+                    width: 30.0,
+                    height: 20.0,
+                },
+            ],
+            None,
+        );
+
+        assert_eq!(inline.boxes.len(), 1);
+        let positioned = &inline.boxes[0];
+        assert_eq!(positioned.id, 42, "the caller's own id is echoed back");
+        assert!(
+            positioned.x > 0.0,
+            "the box must sit after \"Hi \", not at the origin"
+        );
+    }
+
+    #[test]
+    fn shape_inline_multiple_boxes_keep_their_own_distinct_ids() {
+        let mut font = Font::load_embedded();
+        let inline = font.shape_inline(
+            &[
+                InlineContent::Box {
+                    id: 1,
+                    width: 10.0,
+                    height: 10.0,
+                },
+                InlineContent::Box {
+                    id: 2,
+                    width: 10.0,
+                    height: 10.0,
+                },
+            ],
+            None,
+        );
+
+        assert_eq!(inline.boxes.len(), 2);
+        let ids: Vec<u64> = inline.boxes.iter().map(|b| b.id).collect();
+        assert!(ids.contains(&1));
+        assert!(ids.contains(&2));
+        assert_ne!(
+            inline.boxes[0].x, inline.boxes[1].x,
+            "two adjacent boxes must not land at the same x"
+        );
+    }
+
+    #[test]
+    fn shape_inline_line_height_is_driven_by_the_tallest_run_on_the_line() {
+        let mut font = Font::load_embedded();
+        let small_only = font.shape_inline(
+            &[InlineContent::Text {
+                text: "Hg",
+                font_size: 16.0,
+                family: FontFamily::SansSerif,
+            }],
+            None,
+        );
+        let mixed = font.shape_inline(
+            &[
+                InlineContent::Text {
+                    text: "Hg ",
+                    font_size: 16.0,
+                    family: FontFamily::SansSerif,
+                },
+                InlineContent::Text {
+                    text: "Hg",
+                    font_size: 48.0,
+                    family: FontFamily::SansSerif,
+                },
+            ],
+            None,
+        );
+        assert!(
+            mixed.height > small_only.height,
+            "a line with a much larger run mixed in must be at least as tall as that \
+             run, taller than the small-only line"
+        );
+    }
+
+    #[test]
+    fn shape_inline_with_no_items_measures_to_zero() {
+        let mut font = Font::load_embedded();
+        let inline = font.shape_inline(&[], None);
+        assert_eq!(inline.width, 0.0);
+        assert_eq!(inline.height, 0.0);
+        assert_eq!(inline.baseline, 0.0);
+        assert!(inline.boxes.is_empty());
+        assert!(inline.runs.is_empty());
+    }
+
+    #[test]
+    fn shape_inline_with_only_a_box_and_no_text_still_positions_it() {
+        let mut font = Font::load_embedded();
+        let inline = font.shape_inline(
+            &[InlineContent::Box {
+                id: 7,
+                width: 40.0,
+                height: 25.0,
+            }],
+            None,
+        );
+        assert_eq!(inline.boxes.len(), 1);
+        assert_eq!(inline.boxes[0].id, 7);
+        assert!(inline.width >= 40.0);
     }
 }
