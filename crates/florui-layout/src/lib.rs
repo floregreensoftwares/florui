@@ -4,12 +4,12 @@
 //!
 //! # Scope
 //!
-//! Block-level stacking only: every node is laid out with
-//! `Display::Block`, explicitly, since Taffy's own default (with its
-//! default feature set) is `Display::Flex` and silently relying on that
-//! would not match this crate's declared scope. Flexbox/Grid need more
-//! properties in `florui-style` (`display`, `flex-*`, `grid-*`) before
-//! there is anything real to translate for them.
+//! Block and flex layout — a node's own `display` selects which algorithm
+//! lays out *its children*; a node's own box within its *parent* additionally
+//! depends on `flex-grow`/`flex-shrink`/`flex-basis`/`align-self` when that
+//! parent is a flex container, regardless of the node's own `display`. Grid
+//! is not implemented yet, even though Taffy itself already supports it —
+//! `florui-style` has no `grid-*` properties to translate from.
 //!
 //! `width`/`height` are content-box, explicitly, since that is real CSS's
 //! actual default (before any reset stylesheet opts into border-box) —
@@ -34,8 +34,8 @@ use florui_style::{
     Arena, ComputedStyle, ContentAlignment, Display as StyleDisplay,
     FlexDirection as StyleFlexDirection, FlexWrap as StyleFlexWrap, ItemAlignment, NodeId,
 };
-use taffy::compute_leaf_layout;
 use taffy::prelude::*;
+use taffy::{Baselines, compute_leaf_layout};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BoxLayout {
@@ -118,14 +118,36 @@ pub fn compute_layout(
         synthetic_root,
         available,
         |inputs, _node_id, context, style| {
-            compute_leaf_layout(
+            // `compute_leaf_layout`'s own measure closure only ever
+            // returns a `Size` — extract what the baseline needs from
+            // `context` first (cheap: a string clone plus two copy
+            // fields), since the closure below moves `context` into
+            // `measure` and it isn't available again after.
+            let baseline_source = context
+                .as_ref()
+                .map(|c| (c.text.clone(), c.font_size, c.font_family));
+
+            let mut output = compute_leaf_layout(
                 inputs,
                 style,
                 |_, _| 0.0,
                 |known_dimensions, available_space| {
                     measure(&mut font, context, known_dimensions, available_space)
                 },
-            )
+            );
+
+            // Set regardless of `run_mode`: `compute_leaf_layout` skips
+            // calling its own measure closure when both dimensions are
+            // already known (an explicit width *and* height), but a
+            // baseline is still meaningful there — real CSS still aligns
+            // an explicitly-sized text box by its text's baseline, not by
+            // treating it as baseline-less. Wrap width is irrelevant here:
+            // see `florui_text::TextMetrics::baseline`'s own doc for why.
+            if let Some((text, font_size, font_family)) = baseline_source {
+                let baseline = font.measure(font_family, &text, font_size).baseline;
+                output.baselines = Baselines::from_first(Some(baseline));
+            }
+            output
         },
     )
     .map_err(LayoutError)?;
@@ -958,6 +980,48 @@ mod tests {
             (layouts[&node].width - monospace.width).abs() > 1.0,
             "must actually be measuring with the proportional sans-serif default, \
              not coincidentally matching the monospace width"
+        );
+    }
+
+    #[test]
+    fn align_items_baseline_lines_up_differently_sized_text_by_their_shared_baseline() {
+        let tree: Element = view! {
+            <div class="row">
+                <span class="small">{"Hg"}</span>
+                <span class="big">{"Hg"}</span>
+            </div>
+        };
+        let (arena, layouts) = layout_for(
+            &tree,
+            "
+            .row { display: flex; align-items: baseline; height: 100px; }
+            .small { font-size: 16px; }
+            .big { font-size: 40px; }
+            ",
+        );
+        let row = arena.roots()[0];
+        let small = arena.children(row)[0];
+        let big = arena.children(row)[1];
+
+        let mut font = florui_text::Font::load_embedded();
+        let small_metrics = font.measure(florui_text::FontFamily::SansSerif, "Hg", 16.0);
+        let big_metrics = font.measure(florui_text::FontFamily::SansSerif, "Hg", 40.0);
+
+        // Real baseline alignment: each item's own (y + its baseline offset)
+        // must land on the same line — not the same `y`, and not simply
+        // top- or center-aligned, both of which would put these at
+        // different combined baselines since the two font sizes have
+        // different ascents.
+        assert_close(
+            layouts[&small].y + small_metrics.baseline,
+            layouts[&big].y + big_metrics.baseline,
+        );
+        assert!(
+            layouts[&small].y > layouts[&big].y,
+            "the smaller text's shorter ascent means it starts lower, not at the same y \
+             (small starts at {}, big at {})",
+            layouts[&small].y,
+            layouts[&big].y
         );
     }
 }
