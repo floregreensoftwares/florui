@@ -1,8 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command as ChildCommand, ExitCode, ExitStatus};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 
 use florui_conformance::driver::{ChromiumDriver, ChromiumOptions};
@@ -26,10 +28,22 @@ struct Cli {
 enum Command {
     /// Generate a minimal compiling application.
     New { name: String },
-    /// Launch the native preview host and watch a CSS fixture for changes.
+    /// Launch the native preview host and watch a CSS fixture for changes,
+    /// or, with `--example`, build and run a real cargo example instead,
+    /// restarting it whenever its Rust source changes. CSS reload for a
+    /// running example is that example's own concern (see
+    /// `florui_platform::run_with_css_reload`) — this only watches `.rs`
+    /// files and only ever loses state on a restart, which it always
+    /// reports explicitly, unlike a CSS-only reload.
     Dev {
         #[arg(long, default_value = "fixtures/dev/app.css")]
         fixture: PathBuf,
+        /// Build and run this cargo example from the current directory's
+        /// package instead of the CSS-only fixture preview above. Must be
+        /// run from that package's own directory (the one containing its
+        /// `Cargo.toml`).
+        #[arg(long)]
+        example: Option<String>,
     },
     /// Run the Cargo test suite plus the visual/geometry reference fixtures.
     Test,
@@ -60,7 +74,10 @@ enum Command {
 
 fn main() -> ExitCode {
     match Cli::parse().command {
-        Command::Dev { fixture } => run_dev(fixture),
+        Command::Dev { fixture, example } => match example {
+            Some(example) => run_dev_example(example),
+            None => run_dev(fixture),
+        },
         Command::New { name } => not_implemented(&format!("`florui new {name}`")),
         Command::Test => run_test(),
         Command::Compare {
@@ -84,6 +101,252 @@ fn run_dev(fixture: PathBuf) -> ExitCode {
         Err(err) => {
             eprintln!("{err}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// `target/<debug>/examples/<example><EXE_SUFFIX>` under `target_dir` —
+/// cargo's own, undocumented-but-stable convention for where `cargo build
+/// --example <name>` places its binary.
+fn example_exe_path(target_dir: &Path, example: &str) -> PathBuf {
+    target_dir
+        .join("debug")
+        .join("examples")
+        .join(format!("{example}{}", std::env::consts::EXE_SUFFIX))
+}
+
+/// Asks cargo itself where it places build output, rather than assuming
+/// `./target` — a workspace member's own directory has no `target/` of its
+/// own at all; every member shares one at the *workspace* root, which only
+/// `cargo metadata` (or `CARGO_TARGET_DIR`, which it already accounts for)
+/// actually knows the location of.
+fn cargo_target_dir() -> Result<PathBuf, String> {
+    let output = ChildCommand::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .output()
+        .map_err(|err| format!("could not run cargo metadata: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cargo metadata exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|err| format!("could not parse cargo metadata output: {err}"))?;
+    metadata
+        .get("target_directory")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| "cargo metadata output had no target_directory field".to_owned())
+}
+
+/// Runs `cargo build --example <example>`, inheriting stdio so cargo's own
+/// compiler diagnostics reach the terminal directly rather than being
+/// re-parsed and re-rendered here.
+fn cargo_build_example(example: &str) -> std::io::Result<ExitStatus> {
+    ChildCommand::new("cargo")
+        .args(["build", "--example", example])
+        .status()
+}
+
+/// Watches `package_root`'s `src` and `examples` directories (whichever
+/// exist) for `.rs` file changes, sending on `tx` for each — never the
+/// whole package root, since that would also see `cargo build`'s own
+/// writes under `target/` and rebuild forever in response to its own
+/// output. Returns every watcher created; a caller must keep them alive
+/// for as long as it wants to keep watching.
+fn watch_rust_sources(
+    package_root: &Path,
+    tx: mpsc::Sender<()>,
+) -> notify::Result<Vec<RecommendedWatcher>> {
+    let mut watchers = Vec::new();
+    for subdir in ["src", "examples"] {
+        let dir = package_root.join(subdir);
+        if !dir.is_dir() {
+            continue;
+        }
+        let tx = tx.clone();
+        let mut watcher =
+            notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+                let Ok(event) = result else { return };
+                let touches_rust = event
+                    .paths
+                    .iter()
+                    .any(|p| p.extension().is_some_and(|ext| ext == "rs"));
+                if touches_rust {
+                    // The loop may already have stopped reading; nothing to
+                    // do if so.
+                    let _ = tx.send(());
+                }
+            })?;
+        watcher.watch(&dir, RecursiveMode::Recursive)?;
+        watchers.push(watcher);
+    }
+    Ok(watchers)
+}
+
+fn exit_code_from_status(status: ExitStatus) -> ExitCode {
+    if status.success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// Builds and runs `example` from the current directory's package,
+/// restarting it — with an explicit report that its in-memory state was
+/// just reset, since a fresh process has none of the old one's — whenever
+/// a `.rs` file under its `src`/`examples` changes. A build that fails
+/// leaves whichever version last built successfully running untouched, the
+/// same "stale but working, plus an actionable diagnostic" recovery
+/// contract the CSS-fixture preview already established; cargo's own
+/// compiler output is that diagnostic here, printed directly rather than
+/// re-parsed.
+///
+/// Exits once the running example's own window closes on its own (not as
+/// a result of a restart this loop performed), returning its exit code.
+fn run_dev_example(example: String) -> ExitCode {
+    let package_root = match std::env::current_dir() {
+        Ok(dir) => dir,
+        Err(err) => return fail(format!("could not read the current directory: {err}")),
+    };
+    let target_dir = match cargo_target_dir() {
+        Ok(dir) => dir,
+        Err(err) => return fail(err),
+    };
+    let exe_path = example_exe_path(&target_dir, &example);
+
+    println!(
+        "{}",
+        dim_text(&format!("building example \"{example}\"..."))
+    );
+    match cargo_build_example(&example) {
+        Ok(status) if status.success() => {}
+        Ok(status) => return fail(format!("cargo build exited with {status}")),
+        Err(err) => return fail(format!("could not run cargo build: {err}")),
+    }
+
+    // `None` means "no window is currently running" — true after a rebuild
+    // whose linker step failed (the old process was already killed to free
+    // the .exe for that attempt), not just before the very first spawn.
+    // The timeout arm below must only treat a dead child as "the user
+    // closed it" when this is `Some`; otherwise it would mistake "still
+    // waiting for the developer to fix a build error" for the window
+    // having closed on its own and exit the whole loop.
+    let mut child = match ChildCommand::new(&exe_path).spawn() {
+        Ok(child) => Some(child),
+        Err(err) => {
+            return fail(format!(
+                "could not run built example at {}: {err}",
+                exe_path.display()
+            ));
+        }
+    };
+    println!("{}", success(&format!("✔ running \"{example}\"")));
+
+    let (tx, rx) = mpsc::channel();
+    let _watchers = match watch_rust_sources(&package_root, tx) {
+        Ok(watchers) => watchers,
+        Err(err) => return fail(format!("could not watch Rust sources: {err}")),
+    };
+
+    loop {
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(()) => {
+                // A single save can fire several filesystem events (and an
+                // editor writing multiple files at once fires more); drain
+                // whatever else arrives in a short window so one save
+                // triggers exactly one rebuild, not a burst of them.
+                let debounce_until = std::time::Instant::now() + Duration::from_millis(150);
+                while let Some(remaining) = debounce_until
+                    .checked_duration_since(std::time::Instant::now())
+                    .filter(|remaining| !remaining.is_zero())
+                {
+                    if rx.recv_timeout(remaining).is_err() {
+                        break;
+                    }
+                }
+
+                // The running .exe is locked on Windows — linking a new one
+                // over it fails outright while the old process still holds
+                // it open, so the old process must die *before* the build
+                // is even attempted, not after it succeeds. That also means
+                // a failed rebuild here cannot leave a stale-but-working
+                // window the way a CSS-only reload failure can: there is
+                // no window at all until the next successful build. `child`
+                // stays `None` for the rest of this iteration until (and
+                // unless) a rebuild actually succeeds below.
+                if let Some(mut old) = child.take() {
+                    let _ = old.kill();
+                    let _ = old.wait();
+                }
+                println!(
+                    "{}",
+                    dim_text(&format!(
+                        "Rust source changed — rebuilding \"{example}\" (window closed; \
+                         in-memory UI state was reset)..."
+                    ))
+                );
+                match cargo_build_example(&example) {
+                    Ok(status) if status.success() => match ChildCommand::new(&exe_path).spawn() {
+                        Ok(new_child) => {
+                            child = Some(new_child);
+                            println!(
+                                "{}",
+                                success(&format!("✔ rebuilt and restarted \"{example}\""))
+                            );
+                        }
+                        Err(err) => {
+                            return fail(format!(
+                                "rebuild succeeded but could not restart {}: {err}",
+                                exe_path.display()
+                            ));
+                        }
+                    },
+                    Ok(status) => {
+                        println!(
+                            "{}",
+                            failure(&format!("✘ build failed (cargo exited with {status})"))
+                        );
+                        println!(
+                            "{}",
+                            dim_text(
+                                "no window is open — fix the error above and save again to retry"
+                            )
+                        );
+                    }
+                    Err(err) => {
+                        println!(
+                            "{}",
+                            failure(&format!("✘ could not run cargo build: {err}"))
+                        );
+                        println!(
+                            "{}",
+                            dim_text(
+                                "no window is open — fix the error above and save again to retry"
+                            )
+                        );
+                    }
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if let Some(current) = &mut child
+                    && let Ok(Some(status)) = current.try_wait()
+                {
+                    return exit_code_from_status(status);
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                eprintln!(
+                    "{}",
+                    failure("the source watcher stopped unexpectedly; exiting")
+                );
+                if let Some(mut current) = child.take() {
+                    let _ = current.kill();
+                }
+                return ExitCode::FAILURE;
+            }
         }
     }
 }
@@ -507,4 +770,61 @@ fn run_build(target: String) -> ExitCode {
 fn not_implemented(command: &str) -> ExitCode {
     eprintln!("{command} is not implemented yet.");
     ExitCode::FAILURE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn example_exe_path_joins_target_debug_examples_and_the_platform_exe_suffix() {
+        let path = example_exe_path(Path::new("target"), "counter");
+        assert_eq!(
+            path,
+            Path::new("target")
+                .join("debug")
+                .join("examples")
+                .join(format!("counter{}", std::env::consts::EXE_SUFFIX))
+        );
+    }
+
+    #[test]
+    fn example_exe_path_respects_a_non_default_target_dir() {
+        let path = example_exe_path(Path::new("/custom/target"), "counter");
+        assert_eq!(
+            path,
+            Path::new("/custom/target")
+                .join("debug")
+                .join("examples")
+                .join(format!("counter{}", std::env::consts::EXE_SUFFIX))
+        );
+    }
+
+    #[test]
+    fn exit_code_from_status_maps_a_successful_child_to_success() {
+        // A trivial command that always succeeds, portable across the
+        // platforms `std::process` supports.
+        let status = ChildCommand::new(if cfg!(windows) { "cmd" } else { "true" })
+            .args(if cfg!(windows) {
+                &["/C", "exit 0"][..]
+            } else {
+                &[][..]
+            })
+            .status()
+            .expect("a trivial command should always be spawnable");
+        assert_eq!(exit_code_from_status(status), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn exit_code_from_status_maps_a_failing_child_to_failure() {
+        let status = ChildCommand::new(if cfg!(windows) { "cmd" } else { "false" })
+            .args(if cfg!(windows) {
+                &["/C", "exit 1"][..]
+            } else {
+                &[][..]
+            })
+            .status()
+            .expect("a trivial command should always be spawnable");
+        assert_eq!(exit_code_from_status(status), ExitCode::FAILURE);
+    }
 }
