@@ -236,6 +236,7 @@ impl App {
                 bottom: Some(0.0),
                 left: Some(0.0),
             },
+            size_cause: None,
         };
         InspectorModel {
             nodes: vec![node],

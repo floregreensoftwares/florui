@@ -46,6 +46,13 @@ pub struct InspectorNode {
     /// Declared `margin-*`, not a resolved box: `BoxLayout` doesn't carry
     /// resolved auto-margins yet.
     pub margin: Edges<Option<f32>>,
+    /// A human-readable explanation of why this node's size doesn't match
+    /// what plain flex math alone would produce, if one was found — see
+    /// `florui_layout::SizeCause`. `None` either means nothing constrained
+    /// it, or (for nodes outside `florui_layout::compute_size_causes`'s
+    /// current bound) that no cause was computed at all; the inspector
+    /// does not distinguish the two rather than guess which applies.
+    pub size_cause: Option<String>,
 }
 
 /// Everything the inspector needs to render one frame. Rebuilt by the
@@ -293,6 +300,12 @@ fn draw_ui(ui: &mut egui::Ui, model: &InspectorModel) -> Option<InspectorAction>
                     format_margin(node.margin.bottom),
                     format_margin(node.margin.left),
                 ));
+
+                if let Some(cause) = &node.size_cause {
+                    ui.separator();
+                    ui.heading("Why this size");
+                    ui.label(cause);
+                }
             }
         }
     });
