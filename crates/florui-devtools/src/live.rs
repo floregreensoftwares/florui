@@ -12,7 +12,7 @@ use std::num::NonZeroU32;
 use std::rc::Rc;
 
 use florui::Element;
-use florui_layout::{BoxLayout, absolute_position};
+use florui_layout::{BoxLayout, SizeCause, absolute_position, compute_size_causes};
 use florui_platform::UiRuntime;
 use florui_style::{Arena, ComputedStyle, Display, Edges, NodeId, Rgba, StyleError};
 use taffy::prelude::*;
@@ -115,9 +115,12 @@ fn build_inspector_model(
     selected: Option<NodeId>,
     picking: bool,
 ) -> InspectorModel {
+    // Diagnostic-only, opted into here rather than in the hot preview
+    // paint path — see `compute_size_causes`'s own doc.
+    let causes = compute_size_causes(arena, styles, layouts);
     let mut nodes = Vec::new();
     for &root in arena.roots() {
-        push_node(arena, styles, layouts, root, 0, &mut nodes);
+        push_node(arena, styles, layouts, &causes, root, 0, &mut nodes);
     }
     InspectorModel {
         nodes,
@@ -127,10 +130,20 @@ fn build_inspector_model(
     }
 }
 
+fn format_size_cause(cause: &SizeCause) -> String {
+    match cause {
+        SizeCause::MinContentClamped { intrinsic_width } => format!(
+            "width held to this element's own content — flex-shrink wanted it narrower than \
+             its natural {intrinsic_width:.0}px"
+        ),
+    }
+}
+
 fn push_node(
     arena: &Arena,
     styles: &HashMap<NodeId, ComputedStyle>,
     layouts: &HashMap<NodeId, BoxLayout>,
+    causes: &HashMap<NodeId, SizeCause>,
     id: NodeId,
     depth: usize,
     out: &mut Vec<InspectorNode>,
@@ -164,10 +177,11 @@ fn push_node(
         padding: style.padding,
         border,
         margin: style.margin,
+        size_cause: causes.get(&id).map(format_size_cause),
     });
 
     for &child in arena.children(id) {
-        push_node(arena, styles, layouts, child, depth + 1, out);
+        push_node(arena, styles, layouts, causes, child, depth + 1, out);
     }
 }
 
