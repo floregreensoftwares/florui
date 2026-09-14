@@ -13,6 +13,8 @@ florui = { path = "../florui" }
 florui-style = { path = "../florui-style" }
 florui-layout = { path = "../florui-layout" }
 florui-paint = { path = "../florui-paint" }
+florui-platform = { path = "../florui-platform" }
+taffy = "0.14"
 winit = "0.30.13"
 softbuffer = "0.4.8"
 notify = "8.2.0"
@@ -22,6 +24,3 @@ egui = "0.35.0"
 egui-winit = "0.35.0"
 egui-wgpu = { version = "0.35.0", features = ["winit"] }
 pollster = "1.0.1"
-
-[dev-dependencies]
-taffy = "0.14"
