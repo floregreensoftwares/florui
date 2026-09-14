@@ -6,12 +6,20 @@
 //! parse successfully; they simply have no visible effect until
 //! `florui-layout`/`florui-paint` grow support for them.
 
+use std::sync::LazyLock;
+
 use style::media_queries::MediaList;
 use style::servo_arc::Arc as StyloArc;
 use style::stylesheets::{AllowImportRules, Origin, Stylesheet};
 
 use crate::error::StyleError;
 use crate::stylo::shared_lock;
+
+/// Stylo gates `display: grid`/`inline-grid` and the `grid-*` longhands
+/// behind a runtime pref, off by default in the `servo` build this crate
+/// uses — forced on once, process-wide, before any CSS is parsed.
+static GRID_ENABLED: LazyLock<()> =
+    LazyLock::new(|| stylo_config::set_bool("layout.grid.enabled", true));
 
 /// One parsed stylesheet. Opaque: `florui-style` is the only crate that
 /// reads what's inside — everything else only holds, clones, and passes
@@ -35,6 +43,7 @@ pub fn parse_stylesheet(css: &str) -> Result<Vec<Rule>, StyleError> {
 }
 
 pub(crate) fn parse_stylesheet_with_origin(css: &str, origin: Origin) -> Result<Rule, StyleError> {
+    LazyLock::force(&GRID_ENABLED);
     let lock = shared_lock();
     let url = url::Url::parse("about:florui").expect("a fixed, valid URL literal");
     let sheet = Stylesheet::from_str(

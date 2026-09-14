@@ -42,15 +42,14 @@ pub enum FontFamily {
 
 /// How this node participates in its parent's formatting context
 /// (`Block`/`Inline`/`InlineBlock`, real CSS's `display-outside` plus
-/// `inline-block`'s special case), *and*, for `Block`/`Flex`, which
+/// `inline-block`'s special case), *and*, for `Block`/`Flex`/`Grid`, which
 /// algorithm lays out its own children (real CSS's `display-inside`) —
 /// this crate conflates the two into one field rather than splitting them
 /// the way real CSS's two-value `display` syntax does, since nothing here
-/// yet needs an `outside`/`inside` combination beyond the four this enum
+/// yet needs an `outside`/`inside` combination beyond the five this enum
 /// already names. `Inline`'s own children (if it somehow has element
 /// children, not just text) and `InlineBlock`'s own children both use the
-/// same `Block` algorithm real CSS itself uses for both — grid is planned
-/// as its own later addition alongside `Flex`.
+/// same `Block` algorithm real CSS itself uses for both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Display {
     #[default]
@@ -67,6 +66,33 @@ pub enum Display {
     /// but as a single opaque box sized from its own content (like a block
     /// box would be), not fragmented across lines.
     InlineBlock,
+    Grid,
+}
+
+/// One track's sizing function, from `grid-template-columns`/`-rows` —
+/// bounded to what a single (non-`repeat()`) track can be: `repeat()`,
+/// named lines, `grid-template-areas`, and `fit-content()`/`minmax()`
+/// beyond their max side aren't resolved here yet (real CSS still cascades
+/// and parses them through Stylo; this crate just doesn't read them back).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GridTrackSize {
+    Length(f32),
+    Fr(f32),
+    Auto,
+    MinContent,
+    MaxContent,
+}
+
+/// One line of a `grid-column`/`grid-row` placement — `grid-*-start`/`-end`
+/// each resolve to one of these. Named lines aren't resolved (a `<custom-
+/// ident>` falls back to [`Self::Auto`], the same as an unrecognized name
+/// would in real CSS once no line actually carries that name).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GridPlacement {
+    #[default]
+    Auto,
+    Line(i16),
+    Span(u16),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -134,7 +160,7 @@ pub struct BorderSide {
     pub color: Rgba,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ComputedStyle {
     pub background_color: Rgba,
     pub color: Rgba,
@@ -202,6 +228,15 @@ pub struct ComputedStyle {
     /// `border-*-width`/`-style`/`-color` per side — see [`BorderSide`]'s
     /// own doc for the solid-only scope and the `none`/`hidden` collapse.
     pub border: Edges<BorderSide>,
+    /// `grid-template-columns`. Meaningless when [`Self::display`] isn't
+    /// [`Display::Grid`]. See [`GridTrackSize`]'s own doc for the bound.
+    pub grid_template_columns: Vec<GridTrackSize>,
+    /// `grid-template-rows`, the same on the other axis.
+    pub grid_template_rows: Vec<GridTrackSize>,
+    /// `grid-column-start`/`grid-column-end`.
+    pub grid_column: (GridPlacement, GridPlacement),
+    /// `grid-row-start`/`grid-row-end`.
+    pub grid_row: (GridPlacement, GridPlacement),
 }
 
 /// Resolves every node in `arena` against `rules` and `state` — real
@@ -375,7 +410,7 @@ mod tests {
             &InteractionState::new(),
         );
         let node = arena.roots()[0];
-        let style = computed[&node];
+        let style = &computed[&node];
         assert_eq!(style.width, Some(200.0));
         assert_eq!(style.height, Some(100.0));
         assert_eq!(style.padding.top, 8.0);
@@ -782,5 +817,94 @@ mod tests {
         assert_eq!(border.right.width, 0.0);
         assert_eq!(border.bottom.width, 0.0);
         assert_eq!(border.left.width, 0.0);
+    }
+
+    #[test]
+    fn display_grid_resolves_from_real_css() {
+        let tree: Element = view! { <div class="g" /> };
+        let (arena, computed) = styles(&tree, ".g { display: grid; }", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].display, Display::Grid);
+    }
+
+    #[test]
+    fn grid_template_columns_resolves_lengths_and_fr_units() {
+        let tree: Element = view! { <div class="g" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".g { display: grid; grid-template-columns: 100px 1fr 2fr; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(
+            computed[&node].grid_template_columns,
+            vec![
+                GridTrackSize::Length(100.0),
+                GridTrackSize::Fr(1.0),
+                GridTrackSize::Fr(2.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn grid_template_rows_resolves_auto_and_keyword_tracks() {
+        let tree: Element = view! { <div class="g" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".g { display: grid; grid-template-rows: auto min-content max-content; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(
+            computed[&node].grid_template_rows,
+            vec![
+                GridTrackSize::Auto,
+                GridTrackSize::MinContent,
+                GridTrackSize::MaxContent,
+            ]
+        );
+    }
+
+    #[test]
+    fn grid_template_tracks_default_to_empty_with_zero_author_css() {
+        let tree: Element = view! { <div class="g" /> };
+        let (arena, computed) = styles(&tree, ".g { display: grid; }", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert!(computed[&node].grid_template_columns.is_empty());
+        assert!(computed[&node].grid_template_rows.is_empty());
+    }
+
+    #[test]
+    fn grid_column_and_row_resolve_line_and_span_placement() {
+        let tree: Element = view! { <div class="item" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".item { grid-column: 2 / 4; grid-row: 1 / span 2; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(
+            computed[&node].grid_column,
+            (GridPlacement::Line(2), GridPlacement::Line(4))
+        );
+        assert_eq!(
+            computed[&node].grid_row,
+            (GridPlacement::Line(1), GridPlacement::Span(2))
+        );
+    }
+
+    #[test]
+    fn grid_column_and_row_default_to_auto() {
+        let tree: Element = view! { <div /> };
+        let (arena, computed) = styles(&tree, "", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert_eq!(
+            computed[&node].grid_column,
+            (GridPlacement::Auto, GridPlacement::Auto)
+        );
+        assert_eq!(
+            computed[&node].grid_row,
+            (GridPlacement::Auto, GridPlacement::Auto)
+        );
     }
 }
