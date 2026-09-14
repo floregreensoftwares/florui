@@ -46,7 +46,7 @@ pub use color::{ColorParseError, Rgba, parse_hex_color};
 pub use error::StyleError;
 pub use interaction::InteractionState;
 pub use stylesheet_parse::{Rule, parse_stylesheet};
-pub use tree::{Arena, NodeId};
+pub use tree::{Arena, InlineItem, NodeId};
 
 #[cfg(test)]
 mod integration_tests {
