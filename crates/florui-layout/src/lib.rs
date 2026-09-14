@@ -85,6 +85,7 @@ impl std::error::Error for LayoutError {
 struct TextContext {
     text: String,
     font_size: f32,
+    font_weight: f32,
     font_family: florui_text::FontFamily,
 }
 
@@ -104,6 +105,7 @@ enum InlineContentItem {
     Text {
         text: String,
         font_size: f32,
+        font_weight: f32,
         font_family: florui_text::FontFamily,
     },
     /// A real `display: inline-block` child, flowing as one atomic box —
@@ -120,10 +122,12 @@ fn to_inline_content(item: &InlineContentItem) -> florui_text::InlineContent<'_>
         InlineContentItem::Text {
             text,
             font_size,
+            font_weight,
             font_family,
         } => florui_text::InlineContent::Text {
             text,
             font_size: *font_size,
+            font_weight: *font_weight,
             family: *font_family,
         },
         InlineContentItem::Box {
@@ -154,7 +158,7 @@ enum LeafContext {
 /// [`LeafContext`] before it's moved into the inner measure closure, same
 /// pattern the plain-text case already used before this slice.
 enum BaselineSource {
-    Text(String, f32, florui_text::FontFamily),
+    Text(String, f32, f32, florui_text::FontFamily),
     Inline(Vec<InlineContentItem>),
 }
 
@@ -225,6 +229,7 @@ fn measure_inline_block_intrinsic_size(
     let style = styles.get(&child);
     let text = arena.text_content(child);
     let font_size = style.map_or(16.0, |s| s.font_size);
+    let font_weight = style.map_or(400.0, |s| s.font_weight);
     let font_family = style.map_or(florui_text::FontFamily::SansSerif, |s| {
         to_text_font_family(s.font_family)
     });
@@ -235,7 +240,7 @@ fn measure_inline_block_intrinsic_size(
             baseline: 0.0,
         }
     } else {
-        font.measure(font_family, text, font_size)
+        font.measure(font_family, text, font_size, font_weight)
     };
     let width = style.and_then(|s| s.width).unwrap_or(measured.width);
     let height = style.and_then(|s| s.height).unwrap_or(measured.height);
@@ -255,6 +260,7 @@ fn build_inline_content_items(
 ) -> Vec<InlineContentItem> {
     let container_style = styles.get(&node);
     let container_font_size = container_style.map_or(16.0, |s| s.font_size);
+    let container_font_weight = container_style.map_or(400.0, |s| s.font_weight);
     let container_font_family = container_style.map_or(florui_text::FontFamily::SansSerif, |s| {
         to_text_font_family(s.font_family)
     });
@@ -266,6 +272,7 @@ fn build_inline_content_items(
             StyleInlineItem::Text(text) => Some(InlineContentItem::Text {
                 text: text.clone(),
                 font_size: container_font_size,
+                font_weight: container_font_weight,
                 font_family: container_font_family,
             }),
             StyleInlineItem::Element(child) => {
@@ -284,12 +291,15 @@ fn build_inline_content_items(
                         None
                     } else {
                         let font_size = child_style.map_or(container_font_size, |s| s.font_size);
+                        let font_weight =
+                            child_style.map_or(container_font_weight, |s| s.font_weight);
                         let font_family = child_style.map_or(container_font_family, |s| {
                             to_text_font_family(s.font_family)
                         });
                         Some(InlineContentItem::Text {
                             text: text.to_string(),
                             font_size,
+                            font_weight,
                             font_family,
                         })
                     }
@@ -395,7 +405,7 @@ pub fn compute_layout(
             // into `measure_leaf` and it isn't available again after.
             let baseline_source = context.as_ref().map(|c| match c {
                 LeafContext::Text(t) => {
-                    BaselineSource::Text(t.text.clone(), t.font_size, t.font_family)
+                    BaselineSource::Text(t.text.clone(), t.font_size, t.font_weight, t.font_family)
                 }
                 LeafContext::Inline(items) => BaselineSource::Inline(items.clone()),
             });
@@ -418,8 +428,9 @@ pub fn compute_layout(
             // see `florui_text::TextMetrics::baseline`'s own doc for why.
             if let Some(source) = baseline_source {
                 let baseline = match source {
-                    BaselineSource::Text(text, font_size, font_family) => {
-                        font.measure(font_family, &text, font_size).baseline
+                    BaselineSource::Text(text, font_size, font_weight, font_family) => {
+                        font.measure(font_family, &text, font_size, font_weight)
+                            .baseline
                     }
                     BaselineSource::Inline(items) => {
                         let content: Vec<florui_text::InlineContent<'_>> =
@@ -541,12 +552,14 @@ fn measure_leaf(
                     text_context.font_family,
                     &text_context.text,
                     text_context.font_size,
+                    text_context.font_weight,
                     width,
                 ),
                 None => font.measure(
                     text_context.font_family,
                     &text_context.text,
                     text_context.font_size,
+                    text_context.font_weight,
                 ),
             };
             Size {
@@ -584,6 +597,7 @@ fn build_node(
             tree.new_leaf(style)?
         } else {
             let font_size = styles.get(&node).map_or(16.0, |s| s.font_size);
+            let font_weight = styles.get(&node).map_or(400.0, |s| s.font_weight);
             let font_family = styles
                 .get(&node)
                 .map_or(florui_text::FontFamily::SansSerif, |s| {
@@ -594,6 +608,7 @@ fn build_node(
                 LeafContext::Text(TextContext {
                     text: text.to_string(),
                     font_size,
+                    font_weight,
                     font_family,
                 }),
             )?
@@ -1006,10 +1021,12 @@ mod tests {
         // h2's real font-size is 24px (1.5em) by default — the framework's
         // own default element stylesheet, not the bare 16px initial value
         // an unstyled element with no matching default rule would get.
+        // h2 is bold by default too (the framework's own default stylesheet).
         let expected = florui_text::Font::load_embedded().measure(
             florui_text::FontFamily::SansSerif,
             "Hi",
             24.0,
+            700.0,
         );
         assert_close(layouts[&node].width, expected.width);
         assert_close(layouts[&node].height, expected.height);
@@ -1035,6 +1052,7 @@ mod tests {
             florui_text::FontFamily::SansSerif,
             "Hi",
             40.0,
+            700.0,
         );
         assert_close(layouts[&node].width, expected.width);
         assert_close(layouts[&node].height, expected.height);
@@ -1098,6 +1116,7 @@ mod tests {
             florui_text::FontFamily::SansSerif,
             "Hi",
             16.0,
+            400.0,
         );
         assert_close(layouts[&card].width, expected.width);
         assert_close(layouts[&card].height, expected.height);
@@ -1123,6 +1142,7 @@ mod tests {
             florui_text::FontFamily::SansSerif,
             "one two three four five six seven eight nine ten",
             16.0,
+            700.0,
         );
 
         assert!(
@@ -1146,6 +1166,7 @@ mod tests {
             florui_text::FontFamily::SansSerif,
             "one two three four five",
             16.0,
+            700.0,
         );
 
         assert_eq!(layouts[&node].width, 60.0, "the explicit width still wins");
@@ -1172,6 +1193,7 @@ mod tests {
             florui_text::FontFamily::SansSerif,
             "Hi",
             24.0,
+            700.0,
         );
         assert_close(layouts[&h2].height, expected.height);
     }
@@ -1186,6 +1208,7 @@ mod tests {
             florui_text::FontFamily::Monospace,
             "AAAAA",
             16.0,
+            400.0,
         );
         assert_close(layouts[&node].width, expected.width);
     }
@@ -1200,11 +1223,13 @@ mod tests {
             florui_text::FontFamily::SansSerif,
             "AAAAA",
             16.0,
+            400.0,
         );
         let monospace = florui_text::Font::load_embedded().measure(
             florui_text::FontFamily::Monospace,
             "AAAAA",
             16.0,
+            400.0,
         );
         assert_close(layouts[&node].width, sans_serif.width);
         assert!(
@@ -1445,8 +1470,8 @@ mod tests {
         let big = arena.children(row)[1];
 
         let mut font = florui_text::Font::load_embedded();
-        let small_metrics = font.measure(florui_text::FontFamily::SansSerif, "Hg", 16.0);
-        let big_metrics = font.measure(florui_text::FontFamily::SansSerif, "Hg", 40.0);
+        let small_metrics = font.measure(florui_text::FontFamily::SansSerif, "Hg", 16.0, 400.0);
+        let big_metrics = font.measure(florui_text::FontFamily::SansSerif, "Hg", 40.0, 400.0);
 
         // Real baseline alignment: each item's own (y + its baseline offset)
         // must land on the same line — not the same `y`, and not simply
@@ -1482,7 +1507,12 @@ mod tests {
             ],
         );
         let mut font = florui_text::Font::load_embedded();
-        let one_line = font.measure(florui_text::FontFamily::SansSerif, "Hello world!", 16.0);
+        let one_line = font.measure(
+            florui_text::FontFamily::SansSerif,
+            "Hello world!",
+            16.0,
+            400.0,
+        );
 
         let (arena, layouts) = layout_for(&tree, "");
         let p = arena.roots()[0];
@@ -1507,8 +1537,13 @@ mod tests {
             )],
         );
         let mut font = florui_text::Font::load_embedded();
-        let first_word = font.measure(florui_text::FontFamily::SansSerif, "Hello", 16.0);
-        let one_line = font.measure(florui_text::FontFamily::SansSerif, "Hello world!", 16.0);
+        let first_word = font.measure(florui_text::FontFamily::SansSerif, "Hello", 16.0, 400.0);
+        let one_line = font.measure(
+            florui_text::FontFamily::SansSerif,
+            "Hello world!",
+            16.0,
+            400.0,
+        );
 
         // Wide enough for "Hello" but not for "Hello world!" — the inline
         // span's own "world!" (no space before "!") must wrap to a second
@@ -1544,11 +1579,12 @@ mod tests {
             )],
         );
         let mut font = florui_text::Font::load_embedded();
-        let one_word = font.measure(florui_text::FontFamily::SansSerif, "one", 16.0);
+        let one_word = font.measure(florui_text::FontFamily::SansSerif, "one", 16.0, 400.0);
         let unwrapped = font.measure(
             florui_text::FontFamily::SansSerif,
             "one two three four five six seven",
             16.0,
+            400.0,
         );
 
         let css = format!(".narrow {{ width: {}px; }}", one_word.width + 5.0);
@@ -1576,8 +1612,8 @@ mod tests {
             ],
         );
         let mut font = florui_text::Font::load_embedded();
-        let preceding = font.measure(florui_text::FontFamily::SansSerif, "Click ", 16.0);
-        let button_text = font.measure(florui_text::FontFamily::SansSerif, "here", 16.0);
+        let preceding = font.measure(florui_text::FontFamily::SansSerif, "Click ", 16.0, 400.0);
+        let button_text = font.measure(florui_text::FontFamily::SansSerif, "here", 16.0, 400.0);
 
         let (arena, layouts) = layout_for(&tree, "");
         let p = arena.roots()[0];
@@ -1618,8 +1654,8 @@ mod tests {
             ],
         );
         let mut font = florui_text::Font::load_embedded();
-        let small_only = font.measure(florui_text::FontFamily::SansSerif, "Hg Hg", 16.0);
-        let big_alone = font.measure(florui_text::FontFamily::SansSerif, "Hg", 48.0);
+        let small_only = font.measure(florui_text::FontFamily::SansSerif, "Hg Hg", 16.0, 400.0);
+        let big_alone = font.measure(florui_text::FontFamily::SansSerif, "Hg", 48.0, 400.0);
 
         let (arena, layouts) = layout_for(&tree, ".big { font-size: 48px; }");
         let p = arena.roots()[0];
