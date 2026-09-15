@@ -1,0 +1,54 @@
+.page {
+    display: flex;
+    flex-direction: column;
+    width: 520px;
+    padding-top: 24px;
+    padding-right: 24px;
+    padding-bottom: 24px;
+    padding-left: 24px;
+    background-color: #1e1e22;
+    color: #ffffff;
+}
+
+.instructions {
+    font-size: 14px;
+    margin-bottom: 24px;
+}
+
+.row {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-end;
+    column-gap: 16px;
+}
+
+.box {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+    background-color: #42734f;
+    color: #ffffff;
+    font-size: 12px;
+    padding-bottom: 4px;
+}
+
+.box-50 {
+    width: 50px;
+    height: 50px;
+}
+
+.box-100 {
+    width: 100px;
+    height: 100px;
+}
+
+.box-150 {
+    width: 150px;
+    height: 150px;
+}
+
+.box-200 {
+    width: 200px;
+    height: 200px;
+}
