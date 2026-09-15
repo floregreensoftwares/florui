@@ -143,3 +143,4 @@ fixture_test!(
     grid_group_opacity_overlap_matches_chromium,
     "grid-group-opacity-overlap"
 );
+fixture_test!(box_shadow_default_matches_chromium, "box-shadow-default");

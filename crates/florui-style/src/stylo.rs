@@ -49,8 +49,9 @@ use stylo_atoms::Atom as WeakAtom;
 use stylo_dom::ElementState;
 
 use crate::cascade::{
-    BorderSide as FlorBorderSide, ComputedStyle, ContentAlignment, Display as FlorDisplay, Edges,
-    FlexDirection, FlexWrap, FontFamily as FlorFontFamily, ItemAlignment,
+    BorderSide as FlorBorderSide, BoxShadow as FlorBoxShadow, ComputedStyle, ContentAlignment,
+    Display as FlorDisplay, Edges, FlexDirection, FlexWrap, FontFamily as FlorFontFamily,
+    ItemAlignment,
 };
 use crate::color::Rgba;
 use crate::interaction::InteractionState;
@@ -856,6 +857,7 @@ fn to_computed_style(values: &ComputedValues) -> ComputedStyle {
     let margin = values.get_margin();
     let padding = values.get_padding();
     let border = values.get_border();
+    let effects = values.get_effects();
 
     // `color`'s own computed value is always already-resolved (real CSS
     // never leaves it as `currentcolor`); resolving it first lets
@@ -942,6 +944,42 @@ fn to_computed_style(values: &ComputedValues) -> ComputedStyle {
             to_grid_placement(&position.grid_row_start),
             to_grid_placement(&position.grid_row_end),
         ),
+        box_shadow: to_box_shadows(&effects.box_shadow.0, color),
+    }
+}
+
+/// `box-shadow`'s own list of layers, in source order — see
+/// [`FlorBoxShadow`]'s own doc for the per-layer conversion and which
+/// field it carries through unrendered.
+fn to_box_shadows(
+    shadows: &[style::values::computed::BoxShadow],
+    inherited_color: Rgba,
+) -> Vec<FlorBoxShadow> {
+    shadows
+        .iter()
+        .map(|shadow| to_box_shadow(shadow, inherited_color))
+        .collect()
+}
+
+/// `currentcolor` resolves against `inherited_color` (this element's own
+/// already-resolved `color`), the same fallback `background-color`/
+/// `border-*-color` already use.
+fn to_box_shadow(
+    shadow: &style::values::computed::BoxShadow,
+    inherited_color: Rgba,
+) -> FlorBoxShadow {
+    FlorBoxShadow {
+        offset_x: shadow.base.horizontal.px(),
+        offset_y: shadow.base.vertical.px(),
+        blur_radius: shadow.base.blur.px(),
+        spread_radius: shadow.spread.px(),
+        color: shadow
+            .base
+            .color
+            .as_absolute()
+            .map(to_absolute_rgba)
+            .unwrap_or(inherited_color),
+        inset: shadow.inset,
     }
 }
 
