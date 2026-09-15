@@ -316,6 +316,7 @@ impl LiveHost {
             arena,
             styles,
             layouts,
+            1.0,
         );
         let mut pixels: Vec<u32> = canvas
             .pixels()

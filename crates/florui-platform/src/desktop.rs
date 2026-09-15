@@ -313,6 +313,7 @@ impl DesktopHost {
             arena,
             styles,
             &physical_layouts,
+            scale_factor as f32,
         );
 
         let Some(surface) = &mut self.surface else {

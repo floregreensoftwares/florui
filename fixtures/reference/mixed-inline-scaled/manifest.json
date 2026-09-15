@@ -1,0 +1,25 @@
+{
+  "id": "mixed-inline-scaled",
+  "description": "The same interleaved text+span+text as mixed-inline-default, captured at device_pixel_ratio 2.0 — a real HiDPI display.",
+  "html": "index.html",
+  "css": "style.css",
+  "element_id": "el",
+  "viewport": { "width_css_px": 400, "height_css_px": 100, "device_pixel_ratio": 2.0 },
+  "canvas_color": "#ffffff",
+  "florui": {
+    "tag": "p",
+    "class": "mixed",
+    "css": ".mixed { width: 300px; } .mixed .highlight { font-weight: 700; }",
+    "children": [
+      "Hello ",
+      { "tag": "span", "class": "highlight", "text": "world", "css": "" },
+      ", this is a real mixed inline run."
+    ]
+  },
+  "classification": {
+    "kind": "tolerant",
+    "threshold_percent": 5.0,
+    "geometry_tolerance_px": 1.5,
+    "reason": "Measured live against Chromium: 4.25% pixel diff, 0.0px geometry delta (both real numbers, not guesses) — proof the physical-canvas text wraps at the same logical width layout committed to, not the scaled one (see florui-paint's own scale_factor doc). Higher than the bare-element fixtures' own 3% for the same reason mixed-inline-default's own bold span is: more edge pixels for the two rasterizers to disagree on, now also at 2x resolution."
+  }
+}

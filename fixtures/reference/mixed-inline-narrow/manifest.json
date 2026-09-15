@@ -1,0 +1,24 @@
+{
+  "id": "mixed-inline-narrow",
+  "description": "The same interleaved text+span+text as mixed-inline-default, narrowed from 300px to 90px so the paragraph wraps across several lines, with the inline span landing wherever it falls in the wrapped flow — proof the real inline formatting context wraps a mixed run correctly, not just plain text.",
+  "html": "index.html",
+  "css": "style.css",
+  "element_id": "el",
+  "viewport": { "width_css_px": 400, "height_css_px": 200, "device_pixel_ratio": 1.0 },
+  "canvas_color": "#ffffff",
+  "florui": {
+    "tag": "p",
+    "class": "mixed",
+    "css": ".mixed { width: 90px; } .mixed .highlight { font-weight: 700; }",
+    "children": [
+      "Hello ",
+      { "tag": "span", "class": "highlight", "text": "world", "css": "" },
+      ", this is a real mixed inline run."
+    ]
+  },
+  "classification": {
+    "kind": "tolerant",
+    "threshold_percent": 3.0,
+    "reason": "Same anti-aliasing/hinting mismatch between Chromium's own text rasterizer and Florui's skrifa+tiny-skia one already calibrated for the bare-element fixtures."
+  }
+}

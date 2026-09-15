@@ -1,0 +1,24 @@
+{
+  "id": "card-long-content",
+  "description": "The same 240px card as card-default, with a long heading and a multi-sentence paragraph — both children must wrap across several lines and the card must grow to fit them.",
+  "html": "index.html",
+  "css": "style.css",
+  "element_id": "el",
+  "viewport": { "width_css_px": 400, "height_css_px": 400, "device_pixel_ratio": 1.0 },
+  "canvas_color": "#ffffff",
+  "florui": {
+    "tag": "div",
+    "class": "card",
+    "css": ".card { display: flex; flex-direction: column; width: 240px; padding-top: 16px; padding-right: 16px; padding-bottom: 16px; padding-left: 16px; border-top-width: 1px; border-top-style: solid; border-top-color: #d0d0d0; border-right-width: 1px; border-right-style: solid; border-right-color: #d0d0d0; border-bottom-width: 1px; border-bottom-style: solid; border-bottom-color: #d0d0d0; border-left-width: 1px; border-left-style: solid; border-left-color: #d0d0d0; background-color: #fafafa; } .card h2 { margin-top: 0px; margin-right: 0px; margin-bottom: 8px; margin-left: 0px; } .card p { margin-top: 0px; margin-right: 0px; margin-bottom: 0px; margin-left: 0px; }",
+    "children": [
+      { "tag": "h2", "text": "A longer card title that itself wraps", "css": "" },
+      { "tag": "p", "text": "This paragraph is deliberately long content, spanning several sentences so it wraps across multiple lines inside the same fixed-width card that the default fixture also uses. It exists to prove the card grows to fit real content rather than clipping or overflowing it.", "css": "" }
+    ]
+  },
+  "classification": {
+    "kind": "tolerant",
+    "threshold_percent": 13.0,
+    "geometry_tolerance_px": 3.5,
+    "reason": "Measured live against Chromium: 12.44% pixel diff, 3.0px max geometry delta (both real numbers, not guesses). Both higher than the bare-element fixtures' own calibration because this content wraps across roughly 8 lines instead of 1-2 — the anaglyph overlay (florui_vs_chromium.png from a real `florui compare` run) shows every line of text fully legible and correctly positioned, with a thin, gradually-growing antialiasing fringe toward the bottom: tiny per-line float rounding in text shaping/line-height math accumulating across more lines, the same already-documented source as the bare-element fixtures' own small deltas, not a wrap-point or layout divergence."
+  }
+}

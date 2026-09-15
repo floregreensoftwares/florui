@@ -139,6 +139,7 @@ impl App {
             &self.arena,
             &styles,
             &layouts,
+            1.0,
         );
 
         let Some(surface) = &mut self.surface else {

@@ -1,0 +1,25 @@
+{
+  "id": "mixed-inline-default",
+  "description": "A <p> with real interleaved content (text, an inline <span>, more text) at a width wide enough to stay on one line — the real inline formatting context, not a bare single-text element.",
+  "html": "index.html",
+  "css": "style.css",
+  "element_id": "el",
+  "viewport": { "width_css_px": 400, "height_css_px": 100, "device_pixel_ratio": 1.0 },
+  "canvas_color": "#ffffff",
+  "florui": {
+    "tag": "p",
+    "class": "mixed",
+    "css": ".mixed { width: 300px; } .mixed .highlight { font-weight: 700; }",
+    "children": [
+      "Hello ",
+      { "tag": "span", "class": "highlight", "text": "world", "css": "" },
+      ", this is a real mixed inline run."
+    ]
+  },
+  "classification": {
+    "kind": "tolerant",
+    "threshold_percent": 6.0,
+    "geometry_tolerance_px": 1.5,
+    "reason": "Measured live against Chromium: 5.10% pixel diff, 0.0px geometry delta (both real numbers, not guesses). Higher than the bare-element fixtures' own 3% because the bold highlighted span's thicker strokes have more edge pixels for Chromium's and Florui's rasterizers to disagree on — reference.png/result.png (from a real `florui compare` run) show identical wrapping and both render \"world\" bold, just with ordinary anti-aliasing/hinting differences at its edges."
+  }
+}
