@@ -805,7 +805,16 @@ fn run_compare_all(
         return fail(err.to_string());
     }
 
-    let profile_dir = run_dir.join(format!("chrome-profile-{}", std::process::id()));
+    // Chrome's own scratch profile (crash reporter state, GPU cache, ...)
+    // is not a run artifact worth keeping — deliberately outside `run_dir`
+    // so the persistent run history stays just the fixtures' own
+    // comparison output, even on a platform where Chrome still holds a
+    // file handle open briefly after exit and `cleanup_profile` silently
+    // can't remove it.
+    let profile_dir = std::env::temp_dir().join(format!(
+        "florui-conformance-chrome-profile-{}",
+        std::process::id()
+    ));
     let driver = match ChromiumDriver::launch(ChromiumOptions {
         executable: chromium.clone(),
         user_data_dir: profile_dir.clone(),
