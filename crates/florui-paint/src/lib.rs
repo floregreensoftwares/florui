@@ -4,26 +4,37 @@
 //!
 //! # Scope
 //!
-//! Flat background-color rectangles and solid borders, painted in real
-//! paint order (see [`paint_order`]): a node before its children, and
-//! within one node's own children, document order — except a flex or
-//! grid child with an explicit `z-index` reorders among its own siblings
-//! the same way real CSS does, the only case florui can express `z-index`
-//! for yet (there is no `position` property, so nothing here establishes
-//! a positioned element's own stacking context). An overlap always
-//! resolves to whichever box paints later. A leaf's own text (see
-//! [`florui_style::Arena::text_content`]) paints inside its padding box:
-//! glyph outlines come from [`florui_text::Font::shape`] and are
+//! Flat background-color rectangles, solid borders, and hard-edged
+//! box-shadows, painted in real paint order (see [`paint_order`]): a
+//! node before its children, and within one node's own children,
+//! document order — except a flex or grid child with an explicit
+//! `z-index` reorders among its own siblings the same way real CSS
+//! does, the only case florui can express `z-index` for yet (there is
+//! no `position` property, so nothing here establishes a positioned
+//! element's own stacking context). An overlap always resolves to
+//! whichever box paints later. A leaf's own text (see
+//! [`florui_style::Arena::text_content`]) paints inside its padding
+//! box: glyph outlines come from [`florui_text::Font::shape`] and are
 //! rasterized with [skrifa](https://github.com/googlefonts/fontations)'s
 //! outline extractor feeding a
 //! [tiny-skia](https://github.com/RazrFalcon/tiny-skia) path, the same
-//! rasterizer backgrounds use — one painting backend, not two. A node
-//! with `opacity` below `1.0` paints itself and its whole subtree into an
-//! offscreen buffer first, composited back as one group (see
-//! [`paint_group_with_opacity`]) — real CSS's own group-opacity
-//! semantics, not a per-primitive alpha multiply. There are no shadows,
-//! transforms, or clipping yet — `florui_style` has no properties for
-//! any of those either.
+//! rasterizer backgrounds/borders/shadows use — one painting backend,
+//! not several. A node with `opacity` below `1.0` paints itself and its
+//! whole subtree into an offscreen buffer first, composited back as one
+//! group (see [`paint_group_with_opacity`]) — real CSS's own
+//! group-opacity semantics, not a per-primitive alpha multiply.
+//!
+//! `box-shadow`'s `blur-radius` parses and cascades all the way through
+//! [`florui_style::BoxShadow`], but is not painted: tiny-skia 0.11 (this
+//! crate's whole rasterizer) has no Gaussian blur or mask-filter
+//! primitive at all, so there's nothing to rasterize a blur *with* short
+//! of hand-rolling a box-blur pass over a mask, out of scope for this
+//! crate's first slice of the property. Every shadow paints with a hard
+//! edge regardless of its declared blur — a "supported syntax, simplified
+//! rendering" gap, the same shape as this crate's own solid-only borders
+//! (see [`paint_border`]'s own doc). There is no border-radius,
+//! transform, or clipping yet — `florui_style` has no properties for any
+//! of those either.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -309,11 +320,6 @@ fn paint_node(
         let style = styles.get(&node);
         let (x, y) = absolute_position(arena, layouts, node);
 
-        let background = style.map_or(Rgba::TRANSPARENT, |s| s.background_color);
-        if background.a != 0 {
-            fill_rect(buffer, x, y, layout.width, layout.height, background);
-        }
-
         let no_border_side = florui_style::BorderSide {
             width: 0.0,
             color: Rgba::TRANSPARENT,
@@ -325,9 +331,41 @@ fn paint_node(
             left: no_border_side,
         };
         let border = style.map_or(no_border, |s| s.border);
-        // Painted on top of the background, before content — real CSS's
-        // own painting order for a normal-flow box with no stacking
-        // context (background, then border, then content).
+        let box_shadow: &[florui_style::BoxShadow] = style.map_or(&[][..], |s| &s.box_shadow[..]);
+
+        // Real CSS's own painting order for a normal-flow box with no
+        // stacking context: outer (non-inset) shadows sit behind
+        // everything else — background, then border, then content — while
+        // inset shadows sit on top of the background but still behind the
+        // border and content. See [`paint_box_shadows`]'s own doc for the
+        // painted shape.
+        paint_box_shadows(
+            buffer,
+            x,
+            y,
+            layout.width,
+            layout.height,
+            border,
+            box_shadow,
+            false,
+        );
+
+        let background = style.map_or(Rgba::TRANSPARENT, |s| s.background_color);
+        if background.a != 0 {
+            fill_rect(buffer, x, y, layout.width, layout.height, background);
+        }
+
+        paint_box_shadows(
+            buffer,
+            x,
+            y,
+            layout.width,
+            layout.height,
+            border,
+            box_shadow,
+            true,
+        );
+
         paint_border(buffer, x, y, layout.width, layout.height, border);
 
         let color = style.map_or(Rgba::opaque(0, 0, 0), |s| s.color);
@@ -472,6 +510,190 @@ fn paint_border(
             border.right.color,
         );
     }
+}
+
+/// Paints every layer of `shadows` whose own `inset` matches `inset` — the
+/// caller makes two passes, one per value, so it can interleave outer
+/// shadows behind the background and inset shadows in front of it (see
+/// [`paint_node`]'s own doc for why). Layers paint back-to-front in list
+/// order: the *last*-listed layer paints first, so the first-listed one
+/// ends up on top — real CSS's own layering rule for `box-shadow`'s
+/// comma-separated list.
+#[allow(clippy::too_many_arguments)]
+fn paint_box_shadows(
+    buffer: &mut Canvas,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    border: florui_style::Edges<florui_style::BorderSide>,
+    shadows: &[florui_style::BoxShadow],
+    inset: bool,
+) {
+    for shadow in shadows.iter().filter(|s| s.inset == inset).rev() {
+        if shadow.color.a == 0 {
+            continue;
+        }
+        if inset {
+            paint_inset_shadow(buffer, x, y, width, height, border, shadow);
+        } else {
+            paint_outset_shadow(buffer, x, y, width, height, shadow);
+        }
+    }
+}
+
+/// An outer (drop) shadow: a copy of the border box, grown by
+/// `spread_radius` on every side and offset by `(offset_x, offset_y)`,
+/// filled with `shadow.color` — except wherever it's covered by the
+/// box's own border box, which the box's own subsequent background/border
+/// painting would cover anyway, but real CSS clips it there regardless
+/// (visible through a *transparent* background otherwise, which a real
+/// browser never shows).
+fn paint_outset_shadow(
+    buffer: &mut Canvas,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    shadow: &florui_style::BoxShadow,
+) {
+    let outer_x = x + shadow.offset_x - shadow.spread_radius;
+    let outer_y = y + shadow.offset_y - shadow.spread_radius;
+    let outer_width = width + 2.0 * shadow.spread_radius;
+    let outer_height = height + 2.0 * shadow.spread_radius;
+    fill_rect_minus_hole(
+        buffer,
+        outer_x,
+        outer_y,
+        outer_width,
+        outer_height,
+        x,
+        y,
+        width,
+        height,
+        shadow.color,
+    );
+}
+
+/// An inset shadow: real CSS clips it to the box's own padding box (its
+/// interior, inside the border), which is filled with `shadow.color`
+/// except for a "hole" — the padding box shrunk by `spread_radius` on
+/// every side, then offset by `(offset_x, offset_y)`. Growing
+/// `spread_radius` *shrinks* the hole here — the opposite sign from
+/// [`paint_outset_shadow`]'s own shape, matching real CSS's own "spread
+/// makes an outer shadow bigger, an inner one's hole smaller" rule.
+fn paint_inset_shadow(
+    buffer: &mut Canvas,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    border: florui_style::Edges<florui_style::BorderSide>,
+    shadow: &florui_style::BoxShadow,
+) {
+    let padding_x = x + border.left.width;
+    let padding_y = y + border.top.width;
+    let padding_width = (width - border.left.width - border.right.width).max(0.0);
+    let padding_height = (height - border.top.width - border.bottom.width).max(0.0);
+
+    let hole_x = padding_x + shadow.offset_x + shadow.spread_radius;
+    let hole_y = padding_y + shadow.offset_y + shadow.spread_radius;
+    let hole_width = padding_width - 2.0 * shadow.spread_radius;
+    let hole_height = padding_height - 2.0 * shadow.spread_radius;
+
+    fill_rect_minus_hole(
+        buffer,
+        padding_x,
+        padding_y,
+        padding_width,
+        padding_height,
+        hole_x,
+        hole_y,
+        hole_width,
+        hole_height,
+        shadow.color,
+    );
+}
+
+/// Fills the `outer` rectangle with `color`, minus whatever area it
+/// shares with `hole` — the shape both an outer shadow (`hole` = the
+/// box's own border box) and an inset shadow (`hole` = the offset/spread
+/// "shadow-free" interior) need. Decomposed into up to four
+/// non-overlapping rectangle strips — the top and bottom spanning
+/// `outer`'s full width (covering its corners), left and right filling
+/// only the vertical band between them — rather than an even-odd path
+/// fill: even-odd computes a symmetric difference (an XOR) of the two
+/// shapes, not a true subtraction, so it paints the wrong thing whenever
+/// `hole` only partially overlaps `outer` or fully contains it (a
+/// shadow entirely hidden behind its own box would wrongly show a ring).
+/// A degenerate (non-positive width/height) strip is left to
+/// [`fill_rect`]'s own no-op handling.
+#[allow(clippy::too_many_arguments)]
+fn fill_rect_minus_hole(
+    buffer: &mut Canvas,
+    outer_x: f32,
+    outer_y: f32,
+    outer_width: f32,
+    outer_height: f32,
+    hole_x: f32,
+    hole_y: f32,
+    hole_width: f32,
+    hole_height: f32,
+    color: Rgba,
+) {
+    if outer_width <= 0.0 || outer_height <= 0.0 {
+        return;
+    }
+    let outer_x1 = outer_x + outer_width;
+    let outer_y1 = outer_y + outer_height;
+
+    // `hole` clipped to `outer`'s own bounds: the only part of it that can
+    // actually remove anything.
+    let clip_x0 = hole_x.max(outer_x);
+    let clip_y0 = hole_y.max(outer_y);
+    let clip_x1 = (hole_x + hole_width).min(outer_x1);
+    let clip_y1 = (hole_y + hole_height).min(outer_y1);
+
+    if clip_x0 >= clip_x1 || clip_y0 >= clip_y1 {
+        // No overlap (including a hole with a non-positive width/height,
+        // e.g. an inset shadow whose spread erased it entirely): nothing
+        // to subtract.
+        fill_rect(buffer, outer_x, outer_y, outer_width, outer_height, color);
+        return;
+    }
+
+    fill_rect(
+        buffer,
+        outer_x,
+        outer_y,
+        outer_width,
+        clip_y0 - outer_y,
+        color,
+    );
+    fill_rect(
+        buffer,
+        outer_x,
+        clip_y1,
+        outer_width,
+        outer_y1 - clip_y1,
+        color,
+    );
+    fill_rect(
+        buffer,
+        outer_x,
+        clip_y0,
+        clip_x0 - outer_x,
+        clip_y1 - clip_y0,
+        color,
+    );
+    fill_rect(
+        buffer,
+        clip_x1,
+        clip_y0,
+        outer_x1 - clip_x1,
+        clip_y1 - clip_y0,
+        color,
+    );
 }
 
 /// Shapes `text` (wrapped at `wrap_width`, matching whatever content width
@@ -756,6 +978,242 @@ mod tests {
                 assert_eq!(pixel_rgb(&buffer, px, py), [0x1e, 0x1e, 0x22]);
             }
         }
+    }
+
+    #[test]
+    fn an_outset_box_shadow_paints_a_hard_edged_offset_copy_outside_the_box() {
+        let tree: Element = view! {
+            <div class="wrapper">
+                <div class="box" />
+            </div>
+        };
+        let css = "
+            .wrapper {
+                width: 40px; height: 40px; background-color: #000000;
+                padding-top: 15px; padding-right: 15px; padding-bottom: 15px; padding-left: 15px;
+            }
+            .box { width: 10px; height: 10px; background-color: #1e1e22; box-shadow: 0px 8px 0px 0px #ff0000; }
+        ";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let mut font = Font::load_embedded();
+        let layouts =
+            florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
+
+        let buffer = paint_to_buffer(
+            &mut font,
+            40,
+            40,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            1.0,
+        );
+
+        // The box sits at (15,15)-(25,25); an 8px downward offset with no
+        // blur/spread paints a hard-edged red copy at (15,25)-(25,33).
+        assert_eq!(
+            pixel_rgb(&buffer, 20, 28),
+            [0xff, 0, 0],
+            "the offset shadow band below the box"
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 20, 20),
+            [0x1e, 0x1e, 0x22],
+            "inside the box's own footprint the shadow must not show through \
+             (real CSS clips a shadow to outside its own border box)"
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 20, 10),
+            [0, 0, 0],
+            "above the box, where the downward-only offset never reaches, \
+             just the wrapper's own background"
+        );
+    }
+
+    #[test]
+    fn an_outset_box_shadow_with_only_spread_frames_the_box_without_a_ring_inside_it() {
+        // Zero offset and a positive spread means the shadow's own
+        // (grown) shape fully contains the box's own border box — the
+        // "hole" this crate subtracts is then nested entirely inside the
+        // shadow's outer rect, exactly the case an even-odd/XOR fill
+        // would get wrong (it would paint a visible ring bleeding into
+        // the box's own interior instead of leaving it alone).
+        let tree: Element = view! {
+            <div class="wrapper">
+                <div class="box" />
+            </div>
+        };
+        let css = "
+            .wrapper {
+                width: 40px; height: 40px; background-color: #000000;
+                padding-top: 15px; padding-right: 15px; padding-bottom: 15px; padding-left: 15px;
+            }
+            .box { width: 10px; height: 10px; background-color: #1e1e22; box-shadow: 0px 0px 0px 4px #ff0000; }
+        ";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let mut font = Font::load_embedded();
+        let layouts =
+            florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
+
+        let buffer = paint_to_buffer(
+            &mut font,
+            40,
+            40,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            1.0,
+        );
+
+        // The 4px spread frames the box's (15,15)-(25,25) footprint with a
+        // red ring from (11,11) to (29,29).
+        assert_eq!(
+            pixel_rgb(&buffer, 20, 13),
+            [0xff, 0, 0],
+            "inside the spread ring, just above the box"
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 20, 20),
+            [0x1e, 0x1e, 0x22],
+            "the box's own interior must stay its own background, with no \
+             shadow ring bleeding in from the nested hole"
+        );
+    }
+
+    #[test]
+    fn an_inset_box_shadow_paints_only_on_the_side_opposite_its_offset() {
+        let tree: Element = view! {
+            <div class="wrapper">
+                <div class="box" />
+            </div>
+        };
+        let css = "
+            .wrapper {
+                width: 40px; height: 40px; background-color: #000000;
+                padding-top: 15px; padding-right: 15px; padding-bottom: 15px; padding-left: 15px;
+            }
+            .box { width: 10px; height: 10px; background-color: #1e1e22; box-shadow: inset 3px 3px 0px 0px #ff0000; }
+        ";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let mut font = Font::load_embedded();
+        let layouts =
+            florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
+
+        let buffer = paint_to_buffer(
+            &mut font,
+            40,
+            40,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            1.0,
+        );
+
+        // A positive (right/down) offset pushes the shadow-free hole
+        // toward the bottom-right, so the visible inset shadow band shows
+        // up along the box's own top and left interior edges instead.
+        assert_eq!(
+            pixel_rgb(&buffer, 20, 16),
+            [0xff, 0, 0],
+            "the inset shadow band along the box's own top interior edge"
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 23, 23),
+            [0x1e, 0x1e, 0x22],
+            "the box's own bottom-right interior, inside the shifted hole, \
+             must stay its own background"
+        );
+    }
+
+    #[test]
+    fn multiple_box_shadow_layers_paint_the_first_listed_one_on_top() {
+        let tree: Element = view! { <div class="box" /> };
+        let css = "
+            .box {
+                width: 10px; height: 10px; background-color: #1e1e22;
+                box-shadow: 0px 4px 0px 0px #ff0000, 0px 4px 0px 0px #00ff00;
+            }
+        ";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let mut font = Font::load_embedded();
+        let layouts =
+            florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
+
+        let buffer = paint_to_buffer(
+            &mut font,
+            10,
+            20,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            1.0,
+        );
+
+        // Both shadows land on the identical offset rect; the first
+        // listed (red) must win, not whichever painted last by list
+        // order alone.
+        assert_eq!(
+            pixel_rgb(&buffer, 5, 12),
+            [0xff, 0, 0],
+            "the first-listed shadow layer must paint on top of later ones"
+        );
+    }
+
+    #[test]
+    fn a_declared_blur_radius_is_carried_through_but_does_not_soften_the_painted_edge() {
+        // florui-paint's own module doc: tiny-skia has no blur primitive,
+        // so `blur-radius` parses and cascades but never softens what
+        // gets painted — this shadow must paint identically to the same
+        // shadow with `blur-radius: 0`, not partially transparent at its
+        // edge the way a real blurred shadow would.
+        let tree: Element = view! {
+            <div class="wrapper">
+                <div class="box" />
+            </div>
+        };
+        let css = "
+            .wrapper {
+                width: 40px; height: 40px; background-color: #000000;
+                padding-top: 15px; padding-right: 15px; padding-bottom: 15px; padding-left: 15px;
+            }
+            .box { width: 10px; height: 10px; background-color: #1e1e22; box-shadow: 0px 8px 20px 0px #ff0000; }
+        ";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let mut font = Font::load_embedded();
+        let layouts =
+            florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
+
+        let buffer = paint_to_buffer(
+            &mut font,
+            40,
+            40,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            1.0,
+        );
+
+        // Just inside the shadow's hard-edged shape: fully opaque red, not
+        // a blurred/blended intermediate color.
+        assert_eq!(pixel_rgb(&buffer, 20, 28), [0xff, 0, 0]);
+        // Just past that edge, one pixel further from the box: back to
+        // the plain unblurred background, with no soft blurred fringe.
+        assert_eq!(pixel_rgb(&buffer, 20, 33), [0, 0, 0]);
     }
 
     #[test]

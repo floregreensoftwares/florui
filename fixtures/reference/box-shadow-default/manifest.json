@@ -1,0 +1,15 @@
+{
+  "id": "box-shadow-default",
+  "description": "A plain box with an outset box-shadow (offset only, zero blur/spread), validating box-shadow parsing/cascade/paint end to end against Chromium — no text, so pixel comparison is this fixture's precise signal, not just a secondary one the way it is for the text-bearing fixtures.",
+  "html": "index.html",
+  "css": "style.css",
+  "element_id": "el",
+  "viewport": { "width_css_px": 100, "height_css_px": 100, "device_pixel_ratio": 1.0 },
+  "canvas_color": "#ffffff",
+  "florui": {
+    "tag": "div",
+    "class": "box",
+    "css": ".box { width: 60px; height: 60px; background-color: #cccccc; box-shadow: 12px 12px 0px 0px #ff0000; }"
+  },
+  "classification": { "kind": "exact" }
+}
