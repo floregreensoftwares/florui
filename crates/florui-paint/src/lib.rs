@@ -101,13 +101,17 @@ pub fn paint_to_png(
 /// physical pixels (its own `scale_layouts`, mirrored in
 /// `florui_conformance::engine`), not the logical pixels layout itself ran
 /// against. `scale_factor` is how much that scaling multiplied every box
-/// by (`1.0` for an unscaled/logical canvas) — text wrapping needs it to
-/// divide `layouts`' own (already-scaled) box width back down to the
-/// logical width layout actually wrapped against, since `font_size` itself
-/// is never rescaled. Without this, text re-wraps at the wrong width on
-/// any canvas painted at other than 1x: wider than intended, since the
-/// scaled box width is larger than the logical width the glyphs' own
-/// `font_size` was sized for.
+/// by (`1.0` for an unscaled/logical canvas). Text painting splits the
+/// difference: it shapes at the *logical* font size and wrap width — the
+/// same ones layout itself measured with, recovered by dividing the
+/// already-scaled box width back down — so wrapping matches the committed
+/// layout exactly, then scales the resulting glyph outlines and positions
+/// back up by `scale_factor` only at rasterization time, so the ink
+/// itself is painted at the canvas's own (possibly physical) size. Get
+/// either half wrong and it shows up differently: skip the wrap-width
+/// divide and text re-wraps wider than the box was sized for; skip the
+/// rasterization scale-up and text paints correctly wrapped but roughly
+/// `scale_factor` times too small.
 ///
 /// # Panics
 ///
@@ -204,11 +208,16 @@ fn paint_node(
             (layout.width - border.left.width - border.right.width - padding.left - padding.right)
                 .max(0.0);
         // `content_width` is in the painted canvas's own (possibly scaled)
-        // units, but `font_size` is never rescaled — text must reshape at
-        // the same logical width layout itself wrapped against, or a
-        // HiDPI canvas (`scale_factor` > 1) wraps text wider than the
-        // committed layout, overflowing past where the box was sized to
-        // fit it. See `paint_to_buffer`'s own doc.
+        // units, but shaping below runs at the *logical* `font_size`
+        // `styles` itself carries — text must reshape at the same logical
+        // width layout itself wrapped against, or a HiDPI canvas
+        // (`scale_factor` > 1) wraps text wider than the committed layout,
+        // overflowing past where the box was sized to fit it. See
+        // `paint_to_buffer`'s own doc. `paint_shaped_runs`/`paint_text`
+        // scale the resulting logical-sized glyphs back up to
+        // `scale_factor` at rasterization time, the other half of the same
+        // split: shape at the size layout actually measured, paint at the
+        // size the canvas actually needs.
         let wrap_width = content_width / scale_factor;
 
         if florui_layout::is_inline_formatting_context(arena, styles, node) {
@@ -223,7 +232,14 @@ fn paint_node(
             if let Some(shaped) = florui_layout::shape_inline_formatting_context(
                 font, arena, styles, node, wrap_width,
             ) {
-                paint_shaped_runs(buffer, &shaped.runs, content_x, content_y, color);
+                paint_shaped_runs(
+                    buffer,
+                    &shaped.runs,
+                    content_x,
+                    content_y,
+                    color,
+                    scale_factor,
+                );
             }
         } else {
             let text = arena.text_content(node);
@@ -245,6 +261,7 @@ fn paint_node(
                         x: content_x,
                         y: content_y,
                         wrap_width,
+                        scale_factor,
                     },
                 );
             }
@@ -328,6 +345,7 @@ struct TextPaint<'a> {
     x: f32,
     y: f32,
     wrap_width: f32,
+    scale_factor: f32,
 }
 
 fn to_text_font_family(value: florui_style::FontFamily) -> florui_text::FontFamily {
@@ -347,9 +365,10 @@ fn paint_text(buffer: &mut Canvas, font: &mut Font, params: TextPaint<'_>) {
         x,
         y,
         wrap_width,
+        scale_factor,
     } = params;
     let shaped = font.shape_wrapped(font_family, text, font_size, font_weight, wrap_width);
-    paint_shaped_runs(buffer, &shaped.runs, x, y, color);
+    paint_shaped_runs(buffer, &shaped.runs, x, y, color, scale_factor);
 }
 
 /// Fills every glyph across `runs` at `(x, y)` — the top-left of the whole
@@ -361,12 +380,19 @@ fn paint_text(buffer: &mut Canvas, font: &mut Font, params: TextPaint<'_>) {
 /// doesn't parse, or an individual glyph with no outline (e.g. genuinely
 /// missing from the font); a partial render beats aborting the whole paint
 /// over one bad glyph.
+///
+/// `runs` was shaped at the *logical* font size (matching what layout
+/// itself measured — see [`paint_node`]'s own doc on `wrap_width`), so
+/// every glyph's own outline scale and relative position is still in
+/// logical units here; `scale_factor` blows both back up to the painted
+/// canvas's own (possibly physical) units, the other half of that split.
 fn paint_shaped_runs(
     buffer: &mut Canvas,
     runs: &[florui_text::ShapedRun],
     x: f32,
     y: f32,
     color: Rgba,
+    scale_factor: f32,
 ) {
     let mut builder = PathBuilder::new();
 
@@ -375,7 +401,7 @@ fn paint_shaped_runs(
             continue;
         };
         let outlines = font_ref.outline_glyphs();
-        let size = GlyphSize::new(run.font_size);
+        let size = GlyphSize::new(run.font_size * scale_factor);
         // Without this, every glyph draws at the font's default variable
         // instance regardless of what was actually shaped — a bold run
         // would measure wider (Parley resolves the wght axis correctly
@@ -393,8 +419,8 @@ fn paint_shaped_runs(
             };
             let mut pen = GlyphPen {
                 builder: &mut builder,
-                origin_x: x + glyph.x,
-                origin_y: y + glyph.y,
+                origin_x: x + glyph.x * scale_factor,
+                origin_y: y + glyph.y * scale_factor,
             };
             let settings = DrawSettings::unhinted(size, location);
             let _ = outline.draw(settings, &mut pen);
@@ -1023,6 +1049,83 @@ mod tests {
             "text painted onto a scaled canvas must still wrap at the logical width, filling \
              the second line layout reserved room for — not re-wrap wider and collapse onto \
              one line"
+        );
+    }
+
+    #[test]
+    fn a_glyph_painted_onto_a_scaled_hidpi_canvas_is_rasterized_at_the_scaled_size_not_just_repositioned()
+     {
+        // The bug this guards against: positioning glyphs at physical
+        // coordinates (correct) while still rasterizing their outlines at
+        // the *logical* font size paints text roughly `scale_factor` times
+        // smaller than a real HiDPI render — box geometry still matches
+        // (nothing here depends on glyph size), so a percent-different
+        // pixel tolerance can pass even though the rendered ink itself is
+        // visibly wrong, since thin glyph strokes cover little of a mostly
+        // blank canvas.
+        fn ink_height(scale_factor: f32) -> u32 {
+            let tree: Element = view! { <h2>{"H"}</h2> };
+            let css = "h2 { color: #ff0000; font-size: 40px; }";
+            let arena = Arena::build(&tree);
+            let rules = florui_style::parse_stylesheet(css).unwrap();
+            let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+            let mut font = Font::load_embedded();
+            let layouts =
+                florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT)
+                    .unwrap();
+
+            let node = arena.roots()[0];
+            let logical_width = layouts[&node].width;
+            let logical_height = layouts[&node].height;
+            let physical_layouts = layouts
+                .iter()
+                .map(|(&id, l)| {
+                    (
+                        id,
+                        BoxLayout {
+                            x: l.x * scale_factor,
+                            y: l.y * scale_factor,
+                            width: l.width * scale_factor,
+                            height: l.height * scale_factor,
+                        },
+                    )
+                })
+                .collect();
+            let width = (logical_width * scale_factor).ceil() as u32;
+            let height = (logical_height * scale_factor).ceil() as u32;
+            let buffer = paint_to_buffer(
+                &mut font,
+                width,
+                height,
+                Rgba::opaque(0, 0, 0),
+                &arena,
+                &styles,
+                &physical_layouts,
+                scale_factor,
+            );
+
+            let is_ink = |px: u32, py: u32| pixel_rgb(&buffer, px, py)[0] > 0x20;
+            let mut min_y = None;
+            let mut max_y = None;
+            for py in 0..height {
+                if (0..width).any(|px| is_ink(px, py)) {
+                    min_y.get_or_insert(py);
+                    max_y = Some(py);
+                }
+            }
+            let min_y = min_y.expect("the glyph must paint some ink");
+            let max_y = max_y.expect("the glyph must paint some ink");
+            max_y - min_y + 1
+        }
+
+        let height_at_1x = ink_height(1.0);
+        let height_at_2x = ink_height(2.0);
+        let ratio = f64::from(height_at_2x) / f64::from(height_at_1x);
+        assert!(
+            (1.8..=2.2).contains(&ratio),
+            "a glyph on a 2x-scaled canvas must paint roughly twice as tall as on an unscaled \
+             one (ink height {height_at_1x}px -> {height_at_2x}px, ratio {ratio:.2}), not stay \
+             at the logical size just repositioned"
         );
     }
 }

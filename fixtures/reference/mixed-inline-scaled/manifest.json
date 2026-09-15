@@ -18,8 +18,8 @@
   },
   "classification": {
     "kind": "tolerant",
-    "threshold_percent": 5.0,
+    "threshold_percent": 4.0,
     "geometry_tolerance_px": 1.5,
-    "reason": "Measured live against Chromium: 4.25% pixel diff, 0.0px geometry delta (both real numbers, not guesses) — proof the physical-canvas text wraps at the same logical width layout committed to, not the scaled one (see florui-paint's own scale_factor doc). Higher than the bare-element fixtures' own 3% for the same reason mixed-inline-default's own bold span is: more edge pixels for the two rasterizers to disagree on, now also at 2x resolution."
+    "reason": "Measured live against Chromium: 3.52% pixel diff, 0.0px geometry delta (both real numbers, not guesses) — proof the physical-canvas text both wraps at the same logical width layout committed to and rasterizes its glyphs at the physical size, not the logical one (see florui-paint's own scale_factor doc). Higher than the bare-element fixtures' own 3% for the same reason mixed-inline-default's own bold span is: more edge pixels for the two rasterizers to disagree on, now also at 2x resolution."
   }
 }
