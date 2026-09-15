@@ -440,24 +440,38 @@ pub fn compute_layout(
                     LeafContext::Inline(items) => BaselineSource::Inline(items.clone()),
                 });
 
+                let mut measured_baseline = None;
                 let mut output = compute_leaf_layout(
                     inputs,
                     style,
                     |_, _| 0.0,
                     |known_dimensions, available_space| {
-                        measure_leaf(&mut font, context, known_dimensions, available_space)
+                        measure_leaf(
+                            &mut font,
+                            context,
+                            known_dimensions,
+                            available_space,
+                            &mut measured_baseline,
+                        )
                     },
                 );
 
-                // Set regardless of `run_mode`: `compute_leaf_layout` skips
-                // calling its own measure closure when both dimensions are
-                // already known (an explicit width *and* height), but a
-                // baseline is still meaningful there — real CSS still aligns
-                // an explicitly-sized text box by its text's baseline, not by
-                // treating it as baseline-less. Wrap width is irrelevant here:
-                // see `florui_text::TextMetrics::baseline`'s own doc for why.
-                if let Some(source) = baseline_source {
-                    let baseline = match source {
+                // `measure_leaf` already shaped this text once above and,
+                // via `measured_baseline`, handed back the baseline that
+                // came out of that same shaping — reused here instead of
+                // shaping the identical text a second time just to read
+                // `.baseline` off it. Only falls back to a fresh (unwrapped)
+                // measurement when `compute_leaf_layout` never called the
+                // closure above at all: it skips calling its own measure
+                // closure when both dimensions are already known (an
+                // explicit width *and* height), but a baseline is still
+                // meaningful there — real CSS still aligns an
+                // explicitly-sized text box by its text's baseline, not by
+                // treating it as baseline-less. Wrap width is irrelevant
+                // either way: see `florui_text::TextMetrics::baseline`'s own
+                // doc for why.
+                let baseline = measured_baseline.or_else(|| {
+                    baseline_source.map(|source| match source {
                         BaselineSource::Text(text, font_size, font_weight, font_family) => {
                             font.measure(font_family, &text, font_size, font_weight)
                                 .baseline
@@ -467,7 +481,9 @@ pub fn compute_layout(
                                 items.iter().map(to_inline_content).collect();
                             font.shape_inline(&content, None).baseline
                         }
-                    };
+                    })
+                });
+                if let Some(baseline) = baseline {
                     output.baselines = Baselines::from_first(Some(baseline));
                 }
                 output
@@ -566,6 +582,7 @@ fn measure_leaf(
     context: Option<&mut LeafContext>,
     known_dimensions: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
+    baseline_out: &mut Option<f32>,
 ) -> Size<f32> {
     let Some(context) = context else {
         return Size::ZERO;
@@ -593,6 +610,7 @@ fn measure_leaf(
                     text_context.font_weight,
                 ),
             };
+            *baseline_out = Some(metrics.baseline);
             Size {
                 width: metrics.width,
                 height: metrics.height,
@@ -602,6 +620,7 @@ fn measure_leaf(
             let content: Vec<florui_text::InlineContent<'_>> =
                 items.iter().map(to_inline_content).collect();
             let result = font.shape_inline(&content, wrap_width);
+            *baseline_out = Some(result.baseline);
             Size {
                 width: result.width,
                 height: result.height,
