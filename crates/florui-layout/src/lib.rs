@@ -946,26 +946,38 @@ pub fn hit_test(
     hit
 }
 
-/// An explanation for why a flex item's final width doesn't match what
-/// plain flex-grow/flex-shrink math alone would produce — see
-/// `developer-tools.md`'s causal-diagnostics section. Bounded to one
-/// cause: a `Row`/`RowReverse` flex item held to its own content's
-/// width. Height, grid items, percentage/containing-block causes, and
-/// which stylesheet rule supplied a value are not covered yet.
+/// An explanation for why a flex or grid item's final size doesn't match
+/// what plain flex-grow/flex-shrink math (or, for grid, the track's own
+/// sizing) alone would produce — see `developer-tools.md`'s
+/// causal-diagnostics section. Percentage/containing-block causes and
+/// which stylesheet rule supplied a value are not covered yet: the
+/// former needs percentage-vs-auto to survive cascade resolution (today
+/// both collapse to `None` in [`ComputedStyle`]), the latter needs
+/// source-location/rule-identity tracking through Stylo — both are
+/// materially larger, separate changes, the same gap already flagged for
+/// attachments' own source-location tracking.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SizeCause {
-    /// This item's final width equals its own natural (unwrapped)
-    /// content width — the row was too narrow for every child's natural
-    /// width combined, and this item could not shrink past its own
-    /// content.
-    MinContentClamped { intrinsic_width: f32 },
+    /// A `Row`/`RowReverse` flex item's final width equals its own
+    /// natural (unwrapped) content width — the row was too narrow for
+    /// every child's natural width combined, and this item could not
+    /// shrink past its own content.
+    MinContentClampedWidth { intrinsic_width: f32 },
+    /// The same, on the other axis: a `Column`/`ColumnReverse` flex
+    /// item's final height equals its own natural content height.
+    MinContentClampedHeight { intrinsic_height: f32 },
+    /// A grid item's committed width ended up narrower than its own
+    /// natural content width — the track it landed in didn't grow to fit
+    /// it, so the content will overflow or clip.
+    GridTrackNarrowerThanContent { intrinsic_width: f32 },
 }
 
 /// A diagnostic-only pass over an already-computed `layouts` (from
-/// [`compute_layout`]): explains which flex items were held to their own
-/// content's width. Never called from the render path itself — a caller
-/// (the inspector) opts into the extra measurement cost explicitly, so
-/// not calling this never changes [`compute_layout`]'s own output.
+/// [`compute_layout`]): explains which flex/grid items were held to
+/// their own content's size. Never called from the render path itself —
+/// a caller (the inspector) opts into the extra measurement cost
+/// explicitly, so not calling this never changes [`compute_layout`]'s
+/// own output.
 pub fn compute_size_causes(
     arena: &Arena,
     styles: &HashMap<NodeId, ComputedStyle>,
@@ -975,14 +987,6 @@ pub fn compute_size_causes(
     let mut causes = HashMap::new();
 
     for (&parent, parent_style) in styles {
-        if parent_style.display != StyleDisplay::Flex
-            || !matches!(
-                parent_style.flex_direction,
-                StyleFlexDirection::Row | StyleFlexDirection::RowReverse
-            )
-        {
-            continue;
-        }
         let Some(parent_layout) = layouts.get(&parent) else {
             continue;
         };
@@ -991,41 +995,134 @@ pub fn compute_size_causes(
             continue;
         }
 
-        let natural_widths: Vec<f32> = children
-            .iter()
-            .map(|&child| match styles.get(&child) {
-                Some(style) => natural_width(&mut font, arena, child, style),
-                None => 0.0,
-            })
-            .collect();
-        let gap_total = parent_style.column_gap * (children.len() - 1) as f32;
-        let total_natural: f32 = natural_widths.iter().sum::<f32>() + gap_total;
-        if total_natural <= parent_layout.width + 0.5 {
-            continue;
-        }
-
-        for (&child, &intrinsic) in children.iter().zip(&natural_widths) {
-            let Some(child_style) = styles.get(&child) else {
-                continue;
-            };
-            let Some(child_layout) = layouts.get(&child) else {
-                continue;
-            };
-            if child_style.flex_shrink > 0.0
-                && intrinsic > 0.0
-                && (child_layout.width - intrinsic).abs() < 0.5
-            {
-                causes.insert(
-                    child,
-                    SizeCause::MinContentClamped {
-                        intrinsic_width: intrinsic,
-                    },
+        match parent_style.display {
+            StyleDisplay::Flex if is_row(parent_style.flex_direction) => {
+                flex_main_axis_causes(
+                    &mut font,
+                    arena,
+                    styles,
+                    layouts,
+                    children,
+                    parent_style,
+                    parent_layout,
+                    &mut causes,
+                    true,
                 );
             }
+            StyleDisplay::Flex => {
+                flex_main_axis_causes(
+                    &mut font,
+                    arena,
+                    styles,
+                    layouts,
+                    children,
+                    parent_style,
+                    parent_layout,
+                    &mut causes,
+                    false,
+                );
+            }
+            StyleDisplay::Grid => {
+                for &child in children {
+                    let (Some(child_style), Some(child_layout)) =
+                        (styles.get(&child), layouts.get(&child))
+                    else {
+                        continue;
+                    };
+                    let intrinsic = natural_width(&mut font, arena, child, child_style);
+                    if intrinsic > 0.0 && child_layout.width < intrinsic - 0.5 {
+                        causes.insert(
+                            child,
+                            SizeCause::GridTrackNarrowerThanContent {
+                                intrinsic_width: intrinsic,
+                            },
+                        );
+                    }
+                }
+            }
+            StyleDisplay::Block | StyleDisplay::Inline | StyleDisplay::InlineBlock => {}
         }
     }
 
     causes
+}
+
+fn is_row(direction: StyleFlexDirection) -> bool {
+    matches!(
+        direction,
+        StyleFlexDirection::Row | StyleFlexDirection::RowReverse
+    )
+}
+
+/// Shared by the `Row`/`RowReverse` (width) and `Column`/`ColumnReverse`
+/// (height) cases: an item pinned to its own natural main-axis size
+/// because the container, combined with every sibling's own natural
+/// size, is over-constrained on that axis.
+#[allow(clippy::too_many_arguments)]
+fn flex_main_axis_causes(
+    font: &mut florui_text::Font,
+    arena: &Arena,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    layouts: &HashMap<NodeId, BoxLayout>,
+    children: &[NodeId],
+    parent_style: &ComputedStyle,
+    parent_layout: &BoxLayout,
+    causes: &mut HashMap<NodeId, SizeCause>,
+    is_row: bool,
+) {
+    let natural_sizes: Vec<f32> = children
+        .iter()
+        .map(|&child| match styles.get(&child) {
+            Some(style) if is_row => natural_width(font, arena, child, style),
+            Some(style) => {
+                let cross_axis_width = layouts.get(&child).map_or(0.0, |l| l.width);
+                natural_height(font, arena, child, style, cross_axis_width)
+            }
+            None => 0.0,
+        })
+        .collect();
+    let gap = if is_row {
+        parent_style.column_gap
+    } else {
+        parent_style.row_gap
+    };
+    let gap_total = gap * (children.len() - 1) as f32;
+    let total_natural: f32 = natural_sizes.iter().sum::<f32>() + gap_total;
+    let parent_main = if is_row {
+        parent_layout.width
+    } else {
+        parent_layout.height
+    };
+    if total_natural <= parent_main + 0.5 {
+        return;
+    }
+
+    for (&child, &intrinsic) in children.iter().zip(&natural_sizes) {
+        let (Some(child_style), Some(child_layout)) = (styles.get(&child), layouts.get(&child))
+        else {
+            continue;
+        };
+        let child_main = if is_row {
+            child_layout.width
+        } else {
+            child_layout.height
+        };
+        if child_style.flex_shrink > 0.0 && intrinsic > 0.0 && (child_main - intrinsic).abs() < 0.5
+        {
+            causes.insert(
+                child,
+                if is_row {
+                    SizeCause::MinContentClampedWidth {
+                        intrinsic_width: intrinsic,
+                    }
+                } else {
+                    SizeCause::MinContentClampedHeight {
+                        intrinsic_height: intrinsic,
+                    }
+                },
+            );
+        }
+    }
 }
 
 /// This node's own natural (unwrapped) width: its explicit `flex-basis`
@@ -1051,6 +1148,45 @@ fn natural_width(
             return font
                 .measure(family, text, style.font_size, style.font_weight)
                 .width;
+        }
+    }
+    0.0
+}
+
+/// This node's own natural (unwrapped) height, the same reasoning as
+/// [`natural_width`] but for a `Column`/`ColumnReverse` flex container,
+/// where `flex-basis` sets the main-axis (height) size instead. Text's
+/// own minimum height depends on where it wraps, which depends on the
+/// width it's actually been given — unlike an unwrapped width, there is
+/// no single width-independent "natural" height, so `cross_axis_width`
+/// (the item's own already-committed width, the cross axis in a column
+/// container) is required to wrap it the same way real layout did.
+fn natural_height(
+    font: &mut florui_text::Font,
+    arena: &Arena,
+    node: NodeId,
+    style: &ComputedStyle,
+    cross_axis_width: f32,
+) -> f32 {
+    if let Some(basis) = style.flex_basis {
+        return basis;
+    }
+    if let Some(height) = style.height {
+        return height;
+    }
+    if arena.children(node).is_empty() {
+        let text = arena.text_content(node);
+        if !text.is_empty() {
+            let family = to_text_font_family(style.font_family);
+            return font
+                .measure_wrapped(
+                    family,
+                    text,
+                    style.font_size,
+                    style.font_weight,
+                    cross_axis_width,
+                )
+                .height;
         }
     }
     0.0
@@ -2063,7 +2199,7 @@ mod tests {
         let causes = compute_size_causes(&arena, &styles, &layouts);
 
         match causes.get(&text) {
-            Some(SizeCause::MinContentClamped { intrinsic_width }) => {
+            Some(SizeCause::MinContentClampedWidth { intrinsic_width }) => {
                 assert_close(*intrinsic_width, layouts[&text].width);
                 assert!(
                     *intrinsic_width > 20.0,
@@ -2071,7 +2207,7 @@ mod tests {
                      to be a real clamp, not a coincidence"
                 );
             }
-            other => panic!("expected a MinContentClamped cause, got {other:?}"),
+            other => panic!("expected a MinContentClampedWidth cause, got {other:?}"),
         }
     }
 
@@ -2096,6 +2232,120 @@ mod tests {
         assert!(
             !causes.contains_key(&text),
             "a row with plenty of room never needed to shrink anything"
+        );
+    }
+
+    #[test]
+    fn a_column_flex_item_with_room_to_spare_reports_no_size_cause() {
+        let tree: Element = view! {
+            <div class="col">
+                <span class="text">{"short"}</span>
+            </div>
+        };
+        let (arena, styles, layouts) = layout_with_styles(
+            &tree,
+            "
+            .col { display: flex; flex-direction: column; width: 100px; height: 500px; }
+            .text { }
+            ",
+        );
+        let col = arena.roots()[0];
+        let text = arena.children(col)[0];
+        let causes = compute_size_causes(&arena, &styles, &layouts);
+
+        assert!(
+            !causes.contains_key(&text),
+            "a column with plenty of room never needed to shrink anything"
+        );
+    }
+
+    #[test]
+    fn a_column_flex_item_too_tall_for_its_own_wrapped_text_reports_a_min_content_cause() {
+        let tree: Element = view! {
+            <div class="col">
+                <span class="text">{"one two three four five six seven eight nine ten"}</span>
+            </div>
+        };
+        let (arena, styles, layouts) = layout_with_styles(
+            &tree,
+            "
+            .col { display: flex; flex-direction: column; width: 100px; height: 5px; }
+            .text { }
+            ",
+        );
+        let col = arena.roots()[0];
+        let text = arena.children(col)[0];
+        let causes = compute_size_causes(&arena, &styles, &layouts);
+
+        match causes.get(&text) {
+            Some(SizeCause::MinContentClampedHeight { intrinsic_height }) => {
+                assert_close(*intrinsic_height, layouts[&text].height);
+                assert!(
+                    *intrinsic_height > 5.0,
+                    "the text's own height at its committed 100px width must be taller than \
+                     the 5px column for this to be a real clamp, not a coincidence"
+                );
+            }
+            other => panic!("expected a MinContentClampedHeight cause, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_grid_item_too_wide_for_its_own_text_reports_a_track_cause() {
+        let tree: Element = view! {
+            <div class="grid">
+                <span class="text">{"a rather long run of unbreakable text"}</span>
+            </div>
+        };
+        let (arena, styles, layouts) = layout_with_styles(
+            &tree,
+            "
+            .grid { display: grid; grid-template-columns: 20px; height: 20px; }
+            .text { }
+            ",
+        );
+        let grid = arena.roots()[0];
+        let text = arena.children(grid)[0];
+        let causes = compute_size_causes(&arena, &styles, &layouts);
+
+        match causes.get(&text) {
+            Some(SizeCause::GridTrackNarrowerThanContent { intrinsic_width }) => {
+                assert!(
+                    *intrinsic_width > 20.0,
+                    "the text's own natural width must be wider than the 20px track for this \
+                     to be a real narrowing, not a coincidence"
+                );
+                assert!(
+                    layouts[&text].width < *intrinsic_width,
+                    "the committed width must actually be narrower than the natural content \
+                     width for this to be a real narrowing"
+                );
+            }
+            other => panic!("expected a GridTrackNarrowerThanContent cause, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_grid_item_with_room_to_spare_reports_no_size_cause() {
+        let tree: Element = view! {
+            <div class="grid">
+                <span class="text">{"short"}</span>
+            </div>
+        };
+        let (arena, styles, layouts) = layout_with_styles(
+            &tree,
+            "
+            .grid { display: grid; grid-template-columns: 500px; height: 20px; }
+            .text { }
+            ",
+        );
+        let grid = arena.roots()[0];
+        let text = arena.children(grid)[0];
+        let causes = compute_size_causes(&arena, &styles, &layouts);
+
+        assert!(
+            !causes.contains_key(&text),
+            "a track with plenty of room never narrowed its item below its own content"
         );
     }
 
