@@ -1338,6 +1338,7 @@ dependencies = [
 name = "florui-paint"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "florui",
  "florui-layout",
  "florui-style",
@@ -1381,6 +1382,7 @@ version = "0.1.0"
 dependencies = [
  "app_units",
  "atomic_refcell",
+ "criterion",
  "euclid",
  "florui",
  "selectors",
