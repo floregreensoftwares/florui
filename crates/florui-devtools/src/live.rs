@@ -297,7 +297,7 @@ impl LiveHost {
     }
 
     fn redraw(&mut self) {
-        let (Some(window), Some(runtime)) = (self.window.clone(), &self.runtime) else {
+        let (Some(window), Some(runtime)) = (self.window.clone(), self.runtime.as_mut()) else {
             return;
         };
         let size = window.inner_size();
@@ -307,8 +307,9 @@ impl LiveHost {
             return;
         };
 
-        let (arena, styles, layouts) = runtime.geometry();
+        let (arena, styles, layouts, font) = runtime.geometry_and_font_mut();
         let canvas = florui_paint::paint_to_buffer(
+            font,
             size.width,
             size.height,
             self.canvas_color,

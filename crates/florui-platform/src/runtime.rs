@@ -29,6 +29,14 @@ pub struct UiRuntime {
     arena: Arena,
     styles: HashMap<NodeId, ComputedStyle>,
     layouts: HashMap<NodeId, BoxLayout>,
+    /// The one long-lived font this runtime's own [`Self::update`] lays out
+    /// with — loading one builds a whole Parley `FontContext` (and, with
+    /// fontique's default `system_fonts: true`, enumerates the system's
+    /// installed fonts), too expensive to redo every render. A host that
+    /// also paints borrows it back out via [`Self::geometry_and_font_mut`]
+    /// so painting shapes and rasterizes the identical glyphs this runtime
+    /// already measured, rather than a second, separately-loaded instance.
+    font: florui_text::Font,
     /// Reachable by [`florui_reactive::use_resource`] via context, provided
     /// fresh every render the same way any other context value is. Advanced
     /// once per [`Self::update`] so a fetch that's already resolvable (or
@@ -76,6 +84,7 @@ impl UiRuntime {
             arena: Arena::build(&Element::Fragment(Vec::new())),
             styles: HashMap::new(),
             layouts: HashMap::new(),
+            font: florui_text::Font::load_embedded(),
             executor: Rc::new(LocalExecutor::new()),
             size_observers: Rc::new(SizeObserverRegistry::new()),
         };
@@ -141,8 +150,9 @@ impl UiRuntime {
         self.executor.run_until_stalled();
         self.arena = Arena::build(&tree);
         self.styles = florui_style::compute(&self.arena, &self.rules, &self.interaction);
-        self.layouts = florui_layout::compute_layout(&self.arena, &self.styles, viewport)
-            .expect("this tree's explicit sizes never produce a layout failure");
+        self.layouts =
+            florui_layout::compute_layout(&mut self.font, &self.arena, &self.styles, viewport)
+                .expect("this tree's explicit sizes never produce a layout failure");
         // After layout, not before: a committed-size observer must see
         // this render's own real geometry, not the previous one's.
         self.size_observers.notify(&self.arena, &self.layouts);
@@ -157,6 +167,22 @@ impl UiRuntime {
         &HashMap<NodeId, BoxLayout>,
     ) {
         (&self.arena, &self.styles, &self.layouts)
+    }
+
+    /// Same geometry as [`Self::geometry`], plus this runtime's own
+    /// long-lived font — for a host that paints the geometry it just read,
+    /// via [`florui_paint::paint_to_buffer`], which needs a `&mut Font` of
+    /// its own. Passing this one back in (rather than a separately loaded
+    /// instance) keeps painting and layout shaping the identical glyphs.
+    pub fn geometry_and_font_mut(
+        &mut self,
+    ) -> (
+        &Arena,
+        &HashMap<NodeId, ComputedStyle>,
+        &HashMap<NodeId, BoxLayout>,
+        &mut florui_text::Font,
+    ) {
+        (&self.arena, &self.styles, &self.layouts, &mut self.font)
     }
 
     /// The topmost node under `(x, y)`, against the last computed

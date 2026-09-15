@@ -24,6 +24,7 @@ florui-reactive = { path = "../../crates/florui-reactive" }
 
 [dev-dependencies]
 florui-style = { path = "../../crates/florui-style" }
+florui-text = { path = "../../crates/florui-text" }
 florui-layout = { path = "../../crates/florui-layout" }
 florui-paint = { path = "../../crates/florui-paint" }
 florui-platform = { path = "../../crates/florui-platform" }

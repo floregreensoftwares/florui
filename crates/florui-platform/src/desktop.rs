@@ -289,7 +289,11 @@ impl DesktopHost {
     }
 
     fn redraw(&mut self) {
-        let (Some(window), Some(runtime)) = (self.window.clone(), &self.runtime) else {
+        // Read before borrowing `self.runtime` mutably below — `viewport_scale`
+        // needs `&self` as a whole (it reads `self.window`), which a live
+        // `&mut self.runtime` borrow would conflict with.
+        let scale_factor = self.viewport_scale().scale_factor;
+        let (Some(window), Some(runtime)) = (self.window.clone(), self.runtime.as_mut()) else {
             return;
         };
         let size = window.inner_size();
@@ -299,9 +303,10 @@ impl DesktopHost {
             return;
         };
 
-        let (arena, styles, layouts) = runtime.geometry();
-        let physical_layouts = scale_layouts(layouts, self.viewport_scale().scale_factor as f32);
+        let (arena, styles, layouts, font) = runtime.geometry_and_font_mut();
+        let physical_layouts = scale_layouts(layouts, scale_factor as f32);
         let canvas = florui_paint::paint_to_buffer(
+            font,
             size.width,
             size.height,
             self.canvas_color,

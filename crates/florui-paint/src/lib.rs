@@ -61,7 +61,9 @@ impl std::error::Error for PaintError {
 ///
 /// Panics if `width` or `height` is zero: there is no meaningful canvas to
 /// paint into.
+#[allow(clippy::too_many_arguments)]
 pub fn paint_to_png(
+    font: &mut Font,
     path: &Path,
     width: u32,
     height: u32,
@@ -70,7 +72,7 @@ pub fn paint_to_png(
     styles: &HashMap<NodeId, ComputedStyle>,
     layouts: &HashMap<NodeId, BoxLayout>,
 ) -> Result<(), PaintError> {
-    paint_to_buffer(width, height, canvas, arena, styles, layouts)
+    paint_to_buffer(font, width, height, canvas, arena, styles, layouts)
         .save_png(path)
         .map_err(|source| PaintError {
             path: path.to_owned(),
@@ -79,12 +81,16 @@ pub fn paint_to_png(
 }
 
 /// Same painting as [`paint_to_png`], returning the pixel buffer directly
-/// instead of writing it to disk.
+/// instead of writing it to disk. `font` is the caller's own long-lived
+/// instance — see [`florui_layout::compute_layout`]'s own doc for why, and
+/// pass it the exact same instance that computed `layouts`, since this
+/// paints the identical glyphs that font already shaped.
 ///
 /// # Panics
 ///
 /// Panics if `width` or `height` is zero.
 pub fn paint_to_buffer(
+    font: &mut Font,
     width: u32,
     height: u32,
     canvas: Rgba,
@@ -96,13 +102,9 @@ pub fn paint_to_buffer(
         Pixmap::new(width, height).expect("paint_to_buffer requires a nonzero-sized canvas");
     buffer.fill(to_tiny_skia_color(canvas));
 
-    // One embedded font for the whole tree, and its scratch shaping state
-    // reused across every text-bearing node — matching florui_layout's own
-    // per-pass `Font::load_embedded` convention.
-    let mut font = Font::load_embedded();
     let mut stack: Vec<NodeId> = arena.roots().iter().rev().copied().collect();
     while let Some(node) = stack.pop() {
-        paint_node(&mut buffer, arena, styles, layouts, &mut font, node);
+        paint_node(&mut buffer, arena, styles, layouts, font, node);
         stack.extend(arena.children(node).iter().rev());
     }
     buffer
@@ -451,9 +453,19 @@ mod tests {
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
         let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
-        let layouts = florui_layout::compute_layout(&arena, &styles, Size::MAX_CONTENT).unwrap();
+        let mut font = Font::load_embedded();
+        let layouts =
+            florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
 
-        let buffer = paint_to_buffer(100, 60, Rgba::opaque(0, 0, 0), &arena, &styles, &layouts);
+        let buffer = paint_to_buffer(
+            &mut font,
+            100,
+            60,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+        );
 
         // Inside the card, outside the button: the card's own color.
         assert_eq!(pixel_rgb(&buffer, 5, 5), [0x1e, 0x1e, 0x22]);
@@ -474,12 +486,15 @@ mod tests {
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
         let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
-        let layouts = florui_layout::compute_layout(&arena, &styles, Size::MAX_CONTENT).unwrap();
+        let mut font = Font::load_embedded();
+        let layouts =
+            florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
 
         let node = arena.roots()[0];
         let width = layouts[&node].width.ceil() as u32;
         let height = layouts[&node].height.ceil() as u32;
         let buffer = paint_to_buffer(
+            &mut font,
             width,
             height,
             Rgba::opaque(0, 0, 0),
@@ -508,9 +523,19 @@ mod tests {
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
         let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
-        let layouts = florui_layout::compute_layout(&arena, &styles, Size::MAX_CONTENT).unwrap();
+        let mut font = Font::load_embedded();
+        let layouts =
+            florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
 
-        let buffer = paint_to_buffer(20, 20, Rgba::opaque(0, 0, 0), &arena, &styles, &layouts);
+        let buffer = paint_to_buffer(
+            &mut font,
+            20,
+            20,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+        );
         // No border-style declared means border-style: none, real CSS's
         // own initial value — every pixel is the flat background color,
         // including the strip a rendered border would have occupied.
@@ -528,13 +553,16 @@ mod tests {
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
         let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
-        let layouts = florui_layout::compute_layout(&arena, &styles, Size::MAX_CONTENT).unwrap();
+        let mut font = Font::load_embedded();
+        let layouts =
+            florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
 
         let dir = std::env::temp_dir().join(format!("florui-paint-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("capture.png");
 
         paint_to_png(
+            &mut font,
             &path,
             20,
             20,
@@ -595,7 +623,16 @@ mod tests {
             },
         );
 
-        let buffer = paint_to_buffer(20, 20, Rgba::opaque(0, 0, 0), &arena, &styles, &layouts);
+        let mut font = Font::load_embedded();
+        let buffer = paint_to_buffer(
+            &mut font,
+            20,
+            20,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+        );
         assert_eq!(
             pixel_rgb(&buffer, 10, 10),
             [0x00, 0xff, 0x00],
@@ -614,9 +651,19 @@ mod tests {
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
         let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
-        let layouts = florui_layout::compute_layout(&arena, &styles, Size::MAX_CONTENT).unwrap();
+        let mut font = Font::load_embedded();
+        let layouts =
+            florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
 
-        let buffer = paint_to_buffer(20, 20, Rgba::opaque(0, 0, 0), &arena, &styles, &layouts);
+        let buffer = paint_to_buffer(
+            &mut font,
+            20,
+            20,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+        );
         assert_eq!(pixel_rgb(&buffer, 10, 10), [0x1e, 0x1e, 0x22]);
     }
 
@@ -627,12 +674,15 @@ mod tests {
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
         let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
-        let layouts = florui_layout::compute_layout(&arena, &styles, Size::MAX_CONTENT).unwrap();
+        let mut font = Font::load_embedded();
+        let layouts =
+            florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
 
         let node = arena.roots()[0];
         let width = layouts[&node].width.ceil() as u32;
         let height = layouts[&node].height.ceil() as u32;
         let buffer = paint_to_buffer(
+            &mut font,
             width,
             height,
             Rgba::opaque(0, 0, 0),
@@ -670,13 +720,16 @@ mod tests {
             let arena = Arena::build(&tree);
             let rules = florui_style::parse_stylesheet(&css).unwrap();
             let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+            let mut font = Font::load_embedded();
             let layouts =
-                florui_layout::compute_layout(&arena, &styles, Size::MAX_CONTENT).unwrap();
+                florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT)
+                    .unwrap();
 
             let node = arena.roots()[0];
             let width = layouts[&node].width.ceil() as u32;
             let height = layouts[&node].height.ceil() as u32;
             let buffer = paint_to_buffer(
+                &mut font,
                 width,
                 height,
                 Rgba::opaque(0, 0, 0),
@@ -725,12 +778,15 @@ mod tests {
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
         let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
-        let layouts = florui_layout::compute_layout(&arena, &styles, Size::MAX_CONTENT).unwrap();
+        let mut font = Font::load_embedded();
+        let layouts =
+            florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
 
         let node = arena.roots()[0];
         let width = layouts[&node].width.ceil() as u32;
         let height = layouts[&node].height.ceil() as u32;
         let buffer = paint_to_buffer(
+            &mut font,
             width,
             height,
             Rgba::opaque(0, 0, 0),
@@ -775,9 +831,19 @@ mod tests {
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
         let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
-        let layouts = florui_layout::compute_layout(&arena, &styles, Size::MAX_CONTENT).unwrap();
+        let mut font = Font::load_embedded();
+        let layouts =
+            florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
 
-        let buffer = paint_to_buffer(20, 20, Rgba::opaque(0, 0, 0), &arena, &styles, &layouts);
+        let buffer = paint_to_buffer(
+            &mut font,
+            20,
+            20,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+        );
         // No text content, so every pixel is exactly the flat background —
         // no stray glyph ink from a leaf with nothing to shape.
         for py in 0..20 {
@@ -789,10 +855,7 @@ mod tests {
 
     /// `paint_node` used to recurse once per tree level; iterative now.
     /// 1,200, matching florui-layout's own equivalent test: past the
-    /// original 1,000-deep crash report, but not far past it — Stylo's
-    /// own cascade is quadratic-ish in depth for a single-chain tree, so
-    /// this test's own runtime bounds the depth chosen here, not a stack
-    /// limit (`compute_layout`'s `stacker`-based fix covers that part).
+    /// original 1,000-deep crash report, but not far past it.
     #[test]
     fn paint_to_buffer_survives_a_tree_far_deeper_than_the_old_recursion_limit() {
         let depth = 1_200;
@@ -805,9 +868,19 @@ mod tests {
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
         let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
-        let layouts = florui_layout::compute_layout(&arena, &styles, Size::MAX_CONTENT).unwrap();
+        let mut font = Font::load_embedded();
+        let layouts =
+            florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
 
-        let buffer = paint_to_buffer(5, 5, Rgba::opaque(0, 0, 0), &arena, &styles, &layouts);
+        let buffer = paint_to_buffer(
+            &mut font,
+            5,
+            5,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+        );
         assert_eq!(pixel_rgb(&buffer, 0, 0), [0xff, 0x00, 0x00]);
     }
 }

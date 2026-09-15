@@ -25,11 +25,13 @@ fn main() {
 
     let arena = Arena::build(&tree);
     let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
-    let layouts = florui_layout::compute_layout(&arena, &styles, Size::MAX_CONTENT)
+    let mut font = florui_text::Font::load_embedded();
+    let layouts = florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT)
         .expect("layout should not fail for explicitly sized nodes");
 
     let path = std::env::temp_dir().join("florui-example-app-card.png");
     florui_paint::paint_to_png(
+        &mut font,
         &path,
         400,
         260,

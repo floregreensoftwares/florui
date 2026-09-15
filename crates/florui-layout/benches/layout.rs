@@ -84,8 +84,9 @@ fn bench_block_tree(c: &mut Criterion) {
     for &n in &[100usize, 1000] {
         let tree = wide_block_tree(n);
         let (arena, styles) = arena_and_styles(&tree, ".item { width: 10px; height: 10px; }");
+        let mut font = florui_text::Font::load_embedded();
         group.bench_function(format!("{n}_children"), |b| {
-            b.iter(|| compute_layout(&arena, &styles, Size::MAX_CONTENT).unwrap());
+            b.iter(|| compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap());
         });
     }
     group.finish();
@@ -104,8 +105,9 @@ fn bench_deep_tree(c: &mut Criterion) {
     for &depth in &[100usize, 300] {
         let tree = deep_tree(depth);
         let (arena, styles) = arena_and_styles(&tree, ".leaf { width: 10px; height: 10px; }");
+        let mut font = florui_text::Font::load_embedded();
         group.bench_function(format!("{depth}_deep"), |b| {
-            b.iter(|| compute_layout(&arena, &styles, Size::MAX_CONTENT).unwrap());
+            b.iter(|| compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap());
         });
     }
     group.finish();
@@ -120,8 +122,9 @@ fn bench_flex_row(c: &mut Criterion) {
             &tree,
             ".row { display: flex; } .item { width: 10px; height: 10px; flex-shrink: 0; }",
         );
+        let mut font = florui_text::Font::load_embedded();
         group.bench_function(format!("{n}_children"), |b| {
-            b.iter(|| compute_layout(&arena, &styles, Size::MAX_CONTENT).unwrap());
+            b.iter(|| compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap());
         });
     }
     group.finish();
@@ -137,8 +140,9 @@ fn bench_grid(c: &mut Criterion) {
     let side = 10;
     let tree = grid(side);
     let (arena, styles) = arena_and_styles(&tree, &grid_css(side));
+    let mut font = florui_text::Font::load_embedded();
     group.bench_function("10x10_cells", |b| {
-        b.iter(|| compute_layout(&arena, &styles, Size::MAX_CONTENT).unwrap());
+        b.iter(|| compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap());
     });
     group.finish();
 }
@@ -150,8 +154,9 @@ fn bench_intrinsic_text(c: &mut Criterion) {
         let tree = text_leaves(n);
         let (arena, styles) =
             arena_and_styles(&tree, ".col { display: flex; flex-direction: column; }");
+        let mut font = florui_text::Font::load_embedded();
         group.bench_function(format!("{n}_leaves"), |b| {
-            b.iter(|| compute_layout(&arena, &styles, Size::MAX_CONTENT).unwrap());
+            b.iter(|| compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap());
         });
     }
     group.finish();
@@ -174,8 +179,9 @@ fn bench_variable_widths(c: &mut Criterion) {
             width: AvailableSpace::Definite(width),
             height: AvailableSpace::MaxContent,
         };
+        let mut font = florui_text::Font::load_embedded();
         group.bench_function(format!("{width}px"), |b| {
-            b.iter(|| compute_layout(&arena, &styles, available).unwrap());
+            b.iter(|| compute_layout(&mut font, &arena, &styles, available).unwrap());
         });
     }
     group.finish();

@@ -21,6 +21,7 @@ florui-layout = { path = "../florui-layout" }
 florui-paint = { path = "../florui-paint" }
 florui-reactive = { path = "../florui-reactive" }
 florui-style = { path = "../florui-style" }
+florui-text = { path = "../florui-text" }
 notify = { version = "8.2.0", optional = true }
 softbuffer = { version = "0.4.8", optional = true }
 taffy = "0.14"
