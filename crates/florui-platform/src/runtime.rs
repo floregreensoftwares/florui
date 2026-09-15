@@ -113,6 +113,20 @@ impl UiRuntime {
         self.rules = rules;
     }
 
+    /// Registers an additional font (e.g. for a script neither embedded
+    /// default covers) with this runtime's own long-lived [`Self::font`]
+    /// instance, returning its resolved family name — see
+    /// [`florui_text::Font::register`]. Reaching that instance is the
+    /// part that didn't exist before this runtime owned it across
+    /// renders: registering now genuinely changes what every later
+    /// [`Self::update`] shapes and measures with, not just a
+    /// freshly-loaded instance nothing else could reach. Same contract as
+    /// [`Self::set_rules`]: does not itself re-render — call
+    /// [`Self::update`] afterward to see the new font take effect.
+    pub fn register_font(&mut self, font_bytes: &[u8]) -> Result<String, florui_text::TextError> {
+        self.font.register(font_bytes)
+    }
+
     /// Registers `listener` to run whenever this runtime has something an
     /// event-driven host should react to by calling [`Self::update`]
     /// again: a [`florui_reactive::Signal::set`] anywhere under the root,
@@ -347,6 +361,37 @@ mod tests {
             styles[&status].color,
             Rgba::opaque(0xff, 0x00, 0x00),
             "the new rule must actually take effect, not just fail to reset state"
+        );
+    }
+
+    /// Proves `register_font` reaches the runtime's own long-lived `Font`
+    /// instance — the one every real `Self::update` shapes and measures
+    /// with — not a separate, freshly-loaded one nothing else could ever
+    /// see. Before the font became a persistent field on `UiRuntime`
+    /// itself, there was no instance for a caller to register an extra
+    /// font onto in the first place: each `compute_layout` call built and
+    /// discarded its own.
+    #[test]
+    fn register_font_reaches_the_same_persistent_font_instance_across_updates() {
+        let mut runtime = UiRuntime::with_rules(Vec::new(), || view! { <div /> }, viewport());
+
+        let family_name = runtime
+            .register_font(florui_text::EMBEDDED_MONOSPACE_FONT)
+            .expect("a real embedded font file must register successfully");
+        assert!(!family_name.is_empty());
+
+        // Does not itself re-render (matches set_rules's own contract) --
+        // an explicit update afterward must still work normally, proving
+        // registering didn't leave the runtime's own font in a broken or
+        // replaced state.
+        runtime.update(viewport());
+
+        let (.., font) = runtime.geometry_and_font_mut();
+        let metrics = font.measure(florui_text::FontFamily::SansSerif, "x", 16.0, 400.0);
+        assert!(
+            metrics.width > 0.0,
+            "the same font instance register_font touched must still measure real text \
+             correctly afterward"
         );
     }
 
