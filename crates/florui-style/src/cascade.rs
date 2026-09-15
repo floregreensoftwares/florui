@@ -160,6 +160,32 @@ pub struct BorderSide {
     pub color: Rgba,
 }
 
+/// One layer of `box-shadow` — real CSS's `<length>{2,4}` offsets/blur/
+/// spread plus `inset`, all already resolved to concrete pixels (no
+/// percentages in this property's own grammar, unlike `margin`/`padding`,
+/// so unlike [`ComputedStyle::width`] this never needs an `Option`).
+/// `blur_radius` parses and cascades like every other field here, but see
+/// `florui-paint`'s own module doc for why it isn't painted: this crate's
+/// rasterizer (tiny-skia) has no blur/mask-filter primitive, the same
+/// "supported syntax, simplified rendering" tradeoff [`BorderSide`]'s own
+/// doc already documents for unrendered border styles.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoxShadow {
+    pub offset_x: f32,
+    pub offset_y: f32,
+    pub blur_radius: f32,
+    /// Unlike [`Self::blur_radius`], this one *is* painted — a shadow's
+    /// own shape grows or shrinks by this amount on every side before the
+    /// offset is applied, real CSS's own `spread-radius` semantics.
+    pub spread_radius: f32,
+    pub color: Rgba,
+    /// `inset` — an outer (drop) shadow paints outside the border box; an
+    /// inset shadow paints inside the padding box instead. See
+    /// `florui-paint`'s own doc for the painted shape and painting order
+    /// each one gets relative to background/border.
+    pub inset: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComputedStyle {
     pub background_color: Rgba,
@@ -237,6 +263,12 @@ pub struct ComputedStyle {
     pub grid_column: (GridPlacement, GridPlacement),
     /// `grid-row-start`/`grid-row-end`.
     pub grid_row: (GridPlacement, GridPlacement),
+    /// `box-shadow` — zero or more comma-separated layers, in the order
+    /// authored. Real CSS paints the *first*-listed layer on top of the
+    /// rest; see [`BoxShadow`]'s own doc for what's painted vs. carried
+    /// through unrendered, and `florui-paint`'s own doc for the ordering
+    /// this crate paints them in.
+    pub box_shadow: Vec<BoxShadow>,
 }
 
 /// Resolves every node in `arena` against `rules` and `state` — real
@@ -906,5 +938,91 @@ mod tests {
             computed[&node].grid_row,
             (GridPlacement::Auto, GridPlacement::Auto)
         );
+    }
+
+    #[test]
+    fn box_shadow_resolves_offsets_blur_spread_and_color_from_real_css() {
+        let tree: Element = view! { <div class="card" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".card { box-shadow: 2px 4px 6px 1px #ff0000; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        let shadows = &computed[&node].box_shadow;
+        assert_eq!(shadows.len(), 1);
+        assert_eq!(shadows[0].offset_x, 2.0);
+        assert_eq!(shadows[0].offset_y, 4.0);
+        assert_eq!(shadows[0].blur_radius, 6.0);
+        assert_eq!(shadows[0].spread_radius, 1.0);
+        assert_eq!(shadows[0].color, Rgba::opaque(0xff, 0x00, 0x00));
+        assert!(!shadows[0].inset);
+    }
+
+    #[test]
+    fn box_shadow_defaults_to_an_empty_list_with_zero_author_css() {
+        let tree: Element = view! { <div /> };
+        let (arena, computed) = styles(&tree, "", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert!(computed[&node].box_shadow.is_empty());
+    }
+
+    #[test]
+    fn box_shadow_inset_keyword_resolves_to_true() {
+        let tree: Element = view! { <div class="well" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".well { box-shadow: inset 0px 2px 0px 0px #000000; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert!(computed[&node].box_shadow[0].inset);
+    }
+
+    #[test]
+    fn box_shadow_resolves_multiple_comma_separated_layers_in_source_order() {
+        let tree: Element = view! { <div class="card" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".card { box-shadow: 1px 1px 0px 0px #ff0000, 2px 2px 0px 0px #00ff00; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        let shadows = &computed[&node].box_shadow;
+        assert_eq!(shadows.len(), 2);
+        assert_eq!(shadows[0].color, Rgba::opaque(0xff, 0x00, 0x00));
+        assert_eq!(shadows[1].color, Rgba::opaque(0x00, 0xff, 0x00));
+    }
+
+    #[test]
+    fn box_shadow_color_of_currentcolor_resolves_against_this_elements_own_color() {
+        let tree: Element = view! { <div class="card" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".card { color: #123456; box-shadow: 0px 0px 0px 0px; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(
+            computed[&node].box_shadow[0].color,
+            Rgba::opaque(0x12, 0x34, 0x56),
+            "no explicit shadow color declared means currentcolor, the real CSS initial value"
+        );
+    }
+
+    #[test]
+    fn box_shadow_does_not_inherit() {
+        let tree: Element = view! {
+            <div class="card">
+                <span>{"x"}</span>
+            </div>
+        };
+        let (arena, computed) = styles(
+            &tree,
+            ".card { box-shadow: 2px 2px 2px 0px #ff0000; }",
+            &InteractionState::new(),
+        );
+        let span = arena.find(|a, id| a.tag(id) == "span").unwrap();
+        assert!(computed[&span].box_shadow.is_empty());
     }
 }
