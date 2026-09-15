@@ -39,7 +39,7 @@ use style::servo::media_queries::FontMetricsProvider;
 use style::shared_lock::{Locked, SharedRwLock, StylesheetGuards};
 use style::stylesheets::DocumentStyleSheet;
 use style::stylist::{CascadeData, RuleInclusion, Stylist};
-use style::traversal::resolve_style;
+use style::traversal::{UndisplayedStyleCache, resolve_style};
 use style::traversal_flags::TraversalFlags;
 use style::values::AtomIdent;
 use style::values::computed::font::GenericFontFamily;
@@ -90,6 +90,12 @@ struct NodeSlot {
 struct StyloTree {
     slots: Vec<NodeSlot>,
     index_of: HashMap<NodeId, usize>,
+    /// Pre-order (parent before children), the same order [`Self::slots`]
+    /// was built in — [`compute_in_layout_state`] resolves in this order
+    /// rather than `index_of`'s arbitrary `HashMap` iteration order, so an
+    /// ancestor is always cached before any of its descendants ask
+    /// [`resolve_style`] to resolve it.
+    order: Vec<NodeId>,
 }
 
 impl StyloTree {
@@ -154,7 +160,14 @@ impl StyloTree {
         // for a bare multi-root Fragment, which resolves each of its own
         // roots as if it were independently the document.
         let primary_root = order[0];
-        (Self { slots, index_of }, primary_root)
+        (
+            Self {
+                slots,
+                index_of,
+                order,
+            },
+            primary_root,
+        )
     }
 
     fn collect_order(arena: &Arena, id: NodeId, order: &mut Vec<NodeId>) {
@@ -805,14 +818,29 @@ fn compute_in_layout_state(
         registered_speculative_painters: &NoPainters,
     };
 
-    for &id in tree.index_of.keys() {
+    // `resolve_style` is Stylo's point-query API: each call walks up to
+    // the nearest cached ancestor, recomputes down to the target, then
+    // discards the ancestors' styles again — called once per node with no
+    // cache, a depth-`d` chain resolves `d·(d+1)/2` times instead of `d`.
+    // One `UndisplayedStyleCache` reused across every call fixes that, but
+    // only works resolving in pre-order (`tree.order`, not `index_of`'s
+    // arbitrary `HashMap` order): a descendant needs its ancestor already
+    // cached.
+    let mut undisplayed_style_cache = UndisplayedStyleCache::default();
+    for &id in &tree.order {
         let mut thread_local = ThreadLocalStyleContext::<StyloNode<'_>>::new();
         let mut context = StyleContext {
             shared: &shared,
             thread_local: &mut thread_local,
         };
         let target = tree.node(id);
-        let styles = resolve_style(&mut context, target, RuleInclusion::All, None, None);
+        let styles = resolve_style(
+            &mut context,
+            target,
+            RuleInclusion::All,
+            None,
+            Some(&mut undisplayed_style_cache),
+        );
         result.insert(id, to_computed_style(styles.primary()));
     }
 
