@@ -1,0 +1,25 @@
+{
+  "id": "mixed-inline-long-content",
+  "description": "The same 300px-wide mixed run as mixed-inline-default, with much longer surrounding text so it wraps across several lines with the highlighted span landing mid-flow instead of near either edge.",
+  "html": "index.html",
+  "css": "style.css",
+  "element_id": "el",
+  "viewport": { "width_css_px": 400, "height_css_px": 200, "device_pixel_ratio": 1.0 },
+  "canvas_color": "#ffffff",
+  "florui": {
+    "tag": "p",
+    "class": "mixed",
+    "css": ".mixed { width: 300px; } .mixed .highlight { font-weight: 700; }",
+    "children": [
+      "Hello ",
+      { "tag": "span", "class": "highlight", "text": "world", "css": "" },
+      ", this mixed inline run has a lot more real content in it than the short default fixture, spanning enough text that it wraps across several lines even at this wider column, with the highlighted span sitting somewhere in the middle of that wrapped flow rather than at either edge."
+    ]
+  },
+  "classification": {
+    "kind": "tolerant",
+    "threshold_percent": 20.0,
+    "geometry_tolerance_px": 2.5,
+    "reason": "Measured live against Chromium: 19.32% pixel diff, 2.0px max geometry delta (both real numbers, not guesses). Both higher than the bare-element fixtures' own calibration because this content wraps across 6 lines instead of 1 — the anaglyph overlay (florui_vs_chromium.png from a real `florui compare` run) shows every line fully legible and correctly positioned, including the highlighted span landing mid-flow exactly where expected, with a thin, gradually-growing antialiasing fringe toward the bottom: tiny per-line float rounding in text shaping/line-height math accumulating across more lines, not a wrap-point or layout divergence."
+  }
+}

@@ -71,13 +71,23 @@ pub fn paint_to_png(
     arena: &Arena,
     styles: &HashMap<NodeId, ComputedStyle>,
     layouts: &HashMap<NodeId, BoxLayout>,
+    scale_factor: f32,
 ) -> Result<(), PaintError> {
-    paint_to_buffer(font, width, height, canvas, arena, styles, layouts)
-        .save_png(path)
-        .map_err(|source| PaintError {
-            path: path.to_owned(),
-            source,
-        })
+    paint_to_buffer(
+        font,
+        width,
+        height,
+        canvas,
+        arena,
+        styles,
+        layouts,
+        scale_factor,
+    )
+    .save_png(path)
+    .map_err(|source| PaintError {
+        path: path.to_owned(),
+        source,
+    })
 }
 
 /// Same painting as [`paint_to_png`], returning the pixel buffer directly
@@ -86,9 +96,23 @@ pub fn paint_to_png(
 /// pass it the exact same instance that computed `layouts`, since this
 /// paints the identical glyphs that font already shaped.
 ///
+/// `layouts` and `width`/`height` are in the *painted* canvas's own units —
+/// a caller painting a HiDPI window passes boxes already scaled up to
+/// physical pixels (its own `scale_layouts`, mirrored in
+/// `florui_conformance::engine`), not the logical pixels layout itself ran
+/// against. `scale_factor` is how much that scaling multiplied every box
+/// by (`1.0` for an unscaled/logical canvas) — text wrapping needs it to
+/// divide `layouts`' own (already-scaled) box width back down to the
+/// logical width layout actually wrapped against, since `font_size` itself
+/// is never rescaled. Without this, text re-wraps at the wrong width on
+/// any canvas painted at other than 1x: wider than intended, since the
+/// scaled box width is larger than the logical width the glyphs' own
+/// `font_size` was sized for.
+///
 /// # Panics
 ///
 /// Panics if `width` or `height` is zero.
+#[allow(clippy::too_many_arguments)]
 pub fn paint_to_buffer(
     font: &mut Font,
     width: u32,
@@ -97,6 +121,7 @@ pub fn paint_to_buffer(
     arena: &Arena,
     styles: &HashMap<NodeId, ComputedStyle>,
     layouts: &HashMap<NodeId, BoxLayout>,
+    scale_factor: f32,
 ) -> Canvas {
     let mut buffer =
         Pixmap::new(width, height).expect("paint_to_buffer requires a nonzero-sized canvas");
@@ -104,7 +129,15 @@ pub fn paint_to_buffer(
 
     let mut stack: Vec<NodeId> = arena.roots().iter().rev().copied().collect();
     while let Some(node) = stack.pop() {
-        paint_node(&mut buffer, arena, styles, layouts, font, node);
+        paint_node(
+            &mut buffer,
+            arena,
+            styles,
+            layouts,
+            font,
+            node,
+            scale_factor,
+        );
         stack.extend(arena.children(node).iter().rev());
     }
     buffer
@@ -113,6 +146,7 @@ pub fn paint_to_buffer(
 /// Paints `node`'s own background and text — document-order painting
 /// (an overlapping later node always wins) comes from the caller's own
 /// pre-order walk over the whole tree, not from this function recursing.
+#[allow(clippy::too_many_arguments)]
 fn paint_node(
     buffer: &mut Canvas,
     arena: &Arena,
@@ -120,6 +154,7 @@ fn paint_node(
     layouts: &HashMap<NodeId, BoxLayout>,
     font: &mut Font,
     node: NodeId,
+    scale_factor: f32,
 ) {
     if let Some(&layout) = layouts.get(&node) {
         let style = styles.get(&node);
@@ -168,6 +203,13 @@ fn paint_node(
         let content_width =
             (layout.width - border.left.width - border.right.width - padding.left - padding.right)
                 .max(0.0);
+        // `content_width` is in the painted canvas's own (possibly scaled)
+        // units, but `font_size` is never rescaled — text must reshape at
+        // the same logical width layout itself wrapped against, or a
+        // HiDPI canvas (`scale_factor` > 1) wraps text wider than the
+        // committed layout, overflowing past where the box was sized to
+        // fit it. See `paint_to_buffer`'s own doc.
+        let wrap_width = content_width / scale_factor;
 
         if florui_layout::is_inline_formatting_context(arena, styles, node) {
             // A real mixed text/inline-element node: rebuilt and
@@ -179,11 +221,7 @@ fn paint_node(
             // override isn't painted differently yet, a documented bound
             // matching `florui_layout`'s own module doc.
             if let Some(shaped) = florui_layout::shape_inline_formatting_context(
-                font,
-                arena,
-                styles,
-                node,
-                content_width,
+                font, arena, styles, node, wrap_width,
             ) {
                 paint_shaped_runs(buffer, &shaped.runs, content_x, content_y, color);
             }
@@ -206,7 +244,7 @@ fn paint_node(
                         color,
                         x: content_x,
                         y: content_y,
-                        wrap_width: content_width,
+                        wrap_width,
                     },
                 );
             }
@@ -465,6 +503,7 @@ mod tests {
             &arena,
             &styles,
             &layouts,
+            1.0,
         );
 
         // Inside the card, outside the button: the card's own color.
@@ -501,6 +540,7 @@ mod tests {
             &arena,
             &styles,
             &layouts,
+            1.0,
         );
 
         // Inside the 4px border strip, on both the top and left edges.
@@ -535,6 +575,7 @@ mod tests {
             &arena,
             &styles,
             &layouts,
+            1.0,
         );
         // No border-style declared means border-style: none, real CSS's
         // own initial value — every pixel is the flat background color,
@@ -570,6 +611,7 @@ mod tests {
             &arena,
             &styles,
             &layouts,
+            1.0,
         )
         .unwrap();
 
@@ -632,6 +674,7 @@ mod tests {
             &arena,
             &styles,
             &layouts,
+            1.0,
         );
         assert_eq!(
             pixel_rgb(&buffer, 10, 10),
@@ -663,6 +706,7 @@ mod tests {
             &arena,
             &styles,
             &layouts,
+            1.0,
         );
         assert_eq!(pixel_rgb(&buffer, 10, 10), [0x1e, 0x1e, 0x22]);
     }
@@ -689,6 +733,7 @@ mod tests {
             &arena,
             &styles,
             &layouts,
+            1.0,
         );
 
         // A large "H" fills a good portion of its own tight box; scanning
@@ -736,6 +781,7 @@ mod tests {
                 &arena,
                 &styles,
                 &layouts,
+                1.0,
             );
 
             let mut count = 0;
@@ -793,6 +839,7 @@ mod tests {
             &arena,
             &styles,
             &layouts,
+            1.0,
         );
 
         // A lower bar than "fully-opaque red" (the single-glyph "H" test's
@@ -843,6 +890,7 @@ mod tests {
             &arena,
             &styles,
             &layouts,
+            1.0,
         );
         // No text content, so every pixel is exactly the flat background —
         // no stray glyph ink from a leaf with nothing to shape.
@@ -880,7 +928,101 @@ mod tests {
             &arena,
             &styles,
             &layouts,
+            1.0,
         );
         assert_eq!(pixel_rgb(&buffer, 0, 0), [0xff, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn text_still_wraps_at_the_logical_width_when_painted_onto_a_scaled_hidpi_canvas() {
+        // A HiDPI caller (a real window, or `florui_conformance::engine`'s
+        // own DPR fixtures) passes `layouts` already scaled up to physical
+        // pixels — if painting reshaped text at that scaled box width
+        // instead of dividing back to the logical width layout wrapped
+        // against, it would wrap wider than the committed layout and
+        // overflow the second line straight into empty canvas.
+        let text = "Hello world this line is long enough to wrap";
+        let css = "p { width: 100px; font-size: 16px; color: #ff0000; }";
+        let tree = Element::node("p", vec![], vec![Element::text(text)]);
+
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let mut font = Font::load_embedded();
+        let layouts = florui_layout::compute_layout(
+            &mut font,
+            &arena,
+            &styles,
+            Size {
+                width: AvailableSpace::Definite(200.0),
+                height: AvailableSpace::MaxContent,
+            },
+        )
+        .unwrap();
+
+        let node = arena.roots()[0];
+        let logical_width = layouts[&node].width;
+        let logical_height = layouts[&node].height;
+
+        // Proves the chosen text really does wrap to fewer lines at double
+        // the width — otherwise the scenario below wouldn't exercise the
+        // bug this test guards against at all.
+        let unwrapped_at_double_width = font
+            .measure_wrapped(
+                florui_text::FontFamily::SansSerif,
+                text,
+                16.0,
+                400.0,
+                logical_width * 2.0,
+            )
+            .height;
+        assert!(
+            unwrapped_at_double_width < logical_height,
+            "the chosen text must wrap to fewer lines at double the width, or this test proves \
+             nothing"
+        );
+
+        let scale_factor = 2.0;
+        let physical_layouts = layouts
+            .iter()
+            .map(|(&id, l)| {
+                (
+                    id,
+                    BoxLayout {
+                        x: l.x * scale_factor,
+                        y: l.y * scale_factor,
+                        width: l.width * scale_factor,
+                        height: l.height * scale_factor,
+                    },
+                )
+            })
+            .collect();
+
+        let width = (logical_width * scale_factor).ceil() as u32;
+        let height = (logical_height * scale_factor).ceil() as u32;
+        let buffer = paint_to_buffer(
+            &mut font,
+            width,
+            height,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &physical_layouts,
+            scale_factor,
+        );
+
+        // If painting had wrapped at the scaled (physical) width instead
+        // of the logical one, the whole text would fit on its first line
+        // and the canvas's bottom half — reserved by layout for the
+        // second wrapped line — would be pure background, no ink.
+        let is_ink = |px: u32, py: u32| pixel_rgb(&buffer, px, py)[0] > 0x20;
+        let bottom_half_has_ink =
+            (height / 2..height).any(|py| (0..width).any(|px| is_ink(px, py)));
+        assert!(
+            bottom_half_has_ink,
+            "text painted onto a scaled canvas must still wrap at the logical width, filling \
+             the second line layout reserved room for — not re-wrap wider and collapse onto \
+             one line"
+        );
     }
 }

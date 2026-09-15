@@ -1,0 +1,7 @@
+.mixed {
+    width: 300px;
+}
+
+.mixed .highlight {
+    font-weight: 700;
+}

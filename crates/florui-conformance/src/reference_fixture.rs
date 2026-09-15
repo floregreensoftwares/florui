@@ -32,21 +32,56 @@ impl ViewportSpec {
 /// real renders, compared against each other by [`crate::pixels`]/
 /// [`crate::geometry`].
 ///
-/// `tag`/`text` describe the single element under test (wrapped in a
-/// synthetic `<div>` matching the HTML side's `<body>`, so a bare
-/// `<span>`'s real inline-vs-block distinction isn't lost to Stylo's own
-/// root-element blockification — see `florui_style::stylo`'s
-/// `to_display` doc for that rule). `css` is real author CSS through the
-/// same `florui_style::parse_stylesheet` path an application uses; empty
-/// for a bare-element fixture, so the framework's own default stylesheet
-/// is what's actually under test.
+/// `tag`/`class` describe the single element under test (wrapped in a synthetic
+/// `<div>` matching the HTML side's `<body>`, so a bare `<span>`'s real
+/// inline-vs-block distinction isn't lost to Stylo's own root-element
+/// blockification — see `florui_style::stylo`'s `to_display` doc for
+/// that rule).
+///
+/// `css` is real author CSS through the same `florui_style::parse_stylesheet`
+/// path an application uses; empty for a bare-element fixture, so the
+/// framework's own default stylesheet is what's actually under test.
+/// Only meaningful on the top-level spec a [`FixtureManifest`] points
+/// at — [`crate::engine::render_fixture`] takes it as its own
+/// `css` parameter rather than reading it back off `spec`, so a nested
+/// [`FloruiChild::Element`]'s own `css` field is always empty in
+/// practice; one shared stylesheet (with real selectors, including
+/// descendant combinators like `.card p`) styles the whole tree, the
+/// same way one `<style>` element styles a whole HTML fixture.
+///
+/// `text` is a plain-content shorthand — equivalent to a single
+/// `children: [Text(text)]` entry, kept so every fixture written before
+/// `children` existed still loads unchanged. A fixture needs `children`
+/// instead once it has to nest a real element (a card's own heading and
+/// paragraph) or interleave text with one (mixed inline content, `Hello
+/// <span>world</span>!`) — `text` alone can only ever describe one flat
+/// run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FloruiSpec {
     pub tag: String,
     #[serde(default)]
+    pub class: String,
+    #[serde(default)]
     pub text: String,
     #[serde(default)]
     pub css: String,
+    #[serde(default)]
+    pub children: Vec<FloruiChild>,
+}
+
+/// One entry in [`FloruiSpec::children`]: either a literal text run, or a
+/// nested element (itself a full [`FloruiSpec`], so nesting is
+/// unbounded — a card's `<p>` can contain its own mixed inline content,
+/// the same way a real element tree can).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FloruiChild {
+    Text(String),
+    Element(FloruiSpec),
+}
+
+fn default_geometry_tolerance_px() -> f64 {
+    1.5
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -55,8 +90,30 @@ pub enum Classification {
     Exact,
     Tolerant {
         threshold_percent: f64,
+        /// Absolute pixel tolerance for the tested element's own box
+        /// (`compare_geometry`'s own `tolerance_px`). Defaults to 1.5px,
+        /// the value every fixture up to and including this field's own
+        /// addition was implicitly measured against — a fixture wrapping
+        /// across many more lines than those (long, multi-line content)
+        /// can accumulate a few more pixels of real per-line
+        /// float-rounding in text shaping/line-height math before this
+        /// crate's own module doc, not a fixture-specific guess.
+        #[serde(default = "default_geometry_tolerance_px")]
+        geometry_tolerance_px: f64,
         reason: String,
     },
+}
+
+impl Classification {
+    pub fn geometry_tolerance_px(&self) -> f64 {
+        match self {
+            Classification::Exact => 0.0,
+            Classification::Tolerant {
+                geometry_tolerance_px,
+                ..
+            } => *geometry_tolerance_px,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

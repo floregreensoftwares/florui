@@ -62,28 +62,29 @@ fn run_fixture(name: &str) {
     let capture = driver.capture(&fixture).expect("capture should succeed");
 
     let viewport = &fixture.manifest.viewport;
-    assert_eq!(
-        viewport.device_pixel_ratio, 1.0,
-        "florui_conformance::engine only supports device_pixel_ratio 1.0 so far — \
-         see its own module doc"
-    );
     let engine = render_fixture(
         &fixture.manifest.florui,
+        &fixture.manifest.florui.css,
         &fixture.manifest.canvas_color,
         viewport.width_css_px,
         viewport.height_css_px,
+        viewport.device_pixel_ratio,
     )
     .expect("engine render should succeed");
 
     let pixel_report = compare_pixels(&capture.image, &engine.image, &PixelDiffOptions::default())
         .expect("dimensions should match");
-    // 1.5px of geometry tolerance: measured live against Chromium, every
-    // one of this slice's 8 fixtures landed at or under 1.0px of its own
-    // accord (each engine's own float rounding in text shaping/line-height
-    // math), so this leaves real headroom above what was actually
-    // observed rather than sitting right at that boundary.
-    let geometry_report =
-        compare_geometry(capture.element_box_css_px, engine.element_box_css_px, 1.5);
+    // Per-fixture, not a single constant: measured live against Chromium,
+    // most fixtures land at or under 1.0px of their own accord (each
+    // engine's own float rounding in text shaping/line-height math), but
+    // a fixture with real multi-line wrapped content accumulates a few
+    // more pixels of that same rounding across more lines — see
+    // Classification::Tolerant's own geometry_tolerance_px doc.
+    let geometry_report = compare_geometry(
+        capture.element_box_css_px,
+        engine.element_box_css_px,
+        fixture.manifest.classification.geometry_tolerance_px(),
+    );
 
     let outcome = classify(
         &fixture.manifest.classification,
@@ -120,3 +121,17 @@ fixture_test!(h3_default_matches_chromium, "h3-default");
 fixture_test!(h4_default_matches_chromium, "h4-default");
 fixture_test!(h5_default_matches_chromium, "h5-default");
 fixture_test!(h6_default_matches_chromium, "h6-default");
+fixture_test!(card_default_matches_chromium, "card-default");
+fixture_test!(card_narrow_matches_chromium, "card-narrow");
+fixture_test!(card_long_content_matches_chromium, "card-long-content");
+fixture_test!(card_scaled_matches_chromium, "card-scaled");
+fixture_test!(
+    mixed_inline_default_matches_chromium,
+    "mixed-inline-default"
+);
+fixture_test!(mixed_inline_narrow_matches_chromium, "mixed-inline-narrow");
+fixture_test!(
+    mixed_inline_long_content_matches_chromium,
+    "mixed-inline-long-content"
+);
+fixture_test!(mixed_inline_scaled_matches_chromium, "mixed-inline-scaled");

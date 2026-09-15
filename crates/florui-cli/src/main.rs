@@ -513,25 +513,23 @@ fn compare_fixture(
         .map_err(|err| format!("capture failed: {err}"))?;
 
     let viewport = fixture.manifest.viewport;
-    if viewport.device_pixel_ratio != 1.0 {
-        return Err(format!(
-            "fixture {:?} declares device_pixel_ratio {}, but florui_conformance::engine only \
-             supports 1.0 so far",
-            fixture.manifest.id, viewport.device_pixel_ratio
-        ));
-    }
     let engine = render_fixture(
         &fixture.manifest.florui,
+        &fixture.manifest.florui.css,
         &fixture.manifest.canvas_color,
         viewport.width_css_px,
         viewport.height_css_px,
+        viewport.device_pixel_ratio,
     )
     .map_err(|err| format!("engine render failed: {err}"))?;
 
     let pixel_report = compare_pixels(&capture.image, &engine.image, &PixelDiffOptions::default())
         .map_err(|err| err.to_string())?;
-    let geometry_report =
-        compare_geometry(capture.element_box_css_px, engine.element_box_css_px, 1.5);
+    let geometry_report = compare_geometry(
+        capture.element_box_css_px,
+        engine.element_box_css_px,
+        fixture.manifest.classification.geometry_tolerance_px(),
+    );
 
     let outcome = classify(
         &fixture.manifest.classification,

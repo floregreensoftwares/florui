@@ -39,6 +39,7 @@ fn main() {
         &arena,
         &styles,
         &layouts,
+        1.0,
     )
     .expect("writing the capture should not fail");
 
