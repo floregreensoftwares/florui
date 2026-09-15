@@ -898,6 +898,7 @@ fn to_computed_style(values: &ComputedValues) -> ComputedStyle {
         flex_basis: to_flex_basis(&position.flex_basis),
         column_gap: to_gap(&position.column_gap),
         row_gap: to_gap(&position.row_gap),
+        z_index: to_z_index(position.z_index),
         font_family: to_font_family(&font.font_family),
         border: Edges {
             top: to_border_side(
@@ -1056,6 +1057,18 @@ fn to_display(display: style::values::computed::Display) -> FlorDisplay {
         (_, DisplayInside::Flex) => FlorDisplay::Flex,
         (_, DisplayInside::Grid) => FlorDisplay::Grid,
         _ => FlorDisplay::Block,
+    }
+}
+
+/// `None` for `auto` (the initial value, and the only value that leaves a
+/// flex/grid item painted in plain document order relative to its
+/// siblings — see [`crate::cascade::ComputedStyle::z_index`]'s own doc for
+/// what a `Some` value actually changes).
+fn to_z_index(value: style::values::computed::position::ZIndex) -> Option<i32> {
+    use style::values::generics::position::GenericZIndex;
+    match value {
+        GenericZIndex::Integer(index) => Some(index),
+        GenericZIndex::Auto => None,
     }
 }
 

@@ -1,0 +1,23 @@
+{
+  "id": "grid-z-index-stacking",
+  "description": "Two grid items placed in the same cell, offset so they partially overlap: 'front' comes first in source order (would lose a plain document-order tie) but has z-index: 1, so it must still paint on top of 'back' in the overlapping region.",
+  "html": "index.html",
+  "css": "style.css",
+  "element_id": "el",
+  "viewport": { "width_css_px": 100, "height_css_px": 100, "device_pixel_ratio": 1.0 },
+  "canvas_color": "#ffffff",
+  "florui": {
+    "tag": "div",
+    "class": "stack",
+    "css": ".stack { display: grid; grid-template-columns: 60px; grid-template-rows: 60px; width: 60px; height: 60px; } .stack .front { grid-column: 1; grid-row: 1; width: 40px; height: 40px; background-color: #00aa00; z-index: 1; } .stack .back { grid-column: 1; grid-row: 1; width: 40px; height: 40px; background-color: #cc0000; margin-top: 20px; margin-left: 20px; }",
+    "children": [
+      { "tag": "div", "class": "front", "css": "" },
+      { "tag": "div", "class": "back", "css": "" }
+    ]
+  },
+  "classification": {
+    "kind": "tolerant",
+    "threshold_percent": 3.0,
+    "reason": "Same anti-aliasing/hinting mismatch between Chromium's own rasterizer and Florui's skrifa+tiny-skia one already calibrated for the bare-element fixtures -- this fixture has no text, only flat fills, so the real number is expected to land near the low end of that range."
+  }
+}

@@ -1,0 +1,26 @@
+.stack {
+    display: grid;
+    grid-template-columns: 60px;
+    grid-template-rows: 60px;
+    width: 60px;
+    height: 60px;
+}
+
+.stack .front {
+    grid-column: 1;
+    grid-row: 1;
+    width: 40px;
+    height: 40px;
+    background-color: #00aa00;
+    z-index: 1;
+}
+
+.stack .back {
+    grid-column: 1;
+    grid-row: 1;
+    width: 40px;
+    height: 40px;
+    background-color: #cc0000;
+    margin-top: 20px;
+    margin-left: 20px;
+}
