@@ -2,29 +2,32 @@
 //! surface, and an event loop, so a caller doesn't have to write its own
 //! desktop event loop just to see a component tree running.
 //!
-//! This host passes `winit`'s physical-pixel window size straight through
-//! as the layout viewport, with no device-pixel-ratio scaling —
-//! `florui_style`'s declared `width`/`height` are CSS-style logical
-//! pixels, so on a HiDPI display this host lays out and paints as if the
-//! window were physically larger than it visually is. Fixing this needs a
-//! real logical/physical split through layout and painting, not just
-//! here; it is a known, not yet addressed gap, not an oversight to route
-//! around.
+//! HiDPI-aware: layout runs against the window's *logical* size (via
+//! [`crate::dpi`]), matching `florui_style`'s CSS-style `width`/`height`;
+//! the committed boxes are then scaled back up by the window's own scale
+//! factor before painting, so the canvas renders at full physical device
+//! resolution rather than blurrily upscaling a logical-resolution one.
+//! Cursor positions (physical, from `winit`) are converted the other way
+//! before hit-testing against that same logical layout.
 
+use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use florui::Element;
+use florui_layout::BoxLayout;
 use florui_style::{NodeId, Rgba, StyleError};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use taffy::prelude::*;
 use winit::application::ApplicationHandler;
+use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
 use crate::UiRuntime;
+use crate::dpi::{self, ViewportScale};
 
 #[derive(Debug)]
 pub enum RunError {
@@ -183,6 +186,33 @@ fn watch_css_file(
     Ok(watcher)
 }
 
+fn layout_viewport(scale: ViewportScale) -> Size<AvailableSpace> {
+    Size {
+        width: AvailableSpace::Definite(scale.logical.width),
+        height: AvailableSpace::Definite(scale.logical.height),
+    }
+}
+
+/// Scales every committed box from the logical pixels layout ran against
+/// up to physical pixels, so painting can rasterize at full device
+/// resolution instead of the canvas's own (unscaled) unit.
+fn scale_layouts(layouts: &HashMap<NodeId, BoxLayout>, factor: f32) -> HashMap<NodeId, BoxLayout> {
+    layouts
+        .iter()
+        .map(|(&id, layout)| {
+            (
+                id,
+                BoxLayout {
+                    x: layout.x * factor,
+                    y: layout.y * factor,
+                    width: layout.width * factor,
+                    height: layout.height * factor,
+                },
+            )
+        })
+        .collect()
+}
+
 /// Owns the window, the `softbuffer` surface, and the event loop; delegates
 /// every rendering, hit-testing, and dispatch decision to a [`UiRuntime`].
 struct DesktopHost {
@@ -233,16 +263,20 @@ impl DesktopHost {
         }
     }
 
-    fn viewport_size(&self) -> Size<AvailableSpace> {
-        let size = self
+    fn viewport_scale(&self) -> ViewportScale {
+        let (size, factor) = self
             .window
             .as_ref()
-            .map(|window| window.inner_size())
-            .unwrap_or_default();
-        Size {
-            width: AvailableSpace::Definite(size.width as f32),
-            height: AvailableSpace::Definite(size.height as f32),
-        }
+            .map(|window| (window.inner_size(), window.scale_factor()))
+            .unwrap_or((PhysicalSize::default(), 1.0));
+        dpi::viewport_scale(size, factor)
+    }
+
+    /// Converts a physical-pixel cursor position (as `winit` reports it)
+    /// to the logical pixels layout runs against.
+    fn to_logical_cursor(&self, x: f64, y: f64) -> (f32, f32) {
+        let factor = self.viewport_scale().scale_factor;
+        ((x / factor) as f32, (y / factor) as f32)
     }
 
     /// Stops the event loop after logging `error`, and keeps it so [`run`]
@@ -266,13 +300,14 @@ impl DesktopHost {
         };
 
         let (arena, styles, layouts) = runtime.geometry();
+        let physical_layouts = scale_layouts(layouts, self.viewport_scale().scale_factor as f32);
         let canvas = florui_paint::paint_to_buffer(
             size.width,
             size.height,
             self.canvas_color,
             arena,
             styles,
-            layouts,
+            &physical_layouts,
         );
 
         let Some(surface) = &mut self.surface else {
@@ -306,7 +341,7 @@ impl DesktopHost {
     /// `Signal::set` anywhere under the root reaches the screen without
     /// the host having to know which specific interaction caused it.
     fn update_and_request_redraw(&mut self) {
-        let viewport = self.viewport_size();
+        let viewport = layout_viewport(self.viewport_scale());
         if let Some(runtime) = &mut self.runtime {
             runtime.clear_dirty();
             runtime.update(viewport);
@@ -320,10 +355,11 @@ impl DesktopHost {
     /// rebuild just to know what's under the cursor.
     fn handle_cursor_moved(&mut self, x: f64, y: f64) {
         self.last_cursor = (x, y);
+        let (x, y) = self.to_logical_cursor(x, y);
         let hit = self
             .runtime
             .as_ref()
-            .and_then(|runtime| runtime.hit_test(x as f32, y as f32));
+            .and_then(|runtime| runtime.hit_test(x, y));
         self.set_hovered_and_redraw(hit);
     }
 
@@ -340,7 +376,7 @@ impl DesktopHost {
     /// (`:hover` can affect computed style), re-renders and requests a
     /// repaint to pick that up.
     fn set_hovered_and_redraw(&mut self, hit: Option<NodeId>) {
-        let viewport = self.viewport_size();
+        let viewport = layout_viewport(self.viewport_scale());
         let Some(runtime) = &mut self.runtime else {
             return;
         };
@@ -358,11 +394,11 @@ impl DesktopHost {
     /// back on this same node (so dragging off a button and releasing
     /// elsewhere cancels it).
     fn handle_press(&mut self) {
-        let (x, y) = self.last_cursor;
+        let (x, y) = self.to_logical_cursor(self.last_cursor.0, self.last_cursor.1);
         self.pressed = self
             .runtime
             .as_ref()
-            .and_then(|runtime| runtime.hit_test(x as f32, y as f32));
+            .and_then(|runtime| runtime.hit_test(x, y));
     }
 
     /// Re-reads and re-parses the watched CSS file (see
@@ -371,7 +407,7 @@ impl DesktopHost {
     /// `Signal` keeps its value — and repaints. A failure (bad syntax, a
     /// save-in-progress truncated read) is reported and the last good
     /// stylesheet keeps rendering, the same recovery contract the
-    /// Stage-0 fixture preview already established.
+    /// native inspector's own fixture preview already established.
     fn reload_css(&mut self) {
         let Some(path) = self.css_path.clone() else {
             return;
@@ -399,12 +435,12 @@ impl DesktopHost {
     }
 
     fn handle_release(&mut self) {
-        let (x, y) = self.last_cursor;
+        let (x, y) = self.to_logical_cursor(self.last_cursor.0, self.last_cursor.1);
         let pressed = self.pressed.take();
         let Some(runtime) = &self.runtime else {
             return;
         };
-        let released_over = runtime.hit_test(x as f32, y as f32);
+        let released_over = runtime.hit_test(x, y);
         if let (Some(pressed), Some(released_over)) = (pressed, released_over)
             && pressed == released_over
         {
@@ -432,11 +468,10 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
             Err(error) => return self.fail(event_loop, RunError::SurfaceCreation(error)),
         };
 
-        let size = window.inner_size();
-        let viewport = Size {
-            width: AvailableSpace::Definite(size.width as f32),
-            height: AvailableSpace::Definite(size.height as f32),
-        };
+        let viewport = layout_viewport(dpi::viewport_scale(
+            window.inner_size(),
+            window.scale_factor(),
+        ));
         let root = self
             .root
             .take()
@@ -499,5 +534,85 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
             UserEvent::Dirty => self.update_and_request_redraw(),
             UserEvent::CssChanged => self.reload_css(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_viewport_uses_the_logical_size_not_the_physical_one() {
+        let scale = dpi::viewport_scale(PhysicalSize::new(1600, 1200), 2.0);
+        let viewport = layout_viewport(scale);
+        assert_eq!(viewport.width, AvailableSpace::Definite(800.0));
+        assert_eq!(viewport.height, AvailableSpace::Definite(600.0));
+    }
+
+    #[test]
+    fn scale_layouts_at_1x_is_the_identity() {
+        let mut layouts = HashMap::new();
+        layouts.insert(
+            0,
+            BoxLayout {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 50.0,
+            },
+        );
+        let scaled = scale_layouts(&layouts, 1.0);
+        assert_eq!(scaled[&0], layouts[&0]);
+    }
+
+    #[test]
+    fn scale_layouts_at_2x_doubles_every_field() {
+        let mut layouts = HashMap::new();
+        layouts.insert(
+            0,
+            BoxLayout {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 50.0,
+            },
+        );
+        let scaled = scale_layouts(&layouts, 2.0);
+        assert_eq!(
+            scaled[&0],
+            BoxLayout {
+                x: 20.0,
+                y: 40.0,
+                width: 200.0,
+                height: 100.0,
+            }
+        );
+    }
+
+    #[test]
+    fn scale_layouts_preserves_every_node_id_and_only_those() {
+        let mut layouts = HashMap::new();
+        layouts.insert(
+            1,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+        );
+        layouts.insert(
+            2,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+        );
+        let scaled = scale_layouts(&layouts, 1.5);
+        let mut ids: Vec<NodeId> = scaled.keys().copied().collect();
+        ids.sort();
+        assert_eq!(ids, vec![1, 2]);
     }
 }
