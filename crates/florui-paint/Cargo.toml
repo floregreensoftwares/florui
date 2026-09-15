@@ -19,3 +19,8 @@ tiny-skia = "0.11"
 [dev-dependencies]
 florui = { path = "../florui" }
 taffy = "0.14"
+criterion = "0.5"
+
+[[bench]]
+name = "paint"
+harness = false
