@@ -45,13 +45,11 @@
 //! Taffy's own convention; see [`absolute_position`] to accumulate them
 //! into a position relative to the layout root.
 //!
-//! A very deep tree (hundreds of nested levels) is slow to style: Stylo's
-//! own cascade appears quadratic-ish in depth for a single-chain tree,
-//! not something this crate causes or has fixed. It no longer *crashes*
-//! that deep, though — `compute_layout` grows its own stack via
-//! `stacker` before running Taffy's real layout algorithms, which
-//! recurse once per tree depth internally and would otherwise overflow
-//! the default stack well under 1,000 levels.
+//! A very deep tree (hundreds of nested levels) no longer *crashes* —
+//! `compute_layout` grows its own stack via `stacker` before running
+//! Taffy's real layout algorithms, which recurse once per tree depth
+//! internally and would otherwise overflow the default stack well under
+//! 1,000 levels.
 
 use std::collections::HashMap;
 
@@ -369,8 +367,16 @@ pub fn shape_inline_formatting_context(
 
 /// Computes block-layout geometry for every node in `arena`, using
 /// `styles` for sizing/spacing. `available` is the space the layout root
-/// itself is given (e.g. the preview window's content area).
+/// itself is given (e.g. the preview window's content area). `font` is the
+/// caller's own long-lived instance — loading one builds a whole Parley
+/// `FontContext` (and, with fontique's default `system_fonts: true`,
+/// enumerates the system's installed fonts), too expensive to redo on every
+/// call; a caller with more than one render should build it once and reuse
+/// it, passing the very same instance to [`florui_paint::paint_to_buffer`]
+/// too since that shapes and rasterizes the identical glyphs this crate
+/// measured.
 pub fn compute_layout(
+    font: &mut florui_text::Font,
     arena: &Arena,
     styles: &HashMap<NodeId, ComputedStyle>,
     available: Size<AvailableSpace>,
@@ -382,18 +388,9 @@ pub fn compute_layout(
     // see that pass's own comment for why they aren't ordinary Taffy nodes.
     let mut inline_leaves: Vec<(NodeId, Vec<InlineContentItem>)> = Vec::new();
 
-    // Fresh every call, not cached across renders — a real app-registered
-    // extra font (`florui_text::Font::register`, e.g. for a script neither
-    // embedded font covers) has no way to reach this instance yet, since
-    // nothing here persists one across calls to register it on. Until that
-    // wiring exists, "font updates invalidate dependent layout" holds
-    // trivially at this layer: there is nothing long-lived here to go
-    // stale in the first place.
-    let mut font = florui_text::Font::load_embedded();
-
     for &root in arena.roots() {
         build_node(
-            &mut font,
+            font,
             arena,
             styles,
             root,
@@ -447,7 +444,7 @@ pub fn compute_layout(
                     |_, _| 0.0,
                     |known_dimensions, available_space| {
                         measure_leaf(
-                            &mut font,
+                            font,
                             context,
                             known_dimensions,
                             available_space,
@@ -1082,7 +1079,8 @@ mod tests {
         let arena = Arena::build(tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
         let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
-        let layouts = compute_layout(&arena, &styles, Size::MAX_CONTENT).unwrap();
+        let mut font = florui_text::Font::load_embedded();
+        let layouts = compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
         (arena, styles, layouts)
     }
 

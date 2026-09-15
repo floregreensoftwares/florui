@@ -116,7 +116,9 @@ pub fn render_fixture(
         width: AvailableSpace::Definite(width_css_px as f32),
         height: AvailableSpace::Definite(height_css_px as f32),
     };
-    let layouts = compute_layout(&arena, &styles, available).map_err(EngineError::Layout)?;
+    let mut font = florui_text::Font::load_embedded();
+    let layouts =
+        compute_layout(&mut font, &arena, &styles, available).map_err(EngineError::Layout)?;
 
     let wrapper = arena.roots()[0];
     let node = arena.children(wrapper)[0];
@@ -133,6 +135,7 @@ pub fn render_fixture(
     let canvas = Rgba::opaque(0, 0, 0);
     let canvas = florui_style::parse_hex_color(canvas_color).unwrap_or(canvas);
     let image_pixmap = paint_to_buffer(
+        &mut font,
         width_css_px,
         height_css_px,
         canvas,

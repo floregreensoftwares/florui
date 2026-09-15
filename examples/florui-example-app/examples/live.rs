@@ -80,6 +80,10 @@ struct App {
     rules: Vec<florui_style::Rule>,
     button: Option<NodeId>,
     interaction: InteractionState,
+    // Long-lived, not reloaded per frame — see `florui_layout::compute_layout`'s
+    // own doc for why. Shared between this app's own layout and paint calls
+    // so both shape the identical glyphs.
+    font: florui_text::Font,
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     _context: Option<softbuffer::Context<Rc<Window>>>,
@@ -100,16 +104,18 @@ impl App {
             rules: load_rules(),
             button,
             interaction: InteractionState::new(),
+            font: florui_text::Font::load_embedded(),
             window: None,
             surface: None,
             _context: None,
         }
     }
 
-    fn compute(&self) -> (HashMap<NodeId, ComputedStyle>, HashMap<NodeId, BoxLayout>) {
+    fn compute(&mut self) -> (HashMap<NodeId, ComputedStyle>, HashMap<NodeId, BoxLayout>) {
         let styles = florui_style::compute(&self.arena, &self.rules, &self.interaction);
-        let layouts = florui_layout::compute_layout(&self.arena, &styles, Size::MAX_CONTENT)
-            .expect("this tree's explicit sizes never produce a layout failure");
+        let layouts =
+            florui_layout::compute_layout(&mut self.font, &self.arena, &styles, Size::MAX_CONTENT)
+                .expect("this tree's explicit sizes never produce a layout failure");
         (styles, layouts)
     }
 
@@ -126,6 +132,7 @@ impl App {
 
         let (styles, layouts) = self.compute();
         let canvas = florui_paint::paint_to_buffer(
+            &mut self.font,
             size.width,
             size.height,
             CANVAS_COLOR,
