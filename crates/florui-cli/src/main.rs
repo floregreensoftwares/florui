@@ -15,6 +15,9 @@ use florui_conformance::pixels::{
 };
 use florui_conformance::reference_fixture::load_reference_fixture;
 use florui_conformance::report::{ArtifactPaths, Outcome, Report, classify, write_report};
+use florui_conformance::run_history::{
+    self, BaselineSelector, DeltaStatus, FixtureOutcome, RunManifest, RunReport, RunStatus,
+};
 use florui_devtools::diagnostics::{dim_text, failure, success};
 
 #[derive(Parser)]
@@ -72,6 +75,29 @@ enum Command {
         #[arg(long)]
         keep_profile: bool,
     },
+    /// Compares every reference fixture against a real Chromium binary in
+    /// one batch, recording the whole run as a new numbered entry in a
+    /// persistent run history — diffed against the most recent prior run
+    /// by default, so a regression across a code change is a concrete
+    /// `delta.md`, not something to re-derive from raw pixel numbers by
+    /// hand. See `florui_conformance::run_history`'s own module doc.
+    CompareAll {
+        /// Root directory containing one subdirectory per reference fixture.
+        #[arg(long, default_value = "fixtures/reference")]
+        fixtures_root: PathBuf,
+        /// Path to a Chromium-family binary (Chrome, Chromium, or Edge).
+        #[arg(long, env = "FLORUI_CHROMIUM")]
+        chromium: Option<PathBuf>,
+        /// Persistent run-history root — deliberately outside `target/`,
+        /// so old runs survive `cargo clean` instead of being ephemeral
+        /// build output.
+        #[arg(long, default_value = "output/florui-conformance")]
+        output: PathBuf,
+        /// Run id to diff this run against ("auto" for the most recent
+        /// completed run, "none" to record this as baseline-less).
+        #[arg(long, default_value = "auto")]
+        baseline: String,
+    },
     /// Produce a release artifact for a supported target.
     Build {
         #[arg(long, default_value = "native")]
@@ -94,6 +120,12 @@ fn main() -> ExitCode {
             headed,
             keep_profile,
         } => run_compare(fixture, chromium, out_dir, headed, keep_profile),
+        Command::CompareAll {
+            fixtures_root,
+            chromium,
+            output,
+            baseline,
+        } => run_compare_all(fixtures_root, chromium, output, baseline),
         Command::Build { target } => run_build(target),
     }
 }
@@ -681,6 +713,195 @@ fn run_compare(
             exit
         }
         Err(err) => fail(err),
+    }
+}
+
+/// Parses `--baseline`'s three accepted forms — `clap` validates it's
+/// present but not its shape, since the valid values depend on nothing
+/// `clap` itself knows (a 6-digit run id isn't a fixed enum).
+fn parse_baseline_selector(value: &str) -> Result<BaselineSelector, String> {
+    match value {
+        "auto" => Ok(BaselineSelector::Auto),
+        "none" => Ok(BaselineSelector::None),
+        other if other.len() == 6 && other.bytes().all(|b| b.is_ascii_digit()) => {
+            Ok(BaselineSelector::Explicit(other.to_owned()))
+        }
+        other => Err(format!(
+            "--baseline must be \"auto\", \"none\", or a 6-digit run id, got {other:?}"
+        )),
+    }
+}
+
+/// Runs every fixture under `fixtures_root` against `chromium`, recording
+/// the batch as a new entry in the run history at `output` — see
+/// `florui_conformance::run_history`'s own module doc for the on-disk
+/// shape this produces (`runs/NNNNNN/`, `index.md`, per-run `delta.md`).
+fn run_compare_all(
+    fixtures_root: PathBuf,
+    chromium: Option<PathBuf>,
+    output: PathBuf,
+    baseline: String,
+) -> ExitCode {
+    let selector = match parse_baseline_selector(&baseline) {
+        Ok(selector) => selector,
+        Err(err) => return fail(err),
+    };
+
+    let fixtures = discover_reference_fixtures(&fixtures_root);
+    if fixtures.is_empty() {
+        return fail(format!(
+            "no reference fixtures found under {}",
+            fixtures_root.display()
+        ));
+    }
+
+    let Some(chromium) = resolve_chromium(chromium) else {
+        eprintln!("{}", failure("no Chromium binary configured"));
+        eprintln!(
+            "run scripts/fetch-chromium.ps1 to fetch the pinned build, or pass --chromium <path> / set FLORUI_CHROMIUM, e.g.:"
+        );
+        eprintln!(r#"  --chromium "C:\Program Files\Google\Chrome\Application\chrome.exe""#);
+        eprintln!(r#"  --chromium "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe""#);
+        return ExitCode::FAILURE;
+    };
+
+    if let Err(err) = std::fs::create_dir_all(&output) {
+        return fail(format!("could not create {}: {err}", output.display()));
+    }
+    let output = match output.canonicalize() {
+        Ok(path) => path,
+        Err(err) => return fail(format!("could not resolve {}: {err}", output.display())),
+    };
+
+    let existing = match run_history::list_run_ids(&output) {
+        Ok(ids) => ids,
+        Err(err) => return fail(err.to_string()),
+    };
+    let resolved_baseline = match run_history::select_baseline(&output, &existing, &selector) {
+        Ok(baseline) => baseline,
+        Err(err) => return fail(err.to_string()),
+    };
+    let baseline_run_id = resolved_baseline.as_ref().map(|(id, _)| id.clone());
+    let (run_id, run_dir) = match run_history::allocate_run(&output, &existing) {
+        Ok(allocated) => allocated,
+        Err(err) => return fail(err.to_string()),
+    };
+    println!(
+        "{}",
+        dim_text(&format!(
+            "run {run_id} — baseline {}",
+            baseline_run_id.as_deref().unwrap_or("none")
+        ))
+    );
+
+    let mut manifest = RunManifest {
+        version: 1,
+        run_id: run_id.clone(),
+        baseline_run: baseline_run_id.clone(),
+        fixture_count: fixtures.len(),
+        status: RunStatus::Running,
+    };
+    if let Err(err) = run_history::write_manifest(&run_dir, &manifest) {
+        return fail(err.to_string());
+    }
+
+    let profile_dir = run_dir.join(format!("chrome-profile-{}", std::process::id()));
+    let driver = match ChromiumDriver::launch(ChromiumOptions {
+        executable: chromium.clone(),
+        user_data_dir: profile_dir.clone(),
+        headless: true,
+        launch_timeout: Duration::from_secs(30),
+    }) {
+        Ok(driver) => driver,
+        Err(err) => return fail(format!("could not launch Chromium: {err}")),
+    };
+
+    let mut fixture_outcomes = Vec::with_capacity(fixtures.len());
+    let mut all_ok = true;
+    for fixture_path in &fixtures {
+        match compare_fixture(&driver, fixture_path, &run_dir, &chromium) {
+            Ok(result) => {
+                if result.outcome == Outcome::Fail {
+                    all_ok = false;
+                }
+                print_compare_result(&result);
+                fixture_outcomes.push(FixtureOutcome {
+                    fixture_id: result.fixture_id,
+                    outcome: result.outcome,
+                    pixels: result.pixels,
+                    geometry: result.geometry,
+                });
+            }
+            Err(err) => {
+                println!(
+                    "{}",
+                    failure(&format!("✘ {}: {err}", fixture_path.display()))
+                );
+                all_ok = false;
+            }
+        }
+    }
+    drop(driver);
+    cleanup_profile(&profile_dir, false);
+
+    let report = RunReport {
+        version: 1,
+        run_id: run_id.clone(),
+        baseline_run: baseline_run_id,
+        fixtures: fixture_outcomes,
+    };
+    if let Err(err) = run_history::write_run_report(&run_dir, &report) {
+        return fail(err.to_string());
+    }
+    if let Err(err) = std::fs::write(
+        run_dir.join("report.md"),
+        run_history::render_report_markdown(&report),
+    ) {
+        return fail(format!("could not write report.md: {err}"));
+    }
+
+    let delta = run_history::build_delta(run_id.clone(), resolved_baseline.as_ref(), &report);
+    if let Err(err) = run_history::write_run_delta(&run_dir, &delta) {
+        return fail(err.to_string());
+    }
+    if let Err(err) = std::fs::write(
+        run_dir.join("delta.md"),
+        run_history::render_delta_markdown(&delta),
+    ) {
+        return fail(format!("could not write delta.md: {err}"));
+    }
+
+    manifest.status = RunStatus::Complete;
+    if let Err(err) = run_history::write_manifest(&run_dir, &manifest) {
+        return fail(err.to_string());
+    }
+    if let Err(err) = run_history::write_index(&output) {
+        return fail(err.to_string());
+    }
+
+    println!();
+    println!(
+        "{}",
+        dim_text(&format!(
+            "run {run_id} report: {}",
+            run_dir.join("report.md").display()
+        ))
+    );
+    if delta.status == DeltaStatus::Changed {
+        println!(
+            "{}",
+            dim_text(&format!("delta: {}", run_dir.join("delta.md").display()))
+        );
+    }
+    println!(
+        "{}",
+        dim_text(&format!("index: {}", output.join("index.md").display()))
+    );
+
+    if all_ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 

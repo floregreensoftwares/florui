@@ -4,3 +4,7 @@ tmp
 **/target/
 # Vendored, pinned tooling (fetched by scripts/fetch-chromium.ps1)
 /.tools/
+# `florui compare-all`'s persistent run history — real local state (see
+# florui_conformance::run_history), deliberately outside target/ so
+# cargo clean can't wipe it, but not something to check in either.
+/output/**
