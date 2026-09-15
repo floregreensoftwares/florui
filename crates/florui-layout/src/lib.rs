@@ -415,6 +415,19 @@ pub fn compute_layout(
         )
         .map_err(LayoutError)?;
 
+    // Taffy queries a leaf's intrinsic size multiple times during one
+    // layout pass (an intrinsic min/max-content query, then a final
+    // definite pass), often landing on more than one width and sometimes
+    // the identical one more than once — keyed by the leaf's own Taffy
+    // node id since that's what `compute_layout_with_measure` hands the
+    // closure below on every call, this lets `measure_leaf` reuse the one
+    // Parley layout each leaf actually needs across every one of those
+    // calls instead of reshaping from scratch each time. Scoped to this
+    // one call: a fresh, empty map every `compute_layout` call, nothing
+    // persisted across renders.
+    let mut shaping_caches: HashMap<taffy::NodeId, Option<florui_text::CachedLayout>> =
+        HashMap::new();
+
     // Taffy's own block/flex/grid algorithms recurse once per tree depth
     // internally — third-party code this crate doesn't control, and deep
     // enough to overflow the default stack well under 1,000 levels.
@@ -422,7 +435,7 @@ pub fn compute_layout(
         tree.compute_layout_with_measure(
             synthetic_root,
             available,
-            |inputs, _node_id, context, style| {
+            |inputs, node_id, context, style| {
                 // `compute_leaf_layout`'s own measure closure only ever
                 // returns a `Size` — extract what the baseline needs from
                 // `context` first, since the closure below moves `context`
@@ -438,6 +451,20 @@ pub fn compute_layout(
                 });
 
                 let mut measured_baseline = None;
+                // Only a real `LeafContext::Text` leaf ever reads or writes
+                // a slot in `shaping_caches` — touching the map (hashing
+                // `node_id`, inserting an entry) for every other leaf too
+                // would tax the common case (an explicitly-sized `<div>`
+                // with no text, needing no shaping cache at all) for a
+                // cache it never uses. `throwaway_cache` is a cheap
+                // stack-local stand-in for that common case; it's read and
+                // discarded, never reused across calls, since there's
+                // nothing to reuse.
+                let mut throwaway_cache = None;
+                let shaping_cache = match context.as_deref() {
+                    Some(LeafContext::Text(_)) => shaping_caches.entry(node_id).or_insert(None),
+                    _ => &mut throwaway_cache,
+                };
                 let mut output = compute_leaf_layout(
                     inputs,
                     style,
@@ -445,6 +472,7 @@ pub fn compute_layout(
                     |known_dimensions, available_space| {
                         measure_leaf(
                             font,
+                            shaping_cache,
                             context,
                             known_dimensions,
                             available_space,
@@ -470,8 +498,15 @@ pub fn compute_layout(
                 let baseline = measured_baseline.or_else(|| {
                     baseline_source.map(|source| match source {
                         BaselineSource::Text(text, font_size, font_weight, font_family) => {
-                            font.measure(font_family, &text, font_size, font_weight)
-                                .baseline
+                            font.measure_cached(
+                                shaping_cache,
+                                font_family,
+                                &text,
+                                font_size,
+                                font_weight,
+                                None,
+                            )
+                            .baseline
                         }
                         BaselineSource::Inline(items) => {
                             let content: Vec<florui_text::InlineContent<'_>> =
@@ -576,6 +611,7 @@ pub fn compute_layout(
 /// `florui_text`'s own module docs for that tracked gap.
 fn measure_leaf(
     font: &mut florui_text::Font,
+    shaping_cache: &mut Option<florui_text::CachedLayout>,
     context: Option<&mut LeafContext>,
     known_dimensions: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
@@ -592,21 +628,19 @@ fn measure_leaf(
 
     match context {
         LeafContext::Text(text_context) => {
-            let metrics = match wrap_width {
-                Some(width) => font.measure_wrapped(
-                    text_context.font_family,
-                    &text_context.text,
-                    text_context.font_size,
-                    text_context.font_weight,
-                    width,
-                ),
-                None => font.measure(
-                    text_context.font_family,
-                    &text_context.text,
-                    text_context.font_size,
-                    text_context.font_weight,
-                ),
-            };
+            // `measure_cached` reuses `shaping_cache`'s already-shaped
+            // Parley layout across however many times Taffy calls this
+            // closure for this same leaf during one layout pass — see its
+            // own doc, and the cache's own doc for why re-breaking a
+            // shaped layout at a new width is safe to do repeatedly.
+            let metrics = font.measure_cached(
+                shaping_cache,
+                text_context.font_family,
+                &text_context.text,
+                text_context.font_size,
+                text_context.font_weight,
+                wrap_width,
+            );
             *baseline_out = Some(metrics.baseline);
             Size {
                 width: metrics.width,
@@ -614,6 +648,11 @@ fn measure_leaf(
             }
         }
         LeafContext::Inline(items) => {
+            // Not cached the same way the plain-text case above is: a real
+            // inline formatting context's shape is a materially different
+            // build path (`shape_inline`'s own multi-item `RangedBuilder`,
+            // not a single family/text/size/weight tuple) — a known,
+            // separate follow-up, not folded into this change.
             let content: Vec<florui_text::InlineContent<'_>> =
                 items.iter().map(to_inline_content).collect();
             let result = font.shape_inline(&content, wrap_width);

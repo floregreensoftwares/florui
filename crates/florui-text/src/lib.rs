@@ -180,6 +180,18 @@ impl std::fmt::Display for TextError {
 
 impl std::error::Error for TextError {}
 
+/// A Parley layout that has already been itemized and shaped, kept around
+/// so [`Font::measure_cached`] can re-line-break it (cheap) instead of
+/// rebuilding it (the expensive step — itemization, script/font
+/// fallback, shaping every cluster) on every call. Safe to re-break
+/// repeatedly at different widths: Parley's own `break_lines`/
+/// `break_all_lines` clear and recompute a layout's line data from
+/// scratch every time they're called, never accumulating stale lines
+/// from a prior break. Opaque — nothing outside this crate constructs or
+/// inspects one; a caller only ever holds it in an `Option` it passes
+/// back into [`Font::measure_cached`].
+pub struct CachedLayout(parley::Layout<[u8; 4]>);
+
 /// Holds the (deliberately reused, per Parley's own guidance) scratch
 /// state needed to measure text, plus every font this crate currently
 /// knows about.
@@ -270,6 +282,58 @@ impl Font {
         Self::metrics_of(self.layout_wrapped(family, text, font_size, font_weight, max_width))
     }
 
+    /// Same measurement as [`Self::measure`] (`max_width: None`) or
+    /// [`Self::measure_wrapped`] (`max_width: Some(width)`), but reusing
+    /// `*cache` across repeated calls instead of rebuilding — itemizing
+    /// and shaping every cluster — from scratch each time. A caller that
+    /// queries the same `text`/`family`/`font_size`/`font_weight` more
+    /// than once (Taffy's own layout algorithms do this per leaf: an
+    /// intrinsic min/max-content pass, then a final definite pass, often
+    /// landing on more than one distinct width and sometimes the same one
+    /// twice) only pays the expensive shaping step on the first call;
+    /// every later call just re-breaks the already-shaped layout at
+    /// whatever `max_width` it asks for, which is comparatively cheap —
+    /// see [`CachedLayout`]'s own doc for why that's safe to do repeatedly.
+    ///
+    /// `*cache` must have come from a prior call with this exact
+    /// text/family/size/weight — typically one cache slot per text leaf,
+    /// scoped to one layout pass and reset for the next. Passing a cache
+    /// built for different text silently measures the *cached* text, not
+    /// `text`, the same kind of caller contract this crate's other
+    /// measure/shape methods already trust their arguments to uphold.
+    pub fn measure_cached(
+        &mut self,
+        cache: &mut Option<CachedLayout>,
+        family: FontFamily,
+        text: &str,
+        font_size: f32,
+        font_weight: f32,
+        max_width: Option<f32>,
+    ) -> TextMetrics {
+        if text.is_empty() {
+            *cache = None;
+            return TextMetrics {
+                width: 0.0,
+                height: 0.0,
+                baseline: 0.0,
+            };
+        }
+        if cache.is_none() {
+            *cache = Some(CachedLayout(self.build_unbroken(
+                family,
+                text,
+                font_size,
+                font_weight,
+            )));
+        }
+        let layout = &mut cache
+            .as_mut()
+            .expect("just populated above if it was empty")
+            .0;
+        layout.break_all_lines(max_width);
+        Self::metrics_of_ref(layout)
+    }
+
     fn metrics_of(layout: Option<parley::Layout<[u8; 4]>>) -> TextMetrics {
         match layout {
             // Parley measures an empty string as zero-width but still
@@ -280,17 +344,21 @@ impl Font {
                 height: 0.0,
                 baseline: 0.0,
             },
-            Some(layout) => TextMetrics {
-                width: layout.width(),
-                height: layout.height(),
-                // The first line's own baseline offset is already relative
-                // to the top of the whole block, since nothing precedes it.
-                baseline: layout
-                    .lines()
-                    .next()
-                    .map(|line| line.metrics().baseline)
-                    .unwrap_or(0.0),
-            },
+            Some(layout) => Self::metrics_of_ref(&layout),
+        }
+    }
+
+    fn metrics_of_ref(layout: &parley::Layout<[u8; 4]>) -> TextMetrics {
+        TextMetrics {
+            width: layout.width(),
+            height: layout.height(),
+            // The first line's own baseline offset is already relative to
+            // the top of the whole block, since nothing precedes it.
+            baseline: layout
+                .lines()
+                .next()
+                .map(|line| line.metrics().baseline)
+                .unwrap_or(0.0),
         }
     }
 
@@ -551,6 +619,25 @@ impl Font {
         if text.is_empty() {
             return None;
         }
+        let mut layout = self.build_unbroken(family, text, font_size, font_weight);
+        layout.break_all_lines(max_width);
+        Some(layout)
+    }
+
+    /// Itemizes and shapes `text` in `family` at `font_size`/`font_weight`
+    /// — the expensive step every measure/shape method needs, shared by
+    /// [`Self::build_layout`] (which breaks it once and discards it) and
+    /// [`Self::measure_cached`] (which keeps the result around to re-break
+    /// instead of redoing this). Callers with non-empty `text` only —
+    /// unlike [`Self::build_layout`], this has nothing sensible to return
+    /// for an empty string, so callers must check first.
+    fn build_unbroken(
+        &mut self,
+        family: FontFamily,
+        text: &str,
+        font_size: f32,
+        font_weight: f32,
+    ) -> parley::Layout<[u8; 4]> {
         let family_name = self.family_name(family).to_owned();
         let mut builder = self
             .layout_cx
@@ -560,9 +647,7 @@ impl Font {
             family_name.as_str(),
         )));
         builder.push_default(StyleProperty::FontWeight(FontWeight::new(font_weight)));
-        let mut layout = builder.build(text);
-        layout.break_all_lines(max_width);
-        Some(layout)
+        builder.build(text)
     }
 }
 
@@ -1111,5 +1196,108 @@ mod tests {
         assert_eq!(inline.boxes.len(), 1);
         assert_eq!(inline.boxes[0].id, 7);
         assert!(inline.width >= 40.0);
+    }
+
+    #[test]
+    fn measure_cached_first_call_matches_measure_wrapped() {
+        let mut font = Font::load_embedded();
+        let text = "one two three four five six seven eight nine ten";
+        let expected = font.measure_wrapped(FontFamily::SansSerif, text, 16.0, 400.0, 120.0);
+
+        let mut cache = None;
+        let cached = font.measure_cached(
+            &mut cache,
+            FontFamily::SansSerif,
+            text,
+            16.0,
+            400.0,
+            Some(120.0),
+        );
+        assert_eq!(cached, expected);
+        assert!(
+            cache.is_some(),
+            "a non-empty measurement must populate the cache for reuse"
+        );
+    }
+
+    #[test]
+    fn measure_cached_reuses_the_same_cache_across_different_widths() {
+        // The real point of `measure_cached`: re-breaking the same built
+        // layout at a new width must produce the identical result a fresh
+        // `measure_wrapped` at that width would — proving the cached path
+        // doesn't silently keep stale line-break state from the first call.
+        let mut font = Font::load_embedded();
+        let text = "one two three four five six seven eight nine ten";
+        let mut cache = None;
+        let first = font.measure_cached(
+            &mut cache,
+            FontFamily::SansSerif,
+            text,
+            16.0,
+            400.0,
+            Some(400.0),
+        );
+        let second = font.measure_cached(
+            &mut cache,
+            FontFamily::SansSerif,
+            text,
+            16.0,
+            400.0,
+            Some(80.0),
+        );
+        assert!(
+            second.height > first.height,
+            "wrapping the same text at a much narrower width must take more lines"
+        );
+
+        let expected_at_80 = font.measure_wrapped(FontFamily::SansSerif, text, 16.0, 400.0, 80.0);
+        assert_eq!(
+            second, expected_at_80,
+            "re-breaking a cached layout at 80px must match a fresh measurement at 80px"
+        );
+
+        let back_to_400 = font.measure_cached(
+            &mut cache,
+            FontFamily::SansSerif,
+            text,
+            16.0,
+            400.0,
+            Some(400.0),
+        );
+        assert_eq!(
+            back_to_400, first,
+            "re-breaking back to the original width must reproduce the original result, \
+             not something drifted by the intermediate re-break"
+        );
+    }
+
+    #[test]
+    fn measure_cached_with_no_max_width_matches_unwrapped_measure() {
+        let mut font = Font::load_embedded();
+        let text = "Hello, Florui";
+        let expected = font.measure(FontFamily::SansSerif, text, 16.0, 400.0);
+
+        let mut cache = None;
+        let cached =
+            font.measure_cached(&mut cache, FontFamily::SansSerif, text, 16.0, 400.0, None);
+        assert_eq!(cached, expected);
+    }
+
+    #[test]
+    fn measure_cached_with_empty_text_clears_the_cache_and_measures_zero() {
+        let mut font = Font::load_embedded();
+        let mut cache = None;
+        let metrics = font.measure_cached(
+            &mut cache,
+            FontFamily::SansSerif,
+            "",
+            16.0,
+            400.0,
+            Some(100.0),
+        );
+        assert_eq!(metrics.width, 0.0);
+        assert_eq!(metrics.height, 0.0);
+        assert_eq!(metrics.baseline, 0.0);
+        assert!(cache.is_none());
     }
 }
