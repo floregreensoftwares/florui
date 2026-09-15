@@ -141,9 +141,17 @@ fn build_inspector_model(
 
 fn format_size_cause(cause: &SizeCause) -> String {
     match cause {
-        SizeCause::MinContentClamped { intrinsic_width } => format!(
+        SizeCause::MinContentClampedWidth { intrinsic_width } => format!(
             "width held to this element's own content — flex-shrink wanted it narrower than \
              its natural {intrinsic_width:.0}px"
+        ),
+        SizeCause::MinContentClampedHeight { intrinsic_height } => format!(
+            "height held to this element's own content — flex-shrink wanted it shorter than \
+             its natural {intrinsic_height:.0}px"
+        ),
+        SizeCause::GridTrackNarrowerThanContent { intrinsic_width } => format!(
+            "width held narrower than this element's own content ({intrinsic_width:.0}px) by \
+             the grid track it landed in"
         ),
     }
 }
