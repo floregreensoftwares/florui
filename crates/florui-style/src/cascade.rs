@@ -237,6 +237,13 @@ pub struct ComputedStyle {
     pub grid_column: (GridPlacement, GridPlacement),
     /// `grid-row-start`/`grid-row-end`.
     pub grid_row: (GridPlacement, GridPlacement),
+    /// `z-index`. `None` means `auto` (the initial value) — real CSS only
+    /// gives `z-index` an effect on a positioned element, a flex item, or
+    /// a grid item; this crate has no `position` property yet, so today it
+    /// only reorders a flex/grid item among its own siblings during paint
+    /// (see `florui_paint`'s own doc on stacking order). Meaningless
+    /// anywhere else, matching real CSS.
+    pub z_index: Option<i32>,
 }
 
 /// Resolves every node in `arena` against `rules` and `state` — real
@@ -399,6 +406,24 @@ mod tests {
         let node = arena.roots()[0];
         assert_eq!(computed[&node].width, None);
         assert_eq!(computed[&node].height, None);
+    }
+
+    #[test]
+    fn z_index_defaults_to_auto() {
+        let tree: Element = view! { <div /> };
+        let (arena, computed) = styles(&tree, "", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].z_index, None);
+    }
+
+    #[test]
+    fn an_explicit_z_index_resolves_to_its_own_integer_including_negative() {
+        let tree: Element = view! {
+            <div class="back" />
+        };
+        let (arena, computed) = styles(&tree, ".back { z-index: -2; }", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].z_index, Some(-2));
     }
 
     #[test]

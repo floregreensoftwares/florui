@@ -4,24 +4,28 @@
 //!
 //! # Scope
 //!
-//! Flat background-color rectangles, painted in real document order: a
-//! node before its children, children in source order, so an overlap
-//! always resolves to whichever box comes later in the tree — the same
-//! rule real CSS painting follows for normal-flow boxes with no stacking
-//! contexts. A leaf's own text (see [`florui_style::Arena::text_content`])
-//! paints inside its padding box: glyph outlines come from
-//! [`florui_text::Font::shape`] and are rasterized with
-//! [skrifa](https://github.com/googlefonts/fontations)'s outline extractor
-//! feeding a [tiny-skia](https://github.com/RazrFalcon/tiny-skia) path,
-//! the same rasterizer backgrounds use — one painting backend, not two.
-//! There are no borders, shadows, opacity, transforms, or clipping yet —
-//! `florui_style` has no properties for any of those either.
+//! Flat background-color rectangles and solid borders, painted in real
+//! paint order (see [`paint_order`]): a node before its children, and
+//! within one node's own children, document order — except a flex or
+//! grid child with an explicit `z-index` reorders among its own siblings
+//! the same way real CSS does, the only case florui can express `z-index`
+//! for yet (there is no `position` property, so nothing here establishes
+//! a positioned element's own stacking context). An overlap always
+//! resolves to whichever box paints later. A leaf's own text (see
+//! [`florui_style::Arena::text_content`]) paints inside its padding box:
+//! glyph outlines come from [`florui_text::Font::shape`] and are
+//! rasterized with [skrifa](https://github.com/googlefonts/fontations)'s
+//! outline extractor feeding a
+//! [tiny-skia](https://github.com/RazrFalcon/tiny-skia) path, the same
+//! rasterizer backgrounds use — one painting backend, not two. There are
+//! no shadows, opacity, transforms, or clipping yet — `florui_style` has
+//! no properties for any of those either.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use florui_layout::{BoxLayout, absolute_position};
-use florui_style::{Arena, ComputedStyle, NodeId, Rgba};
+use florui_style::{Arena, ComputedStyle, Display, NodeId, Rgba};
 use florui_text::Font;
 use skrifa::instance::{LocationRef, NormalizedCoord, Size as GlyphSize};
 use skrifa::outline::{DrawSettings, OutlinePen};
@@ -131,7 +135,10 @@ pub fn paint_to_buffer(
         Pixmap::new(width, height).expect("paint_to_buffer requires a nonzero-sized canvas");
     buffer.fill(to_tiny_skia_color(canvas));
 
-    let mut stack: Vec<NodeId> = arena.roots().iter().rev().copied().collect();
+    let mut stack: Vec<NodeId> = paint_order(styles, None, arena.roots())
+        .into_iter()
+        .rev()
+        .collect();
     while let Some(node) = stack.pop() {
         paint_node(
             &mut buffer,
@@ -142,9 +149,49 @@ pub fn paint_to_buffer(
             node,
             scale_factor,
         );
-        stack.extend(arena.children(node).iter().rev());
+        let parent_display = styles.get(&node).map(|s| s.display);
+        stack.extend(
+            paint_order(styles, parent_display, arena.children(node))
+                .into_iter()
+                .rev(),
+        );
     }
     buffer
+}
+
+/// `nodes` (a set of siblings — document roots when `parent_display` is
+/// `None`, one node's own children otherwise) sorted into real paint
+/// order — back to front, so a caller walking this list in order and
+/// painting each one gets later entries drawn on top of earlier ones, the
+/// same "later wins" rule [`paint_node`]'s own doc already establishes
+/// for document order.
+///
+/// Real CSS only gives `z-index` an effect on a positioned element, a
+/// flex item, or a grid item — this crate has no `position` property yet
+/// (see [`ComputedStyle::z_index`]'s own doc), so `parent_display` is
+/// what decides whether `z_index` applies at all: `None` (no parent, i.e.
+/// a set of document roots) or anything but [`Display::Flex`]/
+/// [`Display::Grid`] leaves `nodes` in plain document order untouched,
+/// matching a plain block/inline child's `z-index` having no real effect.
+/// Only inside a flex or grid container are siblings actually reordered,
+/// by [`ComputedStyle::z_index`] ascending — `auto` (`None`) sorts as `0`
+/// for comparison purposes only, its own semantic meaning otherwise
+/// unaffected. Ties (including every sibling at the default `auto`, the
+/// common case even inside a flex/grid container) keep their original
+/// document order: [`Vec::sort_by_key`] is a stable sort, so a flex/grid
+/// container with no `z-index` anywhere paints in plain document order,
+/// unchanged from before this function existed.
+pub fn paint_order(
+    styles: &HashMap<NodeId, ComputedStyle>,
+    parent_display: Option<Display>,
+    nodes: &[NodeId],
+) -> Vec<NodeId> {
+    if !matches!(parent_display, Some(Display::Flex) | Some(Display::Grid)) {
+        return nodes.to_vec();
+    }
+    let mut ordered = nodes.to_vec();
+    ordered.sort_by_key(|id| styles.get(id).and_then(|s| s.z_index).unwrap_or(0));
+    ordered
 }
 
 /// Paints `node`'s own background and text — document-order painting
@@ -706,6 +753,164 @@ mod tests {
             pixel_rgb(&buffer, 10, 10),
             [0x00, 0xff, 0x00],
             "front is later in source order, so it should paint on top of back"
+        );
+    }
+
+    #[test]
+    fn a_flex_items_positive_z_index_paints_it_above_a_later_sibling() {
+        // "back" is later in source order (would win a plain document-order
+        // tie), but "front"'s own explicit z-index outranks it — real CSS's
+        // own rule for a flex item, which this is: z-index applies without
+        // needing `position` at all.
+        let tree: Element = view! {
+            <div class="row">
+                <div class="front" />
+                <div class="back" />
+            </div>
+        };
+        let css = "
+            .row { display: flex; }
+            .front { background-color: #00ff00; z-index: 1; }
+            .back { background-color: #ff0000; }
+        ";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+
+        let row = arena.roots()[0];
+        let front = arena.children(row)[0];
+        let back = arena.children(row)[1];
+        let mut layouts = HashMap::new();
+        layouts.insert(
+            row,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 20.0,
+                height: 20.0,
+            },
+        );
+        for child in [front, back] {
+            layouts.insert(
+                child,
+                BoxLayout {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 20.0,
+                    height: 20.0,
+                },
+            );
+        }
+
+        let mut font = Font::load_embedded();
+        let buffer = paint_to_buffer(
+            &mut font,
+            20,
+            20,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            1.0,
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 10, 10),
+            [0x00, 0xff, 0x00],
+            "front's positive z-index must win over back's later source position"
+        );
+    }
+
+    #[test]
+    fn z_index_has_no_effect_outside_a_flex_or_grid_container() {
+        // Same shape as the flex test above (later source order beaten by
+        // an earlier sibling's positive z-index), but the parent is a
+        // plain block — real CSS gives z-index no effect there at all, so
+        // document order (later wins) must still hold.
+        let tree: Element = view! {
+            <div class="column">
+                <div class="front" />
+                <div class="back" />
+            </div>
+        };
+        let css = "
+            .front { background-color: #00ff00; z-index: 1; }
+            .back { background-color: #ff0000; }
+        ";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+
+        let column = arena.roots()[0];
+        let front = arena.children(column)[0];
+        let back = arena.children(column)[1];
+        let mut layouts = HashMap::new();
+        layouts.insert(
+            column,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 20.0,
+                height: 20.0,
+            },
+        );
+        for child in [front, back] {
+            layouts.insert(
+                child,
+                BoxLayout {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 20.0,
+                    height: 20.0,
+                },
+            );
+        }
+
+        let mut font = Font::load_embedded();
+        let buffer = paint_to_buffer(
+            &mut font,
+            20,
+            20,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            1.0,
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 10, 10),
+            [0xff, 0x00, 0x00],
+            "z-index on a plain block child has no real CSS effect; back is later in \
+             source order and must still win"
+        );
+    }
+
+    #[test]
+    fn paint_order_sorts_flex_children_by_z_index_ascending_with_stable_ties() {
+        let tree: Element = view! {
+            <div class="row">
+                <div class="a" />
+                <div class="b" />
+                <div class="c" />
+                <div class="d" />
+            </div>
+        };
+        // `a` and `c` tie at 2; `d` is left at the default `auto`.
+        let css =
+            ".row { display: flex; } .a { z-index: 2; } .b { z-index: -1; } .c { z-index: 2; }";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+
+        let row = arena.roots()[0];
+        let children = arena.children(row).to_vec();
+        let (a, b, c, d) = (children[0], children[1], children[2], children[3]);
+
+        let ordered = paint_order(&styles, Some(florui_style::Display::Flex), &children);
+        assert_eq!(
+            ordered,
+            vec![b, d, a, c],
+            "ascending by z-index (-1, then auto treated as 0, then the 2/2 tie kept in its \
+             own original a-before-c order)"
         );
     }
 

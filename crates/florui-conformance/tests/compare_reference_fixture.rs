@@ -135,3 +135,7 @@ fixture_test!(
     "mixed-inline-long-content"
 );
 fixture_test!(mixed_inline_scaled_matches_chromium, "mixed-inline-scaled");
+fixture_test!(
+    grid_z_index_stacking_matches_chromium,
+    "grid-z-index-stacking"
+);
