@@ -510,6 +510,12 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(_) => self.update_and_request_redraw(),
+            // Fires on its own — not bundled into `Resized` — when the
+            // window moves to a display with a different scale factor, or
+            // the OS scale setting changes live; `viewport_scale` re-reads
+            // `window.scale_factor()` fresh every call, so re-rendering is
+            // all this needs.
+            WindowEvent::ScaleFactorChanged { .. } => self.update_and_request_redraw(),
             WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::CursorMoved { position, .. } => {
                 self.handle_cursor_moved(position.x, position.y);
