@@ -51,6 +51,16 @@ pub struct UiRuntime {
     /// way `executor` is. Notified after each [`Self::update`]'s own
     /// layout, once real geometry for that render exists.
     size_observers: Rc<SizeObserverRegistry>,
+    /// Extra `provide_context` calls a host supplied at construction — run
+    /// every [`Self::update`] (including the very first one, inside
+    /// [`Self::with_rules`] itself) alongside `executor`/`size_observers`,
+    /// without this window-independent runtime having to know what any of
+    /// them actually are. [`crate::desktop::DesktopHost`] uses this to
+    /// make its own window-specific capabilities (`WindowControls`)
+    /// reachable from components from the very first render onward, the
+    /// same way `size_observers` already is for a capability this crate
+    /// owns directly.
+    extra_context_providers: Vec<Box<dyn Fn()>>,
 }
 
 impl UiRuntime {
@@ -73,6 +83,22 @@ impl UiRuntime {
         root: impl Fn() -> Element + 'static,
         viewport: Size<AvailableSpace>,
     ) -> Self {
+        Self::with_rules_and_context(rules, root, viewport, Vec::new())
+    }
+
+    /// Same as [`Self::with_rules`], but for a host (only
+    /// [`crate::desktop::DesktopHost`] today) with its own window-specific
+    /// capabilities to make reachable from every render's own
+    /// `use_context` calls, starting with this constructor's own first
+    /// render — see `extra_context_providers`'s own doc for why that
+    /// matters and [`crate::use_committed_size`] for the established
+    /// pattern a capability provided this way follows.
+    pub(crate) fn with_rules_and_context(
+        rules: Vec<Rule>,
+        root: impl Fn() -> Element + 'static,
+        viewport: Size<AvailableSpace>,
+        extra_context_providers: Vec<Box<dyn Fn()>>,
+    ) -> Self {
         let (scope, dirty) = Scope::new();
         let mut runtime = Self {
             scope,
@@ -87,6 +113,7 @@ impl UiRuntime {
             font: florui_text::Font::load_embedded(),
             executor: Rc::new(LocalExecutor::new()),
             size_observers: Rc::new(SizeObserverRegistry::new()),
+            extra_context_providers,
         };
         runtime.update(viewport);
         runtime
@@ -157,6 +184,9 @@ impl UiRuntime {
         let tree = self.scope.render(|| {
             provide_context(Rc::clone(&executor) as Rc<dyn Executor>);
             provide_context(Rc::clone(&size_observers));
+            for provider in &self.extra_context_providers {
+                provider();
+            }
             (self.root)()
         });
         // Lets any resource the render just started (or a prior task's
@@ -251,7 +281,7 @@ mod tests {
 
     use florui::prelude::*;
     use florui_reactive::testing::manual_future;
-    use florui_reactive::{Resource, use_resource};
+    use florui_reactive::{Resource, use_context, use_resource};
 
     use super::*;
     use crate::use_committed_size;
@@ -392,6 +422,35 @@ mod tests {
             metrics.width > 0.0,
             "the same font instance register_font touched must still measure real text \
              correctly afterward"
+        );
+    }
+
+    /// `DesktopHost` needs a window-specific capability (`WindowControls`)
+    /// reachable from `use_context` starting with this constructor's own
+    /// first render, not only from the second render onward — a component
+    /// that unconditionally calls `use_window_controls()` at mount would
+    /// otherwise silently see `None` on its very first frame. Registering
+    /// a provider only *after* construction (a plain setter, rather than
+    /// a constructor argument) would miss exactly that first render, since
+    /// the constructor already ran its own first `update` before a setter
+    /// call could ever run.
+    #[test]
+    fn extra_context_providers_apply_starting_from_the_very_first_render() {
+        let seen = Rc::new(RefCell::new(None));
+        let seen_in_root = Rc::clone(&seen);
+        let root = move || {
+            *seen_in_root.borrow_mut() = use_context::<i32>();
+            view! { <div /> }
+        };
+        let providers: Vec<Box<dyn Fn()>> =
+            vec![Box::new(|| florui_reactive::provide_context(42_i32))];
+
+        let _runtime = UiRuntime::with_rules_and_context(Vec::new(), root, viewport(), providers);
+
+        assert_eq!(
+            *seen.borrow(),
+            Some(42),
+            "a provider passed to the constructor must run during the constructor's own first render"
         );
     }
 

@@ -19,7 +19,25 @@ pub use size_observer::{SizeObserverRegistry, use_committed_size};
 mod desktop;
 
 #[cfg(feature = "desktop")]
-pub use desktop::{RunError, run, run_with_css_reload};
+pub use desktop::{
+    RunError, WindowOptions, run, run_with_css_reload, run_with_css_reload_and_options,
+    run_with_options,
+};
+
+#[cfg(feature = "desktop")]
+pub mod appearance;
+
+#[cfg(feature = "desktop")]
+pub mod caption;
 
 #[cfg(feature = "desktop")]
 pub mod dpi;
+
+#[cfg(feature = "desktop")]
+pub mod gpu;
+
+#[cfg(feature = "desktop")]
+mod window_controls;
+
+#[cfg(feature = "desktop")]
+pub use window_controls::{WINDOW_DRAG_REGION_ID, WindowControls, use_window_controls};
