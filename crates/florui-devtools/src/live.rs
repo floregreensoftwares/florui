@@ -28,6 +28,12 @@ const SELECTION_HIGHLIGHT: crate::color::Rgba = crate::color::Rgba::opaque(250, 
 /// Outline around whatever's under the cursor while "Pick element" is
 /// armed, distinct from [`SELECTION_HIGHLIGHT`].
 const PICK_HOVER_HIGHLIGHT: crate::color::Rgba = crate::color::Rgba::opaque(56, 189, 248);
+/// Drawn at the selected node's own padding box, nested inside
+/// [`SELECTION_HIGHLIGHT`]'s border-box outline, only when that node's
+/// own `overflow_clips` is set — the padding box is real CSS's own clip
+/// boundary (see `ComputedStyle::overflow_clips`'s own doc), distinct
+/// from the border box the selection outline already traces.
+const CLIP_HIGHLIGHT: crate::color::Rgba = crate::color::Rgba::opaque(217, 70, 239);
 
 #[derive(Debug)]
 pub enum LiveError {
@@ -190,6 +196,9 @@ fn push_node(
         tag: arena.tag(id).to_string(),
         display: display_name(style.display).to_string(),
         background: style.background_color,
+        z_index: style.z_index,
+        opacity: style.opacity,
+        overflow_clips: style.overflow_clips,
         content,
         padding: style.padding,
         border,
@@ -198,27 +207,46 @@ fn push_node(
     });
 }
 
-/// A node's border box (content expanded by its own padding and border) in
-/// the same physical-pixel space the preview paints in.
+/// A node's border box, in the same physical-pixel space the preview
+/// paints in. [`InspectorNode::content`] already *is* this box despite
+/// its name — `BoxLayout::width`/`height` are Taffy's own final
+/// border-box size, padding and border already folded in, not the
+/// smaller inner content box — see [`padding_box_rect`]'s own doc for
+/// the real numbers that confirmed it. This function previously added
+/// padding and border on top of `content` as if it still needed them,
+/// inflating every selection/hover outline well past the node's own real
+/// edges.
 fn border_box_rect(node: &InspectorNode) -> Option<ElementBox> {
     let content = node.content?;
-    let x = (content.x - node.padding.left - node.border.left).max(0.0);
-    let y = (content.y - node.padding.top - node.border.top).max(0.0);
-    let width = content.width
-        + node.padding.left
-        + node.padding.right
-        + node.border.left
-        + node.border.right;
-    let height = content.height
-        + node.padding.top
-        + node.padding.bottom
-        + node.border.top
-        + node.border.bottom;
+    Some(ElementBox {
+        x: content.x.max(0.0).round() as u32,
+        y: content.y.max(0.0).round() as u32,
+        width: content.width.max(0.0).round() as u32,
+        height: content.height.max(0.0).round() as u32,
+    })
+}
+
+/// A node's padding box — content plus padding, excluding its border —
+/// real CSS's own clip boundary for `overflow_clips`, see
+/// [`CLIP_HIGHLIGHT`]'s own doc. Despite its name, [`InspectorNode::content`]
+/// already holds the node's whole *border* box (`BoxLayout::width`/
+/// `height` are Taffy's own final border-box size, confirmed directly
+/// against a real laid-out node with both padding and border: a 40x20
+/// content box with padding 8/6/5/7 and a 3px left / 2px top border comes
+/// back as `BoxLayout { width: 57, height: 34 }`, exactly content +
+/// padding + border) — so unlike [`border_box_rect`], which needs no
+/// adjustment at all, the padding box here only has to shed the border.
+fn padding_box_rect(node: &InspectorNode) -> Option<ElementBox> {
+    let content = node.content?;
+    let x = (content.x + node.border.left).max(0.0);
+    let y = (content.y + node.border.top).max(0.0);
+    let width = (content.width - node.border.left - node.border.right).max(0.0);
+    let height = (content.height - node.border.top - node.border.bottom).max(0.0);
     Some(ElementBox {
         x: x.round() as u32,
         y: y.round() as u32,
-        width: width.max(0.0).round() as u32,
-        height: height.max(0.0).round() as u32,
+        width: width.round() as u32,
+        height: height.round() as u32,
     })
 }
 
@@ -345,6 +373,18 @@ impl LiveHost {
                     SELECTION_HIGHLIGHT,
                     2,
                 );
+                if node.overflow_clips
+                    && let Some(clip_rect) = padding_box_rect(node)
+                {
+                    outline_rect(
+                        &mut pixels,
+                        size.width,
+                        size.height,
+                        clip_rect,
+                        CLIP_HIGHLIGHT,
+                        1,
+                    );
+                }
             }
             if self.picking
                 && let Some(hovered) = self.hovered
@@ -594,5 +634,121 @@ impl ApplicationHandler<UserEvent> for LiveHost {
         match event {
             UserEvent::Dirty => self.update_and_request_redraw(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use florui::prelude::*;
+    use florui_style::{InteractionState, compute, parse_stylesheet};
+
+    use super::*;
+
+    #[test]
+    fn inspector_nodes_carry_z_index_opacity_and_overflow_clips_from_real_css() {
+        let tree: Element = view! { <div class="stacked" /> };
+        let css = ".stacked { z-index: 3; opacity: 0.4; overflow: hidden; }";
+        let arena = Arena::build(&tree);
+        let rules = parse_stylesheet(css).unwrap();
+        let styles = compute(&arena, &rules, &InteractionState::new());
+        let layouts = HashMap::new();
+
+        let model = build_inspector_model(&arena, &styles, &layouts, None, false);
+
+        let node = &model.nodes[0];
+        assert_eq!(node.z_index, Some(3));
+        assert_eq!(node.opacity, 0.4);
+        assert!(node.overflow_clips);
+    }
+
+    #[test]
+    fn inspector_nodes_default_to_css_initial_values_with_zero_author_css() {
+        let tree: Element = view! { <div /> };
+        let arena = Arena::build(&tree);
+        let rules = parse_stylesheet("").unwrap();
+        let styles = compute(&arena, &rules, &InteractionState::new());
+        let layouts = HashMap::new();
+
+        let model = build_inspector_model(&arena, &styles, &layouts, None, false);
+
+        let node = &model.nodes[0];
+        assert_eq!(node.z_index, None);
+        assert_eq!(node.opacity, 1.0);
+        assert!(!node.overflow_clips);
+    }
+
+    /// `InspectorNode::content` is `BoxLayout::width`/`height` — Taffy's
+    /// own final *border* box, confirmed directly against a real
+    /// compute_layout run: a content-box 40x20 element with padding
+    /// top/right/bottom/left 5/6/7/8 and a 2px top / 3px left border
+    /// comes back as `BoxLayout { width: 57, height: 34 }` (40 + 8 + 6 +
+    /// 3, 20 + 5 + 7 + 2). These are that exact run's own numbers.
+    fn node_with_real_border_box() -> InspectorNode {
+        InspectorNode {
+            id: 0,
+            depth: 0,
+            tag: "div".to_string(),
+            display: "block".to_string(),
+            background: Rgba::TRANSPARENT,
+            z_index: None,
+            opacity: 1.0,
+            overflow_clips: true,
+            content: Some(ContentBox {
+                x: 0.0,
+                y: 0.0,
+                width: 57.0,
+                height: 34.0,
+            }),
+            padding: Edges {
+                top: 5.0,
+                right: 6.0,
+                bottom: 7.0,
+                left: 8.0,
+            },
+            border: Edges {
+                top: 2.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: 3.0,
+            },
+            margin: Edges {
+                top: Some(0.0),
+                right: Some(0.0),
+                bottom: Some(0.0),
+                left: Some(0.0),
+            },
+            size_cause: None,
+        }
+    }
+
+    #[test]
+    fn border_box_rect_reports_content_unchanged_since_it_already_is_the_border_box() {
+        // Regression test: this function used to add padding and border
+        // on top of `content` as if it still needed them, inflating the
+        // reported box well past the node's own real border-box edges —
+        // see `node_with_real_border_box`'s own doc for why that was
+        // wrong. `width: 57, height: 34` is the *whole* border box, no
+        // adjustment needed at all.
+        let node = node_with_real_border_box();
+
+        let rect = border_box_rect(&node).expect("a laid-out node has a border box");
+        assert_eq!(rect.x, 0);
+        assert_eq!(rect.y, 0);
+        assert_eq!(rect.width, 57, "not 57 + padding + border inflated further");
+        assert_eq!(
+            rect.height, 34,
+            "not 34 + padding + border inflated further"
+        );
+    }
+
+    #[test]
+    fn padding_box_rect_subtracts_only_the_border_from_the_reported_border_box() {
+        let node = node_with_real_border_box();
+
+        let rect = padding_box_rect(&node).expect("a laid-out node has a padding box");
+        assert_eq!(rect.x, 3, "shed only the 3px left border, not padding too");
+        assert_eq!(rect.y, 2, "shed only the 2px top border, not padding too");
+        assert_eq!(rect.width, 54, "57 border-box width minus the 3px border");
+        assert_eq!(rect.height, 32, "34 border-box height minus the 2px border");
     }
 }
