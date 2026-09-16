@@ -3,3 +3,4 @@ pub mod card;
 pub mod counter;
 pub mod dpi_ruler;
 pub mod stepper;
+pub mod transform_test;
