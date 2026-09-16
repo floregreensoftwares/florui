@@ -1,0 +1,23 @@
+{
+  "id": "backdrop-filter",
+  "description": "A 40x40 red panel with a 20x20 backdrop-filter: brightness(0.5) glass centered over it and no own background -- proves the glass darkens whatever is already painted behind it rather than painting its own content.",
+  "html": "index.html",
+  "css": "style.css",
+  "element_id": "el",
+  "viewport": { "width_css_px": 80, "height_css_px": 80, "device_pixel_ratio": 1.0 },
+  "canvas_color": "#ffffff",
+  "florui": {
+    "tag": "div",
+    "class": "group",
+    "css": ".group { display: grid; grid-template-columns: 40px; grid-template-rows: 40px; width: 40px; height: 40px; } .group .back { grid-column: 1; grid-row: 1; width: 40px; height: 40px; background-color: #ff0000; } .group .glass { grid-column: 1; grid-row: 1; width: 20px; height: 20px; margin-top: 10px; margin-left: 10px; backdrop-filter: brightness(0.5); }",
+    "children": [
+      { "tag": "div", "class": "back", "css": "" },
+      { "tag": "div", "class": "glass", "css": "" }
+    ]
+  },
+  "classification": {
+    "kind": "tolerant",
+    "threshold_percent": 12.0,
+    "reason": "Measured directly against a real Chromium capture: 6.25% of pixels differ by exactly 1 of 255 color levels (max_error 1), the same rounding-mode signature already calibrated for filter-adjustments -- not a wrong formula, which would show a large uniform error."
+  }
+}
