@@ -853,6 +853,7 @@ fn to_computed_style(values: &ComputedValues) -> ComputedStyle {
     let text = values.get_inherited_text();
     let position = values.get_position();
     let effects = values.get_effects();
+    let box_style = values.get_box();
     let font = values.get_font();
     let margin = values.get_margin();
     let padding = values.get_padding();
@@ -906,6 +907,7 @@ fn to_computed_style(values: &ComputedValues) -> ComputedStyle {
         // and keeps this conversion honest on its own, independent of
         // that upstream guarantee holding across a future Stylo upgrade.
         opacity: effects.opacity.clamp(0.0, 1.0),
+        overflow_clips: to_overflow_clips(box_style.overflow_x, box_style.overflow_y),
         font_family: to_font_family(&font.font_family),
         border: Edges {
             top: to_border_side(
@@ -1113,6 +1115,19 @@ fn to_z_index(value: style::values::computed::position::ZIndex) -> Option<i32> {
         GenericZIndex::Integer(index) => Some(index),
         GenericZIndex::Auto => None,
     }
+}
+
+/// Whether either axis's `overflow` clips its own content to the padding
+/// box — see [`crate::cascade::ComputedStyle::overflow_clips`]'s own doc
+/// for why a single bool is the right shape for this, not a loss of
+/// precision.
+fn to_overflow_clips(
+    overflow_x: style::computed_values::overflow_x::T,
+    overflow_y: style::computed_values::overflow_y::T,
+) -> bool {
+    use style::computed_values::overflow_x::T as OverflowX;
+    use style::computed_values::overflow_y::T as OverflowY;
+    !matches!(overflow_x, OverflowX::Visible) || !matches!(overflow_y, OverflowY::Visible)
 }
 
 fn to_flex_direction(value: style::computed_values::flex_direction::T) -> FlexDirection {

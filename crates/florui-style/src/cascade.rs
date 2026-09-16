@@ -284,6 +284,18 @@ pub struct ComputedStyle {
     /// through unrendered, and `florui-paint`'s own doc for the ordering
     /// this crate paints them in.
     pub box_shadow: Vec<BoxShadow>,
+    /// Whether this node clips its own content (including descendants) to
+    /// its padding box — real CSS's `overflow-x`/`overflow-y`, collapsed
+    /// to one bool. `false` only when *both* axes are the initial
+    /// `visible`; every other combination clips on both axes regardless
+    /// of which single axis declared it, which is real CSS's own rule too
+    /// (a `visible` axis paired with a non-`visible` one computes to
+    /// `auto`, not `visible`) — so this isn't a simplification of the
+    /// clipping behavior itself, only of which of `hidden`/`scroll`/
+    /// `auto`/`clip` caused it. florui doesn't scroll yet, so every
+    /// clipping value renders identically: content clips to the padding
+    /// box with no scrollbar, as if already scrolled to the origin.
+    pub overflow_clips: bool,
 }
 
 /// Resolves every node in `arena` against `rules` and `state` — real
@@ -446,6 +458,35 @@ mod tests {
         let node = arena.roots()[0];
         assert_eq!(computed[&node].width, None);
         assert_eq!(computed[&node].height, None);
+    }
+
+    #[test]
+    fn overflow_visible_is_the_default_and_does_not_clip() {
+        let tree: Element = view! { <div /> };
+        let (arena, computed) = styles(&tree, "", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert!(!computed[&node].overflow_clips);
+    }
+
+    #[test]
+    fn overflow_hidden_on_either_axis_alone_clips() {
+        let tree: Element = view! { <div class="x" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".x { overflow-x: hidden; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert!(computed[&node].overflow_clips);
+
+        let tree: Element = view! { <div class="y" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".y { overflow-y: hidden; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert!(computed[&node].overflow_clips);
     }
 
     #[test]

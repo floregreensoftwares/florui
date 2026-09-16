@@ -1,0 +1,22 @@
+{
+  "id": "overflow-hidden-clip",
+  "description": "A 20x20 overflow: hidden frame containing a 40x40 child -- the child must be clipped to the frame's own padding box, not painted at its full explicit size.",
+  "html": "index.html",
+  "css": "style.css",
+  "element_id": "el",
+  "viewport": { "width_css_px": 60, "height_css_px": 60, "device_pixel_ratio": 1.0 },
+  "canvas_color": "#ffffff",
+  "florui": {
+    "tag": "div",
+    "class": "frame",
+    "css": ".frame { width: 20px; height: 20px; overflow: hidden; } .content { width: 40px; height: 40px; background-color: #ff0000; }",
+    "children": [
+      { "tag": "div", "class": "content", "css": "" }
+    ]
+  },
+  "classification": {
+    "kind": "tolerant",
+    "threshold_percent": 3.0,
+    "reason": "Same anti-aliasing/hinting mismatch between Chromium's own rasterizer and Florui's skrifa+tiny-skia one already calibrated for the bare-element fixtures -- this fixture has no text, only flat fills, so the real number is expected to land near the low end of that range."
+  }
+}

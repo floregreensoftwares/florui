@@ -1,0 +1,11 @@
+.frame {
+    width: 20px;
+    height: 20px;
+    overflow: hidden;
+}
+
+.content {
+    width: 40px;
+    height: 40px;
+    background-color: #ff0000;
+}
