@@ -40,9 +40,9 @@ mod stylo;
 mod tree;
 
 pub use cascade::{
-    BorderSide, BoxShadow, ComputedStyle, ContentAlignment, Display, Edges, FlexDirection,
-    FlexWrap, FontFamily, GridPlacement, GridTrackSize, ItemAlignment, LengthPercentage,
-    TransformFunction, compute,
+    BorderSide, BoxShadow, ComputedStyle, ContentAlignment, Display, Edges, FilterFunction,
+    FlexDirection, FlexWrap, FontFamily, GridPlacement, GridTrackSize, ItemAlignment,
+    LengthPercentage, TransformFunction, compute,
 };
 pub use color::{ColorParseError, Rgba, parse_hex_color};
 pub use error::StyleError;
