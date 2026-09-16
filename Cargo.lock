@@ -1246,10 +1246,12 @@ dependencies = [
  "clap",
  "florui-conformance",
  "florui-devtools",
+ "florui-platform",
  "image",
  "notify",
  "serde",
  "serde_json",
+ "winit",
 ]
 
 [[package]]

@@ -130,6 +130,21 @@ impl GpuPresenter {
         self.capability
     }
 
+    /// The real surface format negotiated for this presenter — evidence
+    /// for `florui doctor --presentation` (see its own doc), not just an
+    /// internal implementation detail.
+    pub fn format(&self) -> TextureFormat {
+        self.config.format
+    }
+
+    /// The real alpha-compositing mode negotiated for this presenter —
+    /// `CompositeAlphaMode::Opaque` for [`PresentationCapability::GpuOpaque`],
+    /// `PreMultiplied` for [`PresentationCapability::GpuTransparent`] (see
+    /// this module's own doc for why `PreMultiplied` specifically).
+    pub fn alpha_mode(&self) -> CompositeAlphaMode {
+        self.config.alpha_mode
+    }
+
     /// Tries every presentation path in order, from most to least
     /// capable, returning the first that actually comes up on a real
     /// adapter — `None` only when no GPU adapter could be obtained at
@@ -361,6 +376,53 @@ impl GpuPresenter {
         self.queue.submit(Some(encoder.finish()));
         frame.present();
     }
+}
+
+/// Real evidence from a windowless GPU-capability probe — no surface, so
+/// this cannot say anything about presentation or transparency (see
+/// [`PresentationCapability`] for that); only whether *some* real adapter
+/// and device come up at all, and which one. `florui doctor --graphics`
+/// runs this in its own bounded process (see that command's own doc) so a
+/// crashed or hung driver only takes down the probe, not the whole
+/// `doctor` run.
+#[derive(Debug, Clone)]
+pub struct GraphicsProbe {
+    pub backend: String,
+    pub adapter_name: String,
+    pub device_type: String,
+    pub driver: String,
+    pub driver_info: String,
+}
+
+/// Requests any adapter (`compatible_surface: None`, since there is no
+/// window here) and a device from it, returning real, observed
+/// information about whichever one actually came up — never a guess from
+/// the OS/driver being merely installed.
+pub fn probe_graphics() -> Result<GraphicsProbe, String> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        compatible_surface: None,
+        ..Default::default()
+    }))
+    .map_err(|error| format!("no usable graphics adapter: {error}"))?;
+    let info = adapter.get_info();
+    // The device request itself is real evidence too -- an adapter can be
+    // enumerated but still fail to actually produce a device (a driver
+    // that lies about its own capabilities, a resource limit), so this
+    // probe does not report success on enumeration alone.
+    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("florui doctor graphics probe"),
+        ..Default::default()
+    }))
+    .map_err(|error| format!("adapter enumerated but device request failed: {error}"))?;
+
+    Ok(GraphicsProbe {
+        backend: format!("{:?}", info.backend),
+        adapter_name: info.name,
+        device_type: format!("{:?}", info.device_type),
+        driver: info.driver,
+        driver_info: info.driver_info,
+    })
 }
 
 fn create_upload_texture(

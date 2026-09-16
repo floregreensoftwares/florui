@@ -72,6 +72,7 @@ impl fmt::Display for DevEvent<'_> {
 }
 
 const GREEN: &str = "\x1b[32m";
+const YELLOW: &str = "\x1b[33m";
 const RED: &str = "\x1b[31m";
 const RED_BOLD: &str = "\x1b[1;31m";
 const BOLD: &str = "\x1b[1m";
@@ -105,6 +106,12 @@ pub fn success(text: &str) -> String {
 /// Bold red text, for a command's failure output.
 pub fn failure(text: &str) -> String {
     paint(RED_BOLD, text)
+}
+
+/// Yellow text, for a command's warning output — something worth noticing
+/// that isn't itself a failure.
+pub fn warning(text: &str) -> String {
+    paint(YELLOW, text)
 }
 
 /// Dimmed text, for secondary detail alongside a success/failure line.

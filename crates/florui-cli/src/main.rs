@@ -20,6 +20,8 @@ use florui_conformance::run_history::{
 };
 use florui_devtools::diagnostics::{dim_text, failure, success};
 
+mod doctor;
+
 #[derive(Parser)]
 #[command(name = "florui", about = "Florui project CLI")]
 struct Cli {
@@ -103,9 +105,50 @@ enum Command {
         #[arg(long, default_value = "native")]
         target: String,
     },
+    /// Report real, observed evidence about the local environment and
+    /// (when resolvable) the current project — see `doctor`'s own module
+    /// doc for what each flag actually probes and how honestly it's
+    /// allowed to report what it found.
+    Doctor {
+        #[arg(long, default_value = "native")]
+        target: String,
+        /// Probe for a real graphics adapter and device, in a separate
+        /// bounded process.
+        #[arg(long)]
+        graphics: bool,
+        /// Probe real window presentation (implies --graphics).
+        #[arg(long)]
+        presentation: bool,
+        /// Report packaging/distribution diagnostics.
+        #[arg(long)]
+        distribution: bool,
+        /// Emit a single JSON document on stdout instead of human-readable
+        /// lines.
+        #[arg(long)]
+        json: bool,
+        /// Also fail on applicable warning/unknown results, not just
+        /// required failures.
+        #[arg(long)]
+        strict: bool,
+    },
 }
 
 fn main() -> ExitCode {
+    // Bypasses `clap` entirely -- these exist only so `doctor`'s own
+    // `--graphics`/`--presentation` probes can re-invoke this exact
+    // binary as a separate, bounded child process (see `doctor`'s own
+    // module doc for why); they are not part of this CLI's real surface
+    // and must never appear in its own `--help` output.
+    match std::env::args().nth(1).as_deref() {
+        Some(doctor::INTERNAL_GRAPHICS_PROBE_FLAG) => {
+            return doctor::run_internal_graphics_probe();
+        }
+        Some(doctor::INTERNAL_PRESENTATION_PROBE_FLAG) => {
+            return doctor::run_internal_presentation_probe();
+        }
+        _ => {}
+    }
+
     match Cli::parse().command {
         Command::Dev { fixture, example } => match fixture {
             Some(fixture) => run_dev(fixture),
@@ -127,6 +170,21 @@ fn main() -> ExitCode {
             baseline,
         } => run_compare_all(fixtures_root, chromium, output, baseline),
         Command::Build { target } => run_build(target),
+        Command::Doctor {
+            target,
+            graphics,
+            presentation,
+            distribution,
+            json,
+            strict,
+        } => doctor::run(doctor::Options {
+            target,
+            graphics,
+            presentation,
+            distribution,
+            json,
+            strict,
+        }),
     }
 }
 
