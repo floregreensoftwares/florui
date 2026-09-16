@@ -56,6 +56,24 @@ fn wide_tree(n: usize) -> Element {
     Element::node("div", Vec::new(), children)
 }
 
+/// `n` small boxes, each `opacity`/`transform`'d into its own
+/// [`paint_group`](florui_paint) surface -- the shape of a real animated
+/// UI (`motion_test`'s own hover/keyframe rows), not just a static tree.
+/// Locks in, as an actual number, the improvement bounded offscreen
+/// surfaces bought over the old always-canvas-sized allocation per group.
+fn animated_groups_tree(n: usize) -> Element {
+    let children = (0..n)
+        .map(|i| {
+            Element::node(
+                "div",
+                vec![("class".into(), format!("item item-{i}"))],
+                Vec::new(),
+            )
+        })
+        .collect();
+    Element::node("div", vec![("class".into(), "row".into())], children)
+}
+
 fn text_leaves(n: usize) -> Element {
     let children = (0..n)
         .map(|i| {
@@ -160,5 +178,41 @@ fn bench_text(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_deep_tree, bench_wide_tree, bench_text);
+fn bench_animated_groups(c: &mut Criterion) {
+    let mut group = c.benchmark_group("paint/animated_groups");
+    group.sample_size(20);
+    for &n in &[8usize, 32] {
+        let tree = animated_groups_tree(n);
+        let (arena, styles, layouts) = arena_styles_layouts(
+            &tree,
+            ".row { display: flex; flex-direction: row; flex-wrap: wrap; gap: 20px; padding: 40px; } \
+             .item { width: 80px; height: 80px; background-color: #335577; opacity: 0.8; \
+             transform: rotate(15deg) translate(4px, 4px); }",
+        );
+        let mut font = Font::load_embedded();
+        group.bench_function(format!("{n}_groups_on_900x600"), |b| {
+            b.iter(|| {
+                paint_to_buffer(
+                    &mut font,
+                    900,
+                    600,
+                    Rgba::opaque(0x10, 0x10, 0x14),
+                    &arena,
+                    &styles,
+                    &layouts,
+                    1.0,
+                )
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_deep_tree,
+    bench_wide_tree,
+    bench_text,
+    bench_animated_groups
+);
 criterion_main!(benches);

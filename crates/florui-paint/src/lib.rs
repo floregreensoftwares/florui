@@ -57,7 +57,6 @@ mod blur;
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::rc::Rc;
 
 use florui_layout::{BoxLayout, absolute_position};
 use florui_style::{
@@ -73,6 +72,118 @@ use tiny_skia::{
 };
 
 pub type Canvas = Pixmap;
+
+/// One paint target: an owned pixel buffer, plus the absolute canvas
+/// pixel its own local `(0, 0)` corresponds to. The root canvas is a
+/// `Surface` with `origin: (0, 0)`; [`paint_group`] allocates a smaller
+/// one sized to its own subtree's real bounds instead of the whole
+/// canvas (see [`group_extent`]) — every painting primitive still
+/// computes in absolute coordinates exactly as before, converting to
+/// this surface's own local ones only at the last moment, right before
+/// the actual pixel write, so a bounded surface paints bit-identical
+/// pixels to today's canvas-sized one (see the differential test in this
+/// module's own tests).
+struct Surface {
+    pixmap: Pixmap,
+    origin: (i32, i32),
+}
+
+impl Surface {
+    fn root(pixmap: Pixmap) -> Self {
+        Self {
+            pixmap,
+            origin: (0, 0),
+        }
+    }
+
+    fn new(width: u32, height: u32, origin: (i32, i32)) -> Option<Self> {
+        Pixmap::new(width, height).map(|pixmap| Self { pixmap, origin })
+    }
+
+    fn width(&self) -> u32 {
+        self.pixmap.width()
+    }
+
+    fn height(&self) -> u32 {
+        self.pixmap.height()
+    }
+
+    /// An absolute canvas coordinate, converted to this surface's own
+    /// local pixel space.
+    fn local(&self, x: f32, y: f32) -> (f32, f32) {
+        (x - self.origin.0 as f32, y - self.origin.1 as f32)
+    }
+}
+
+/// An axis-aligned clip rectangle in absolute canvas coordinates — every
+/// clip this crate ever produces is an intersection of axis-aligned
+/// padding boxes in untransformed space (see [`clip_for_children`]), so
+/// this reproduces that exactly without needing a rasterized [`Mask`]
+/// until a fill actually needs one. Plain `f32` bounds rather than
+/// [`tiny_skia::Rect`] specifically so an empty intersection (`x1 <=
+/// x0`) stays representable instead of failing to construct — real CSS
+/// nests clips that vanish entirely (a clipped-away descendant) as
+/// routinely as ones that don't.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ClipRect {
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+}
+
+impl ClipRect {
+    fn from_xywh(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self {
+            x0: x,
+            y0: y,
+            x1: x + width,
+            y1: y + height,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.x1 <= self.x0 || self.y1 <= self.y0
+    }
+
+    /// This rect intersected with `other` — never fails; an empty result
+    /// (`is_empty()`) means nothing under both clips is ever visible,
+    /// same as real CSS's own nested `overflow: hidden`.
+    fn intersect(&self, other: &ClipRect) -> ClipRect {
+        ClipRect {
+            x0: self.x0.max(other.x0),
+            y0: self.y0.max(other.y0),
+            x1: self.x1.min(other.x1),
+            y1: self.y1.min(other.y1),
+        }
+    }
+
+    /// Materializes a real [`Mask`] the size of `surface`, opaque exactly
+    /// where this clip (converted to `surface`'s own local coordinates)
+    /// allows painting — `None` for an empty clip, matching every other
+    /// "nothing to paint" case in this module (the caller skips the fill
+    /// entirely rather than passing a mask that would filter out
+    /// everything).
+    fn to_mask(self, surface: &Surface) -> Option<Mask> {
+        if self.is_empty() {
+            return None;
+        }
+        let (lx0, ly0) = surface.local(self.x0, self.y0);
+        let (lx1, ly1) = surface.local(self.x1, self.y1);
+        let rect = Rect::from_ltrb(
+            lx0.max(0.0),
+            ly0.max(0.0),
+            lx1.min(surface.width() as f32),
+            ly1.min(surface.height() as f32),
+        )?;
+        let mut mask = Mask::new(surface.width(), surface.height())?;
+        let mut path_builder = PathBuilder::new();
+        path_builder.push_rect(rect);
+        let path = path_builder.finish()?;
+        mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
+        Some(mask)
+    }
+}
 
 #[derive(Debug)]
 pub struct PaintError {
@@ -171,11 +282,12 @@ pub fn paint_to_buffer(
     layouts: &HashMap<NodeId, BoxLayout>,
     scale_factor: f32,
 ) -> Canvas {
-    let mut buffer =
+    let pixmap =
         Pixmap::new(width, height).expect("paint_to_buffer requires a nonzero-sized canvas");
-    buffer.fill(to_tiny_skia_color(canvas));
+    let mut surface = Surface::root(pixmap);
+    surface.pixmap.fill(to_tiny_skia_color(canvas));
     paint_nodes(
-        &mut buffer,
+        &mut surface,
         arena,
         styles,
         layouts,
@@ -185,7 +297,7 @@ pub fn paint_to_buffer(
         scale_factor,
         None,
     );
-    buffer
+    surface.pixmap
 }
 
 /// Paints `nodes` (a set of siblings — document roots when
@@ -221,7 +333,7 @@ pub fn paint_to_buffer(
 /// clip shares the same one.
 #[allow(clippy::too_many_arguments)]
 fn paint_nodes(
-    buffer: &mut Canvas,
+    buffer: &mut Surface,
     arena: &Arena,
     styles: &HashMap<NodeId, ComputedStyle>,
     layouts: &HashMap<NodeId, BoxLayout>,
@@ -229,12 +341,12 @@ fn paint_nodes(
     parent_display: Option<Display>,
     nodes: &[NodeId],
     scale_factor: f32,
-    clip: Option<Rc<Mask>>,
+    clip: Option<ClipRect>,
 ) {
-    let mut stack: Vec<(NodeId, Option<Rc<Mask>>)> = paint_order(styles, parent_display, nodes)
+    let mut stack: Vec<(NodeId, Option<ClipRect>)> = paint_order(styles, parent_display, nodes)
         .into_iter()
         .rev()
-        .map(|id| (id, clip.clone()))
+        .map(|id| (id, clip))
         .collect();
     while let Some((node, node_clip)) = stack.pop() {
         let opacity = styles.get(&node).map_or(1.0, |s| s.opacity);
@@ -245,10 +357,19 @@ fn paint_nodes(
             // would still cost the same work for no visible result.
             continue;
         }
+        if node_clip.is_some_and(|c| c.is_empty()) {
+            // An ancestor's `overflow: hidden` clip has already vanished
+            // entirely (fully outside its own visible region) — nothing
+            // under it can ever be visible either. Distinct from `None`
+            // (no clip at all, paint everywhere): `ClipRect::to_mask`
+            // returns `None` for both an absent clip and an empty one, so
+            // this has to be checked before converting, not after.
+            continue;
+        }
+        let node_abs = absolute_position(arena, layouts, node);
         let transform = match (styles.get(&node), layouts.get(&node)) {
             (Some(style), Some(&layout)) => {
-                let (x, y) = absolute_position(arena, layouts, node);
-                resolve_transform(style, &layout, x, y, scale_factor)
+                resolve_transform(style, &layout, node_abs.0, node_abs.1, scale_factor)
             }
             _ => Transform::identity(),
         };
@@ -261,6 +382,7 @@ fn paint_nodes(
                 layouts,
                 font,
                 node,
+                node_abs,
                 scale_factor,
                 node_clip,
                 opacity,
@@ -268,6 +390,7 @@ fn paint_nodes(
             );
             continue;
         }
+        let node_mask = node_clip.and_then(|c| c.to_mask(buffer));
         paint_node(
             buffer,
             arena,
@@ -276,23 +399,15 @@ fn paint_nodes(
             font,
             node,
             scale_factor,
-            node_clip.as_deref(),
+            node_mask.as_ref(),
         );
-        let child_clip = clip_for_children(
-            arena,
-            styles,
-            layouts,
-            node,
-            &node_clip,
-            buffer.width(),
-            buffer.height(),
-        );
+        let child_clip = clip_for_children(arena, styles, layouts, node, node_clip);
         let child_display = styles.get(&node).map(|s| s.display);
         stack.extend(
             paint_order(styles, child_display, arena.children(node))
                 .into_iter()
                 .rev()
-                .map(|id| (id, child_clip.clone())),
+                .map(|id| (id, child_clip)),
         );
     }
 }
@@ -317,49 +432,27 @@ fn clip_for_children(
     styles: &HashMap<NodeId, ComputedStyle>,
     layouts: &HashMap<NodeId, BoxLayout>,
     node: NodeId,
-    incoming: &Option<Rc<Mask>>,
-    canvas_width: u32,
-    canvas_height: u32,
-) -> Option<Rc<Mask>> {
+    incoming: Option<ClipRect>,
+) -> Option<ClipRect> {
     let clips = styles.get(&node).is_some_and(|s| s.overflow_clips);
     if !clips {
-        return incoming.clone();
+        return incoming;
     }
     let Some(&layout) = layouts.get(&node) else {
-        return incoming.clone();
+        return incoming;
     };
     let (x, y) = absolute_position(arena, layouts, node);
     let border = styles.get(&node).map_or(NO_BORDER, |s| s.border);
-    let padding_box = Rect::from_xywh(
+    let padding_box = ClipRect::from_xywh(
         x + border.left.width,
         y + border.top.width,
         (layout.width - border.left.width - border.right.width).max(0.0),
         (layout.height - border.top.width - border.bottom.width).max(0.0),
     );
-    let Some(padding_box) = padding_box else {
-        return incoming.clone();
-    };
-    let mut path_builder = PathBuilder::new();
-    path_builder.push_rect(padding_box);
-    let Some(path) = path_builder.finish() else {
-        return incoming.clone();
-    };
-
-    let mask = match incoming {
-        Some(parent_mask) => {
-            let mut mask = (**parent_mask).clone();
-            mask.intersect_path(&path, FillRule::Winding, true, Transform::identity());
-            mask
-        }
-        None => {
-            let Some(mut mask) = Mask::new(canvas_width, canvas_height) else {
-                return incoming.clone();
-            };
-            mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
-            mask
-        }
-    };
-    Some(Rc::new(mask))
+    Some(match incoming {
+        Some(parent) => parent.intersect(&padding_box),
+        None => padding_box,
+    })
 }
 
 const NO_BORDER: florui_style::Edges<florui_style::BorderSide> = florui_style::Edges {
@@ -373,8 +466,387 @@ const NO_BORDER_SIDE: florui_style::BorderSide = florui_style::BorderSide {
     color: Rgba::TRANSPARENT,
 };
 
+/// Total padding `filters`' own combined blur reach needs on every side
+/// — zero for `brightness`/`contrast`/`saturate`, which are pointwise
+/// and never read a neighboring pixel. Matched exhaustively (no wildcard
+/// arm) so a future [`FilterFunction`] variant fails to compile here
+/// until someone classifies its own extent, rather than silently
+/// contributing zero padding for a filter that actually needs some.
+fn filter_inflation(filters: &[FilterFunction]) -> f32 {
+    filters
+        .iter()
+        .map(|function| match function {
+            FilterFunction::Blur(radius) => blur::kernel_radius(*radius) as f32,
+            FilterFunction::Brightness(_)
+            | FilterFunction::Contrast(_)
+            | FilterFunction::Saturate(_) => 0.0,
+        })
+        .sum()
+}
+
+/// Every pixel `node`'s own subtree could possibly paint, in absolute,
+/// pre-`node`'s-own-transform coordinates — the union of `node`'s own
+/// border box, each of its own outset `box-shadow` layers (inflated by
+/// their own blur), its own text ink, and each child's own contribution.
+/// A child that itself starts a nested group is mapped through its own
+/// transform (and inflated by its own filter first) before folding into
+/// this union — its pixels land at their own transformed position
+/// *inside* this still-untransformed surface. A child with
+/// [`ComputedStyle::overflow_clips`] narrows what its own children
+/// contribute to its own padding box first, mirroring
+/// [`clip_for_children`]; a child at `opacity <= 0` contributes nothing,
+/// mirroring [`paint_nodes`]'s own skip.
+///
+/// Reshapes text fresh (the same call [`paint_node`] itself makes, since
+/// neither this crate nor `florui_text` caches shaped runs across
+/// calls) — a real, measured cost for a text-bearing animated group,
+/// accepted here rather than falling back to the canvas-sized surface
+/// for every label; see this crate's own paint benchmark for the actual
+/// number.
+///
+/// `None` only when `node` has no entry in `layouts` at all — the same
+/// case every other painting function in this module already treats as
+/// nothing to paint.
+#[allow(clippy::too_many_arguments)]
+fn subtree_extent(
+    arena: &Arena,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    layouts: &HashMap<NodeId, BoxLayout>,
+    font: &mut Font,
+    node: NodeId,
+    abs_x: f32,
+    abs_y: f32,
+    scale_factor: f32,
+) -> Option<(f32, f32, f32, f32)> {
+    let layout = *layouts.get(&node)?;
+    let style = styles.get(&node);
+
+    let mut min_x = abs_x;
+    let mut min_y = abs_y;
+    let mut max_x = abs_x + layout.width;
+    let mut max_y = abs_y + layout.height;
+
+    if let Some(style) = style {
+        for shadow in style
+            .box_shadow
+            .iter()
+            .filter(|s| !s.inset && s.color.a != 0)
+        {
+            let (sx, sy, sw, sh) =
+                outset_shadow_extent(shadow, abs_x, abs_y, layout.width, layout.height);
+            let pad = if shadow.blur_radius > 0.0 {
+                blur::kernel_radius(shadow.blur_radius / 2.0) as f32
+            } else {
+                0.0
+            };
+            min_x = min_x.min(sx - pad);
+            min_y = min_y.min(sy - pad);
+            max_x = max_x.max(sx + sw + pad);
+            max_y = max_y.max(sy + sh + pad);
+        }
+    }
+
+    let border = style.map_or(NO_BORDER, |s| s.border);
+    let no_padding = florui_style::Edges {
+        top: 0.0,
+        right: 0.0,
+        bottom: 0.0,
+        left: 0.0,
+    };
+    let padding = style.map_or(no_padding, |s| s.padding);
+    let content_x = abs_x + border.left.width + padding.left;
+    let content_y = abs_y + border.top.width + padding.top;
+    let content_width =
+        (layout.width - border.left.width - border.right.width - padding.left - padding.right)
+            .max(0.0);
+    let wrap_width = content_width / scale_factor;
+    let font_size = style.map_or(16.0, |s| s.font_size);
+    // Glyph ink can overhang its own advance/line box (an italic swash,
+    // a tall diacritic) — one `font_size` of slack on every side, same
+    // reasoning as `rasterize_and_blur`'s own padding: cheap, and the
+    // 1c visibility clamp already tightens this back down wherever the
+    // extra room isn't actually visible.
+    let ink_pad = font_size * scale_factor;
+    let mut shaped_extent = None;
+    if florui_layout::is_inline_formatting_context(arena, styles, node) {
+        if let Some(shaped) =
+            florui_layout::shape_inline_formatting_context(font, arena, styles, node, wrap_width)
+        {
+            shaped_extent = Some((shaped.width, shaped.height));
+        }
+    } else {
+        let text = arena.text_content(node);
+        if !text.is_empty() {
+            let font_weight = style.map_or(400.0, |s| s.font_weight);
+            let font_family = style.map_or(florui_text::FontFamily::SansSerif, |s| {
+                to_text_font_family(s.font_family)
+            });
+            let shaped = font.shape_wrapped(font_family, text, font_size, font_weight, wrap_width);
+            shaped_extent = Some((shaped.width, shaped.height));
+        }
+    }
+    if let Some((shaped_width, shaped_height)) = shaped_extent {
+        min_x = min_x.min(content_x - ink_pad);
+        min_y = min_y.min(content_y - ink_pad);
+        max_x = max_x.max(content_x + shaped_width * scale_factor + ink_pad);
+        max_y = max_y.max(content_y + shaped_height * scale_factor + ink_pad);
+    }
+
+    let overflow_clips = style.is_some_and(|s| s.overflow_clips);
+    let clip_to_padding = overflow_clips.then(|| {
+        ClipRect::from_xywh(
+            abs_x + border.left.width,
+            abs_y + border.top.width,
+            (layout.width - border.left.width - border.right.width).max(0.0),
+            (layout.height - border.top.width - border.bottom.width).max(0.0),
+        )
+    });
+
+    for &child in arena.children(node) {
+        let child_opacity = styles.get(&child).map_or(1.0, |s| s.opacity);
+        if child_opacity <= 0.0 {
+            continue;
+        }
+        let Some(&child_layout) = layouts.get(&child) else {
+            continue;
+        };
+        let child_abs_x = abs_x + child_layout.x;
+        let child_abs_y = abs_y + child_layout.y;
+        let Some(child_extent) = subtree_extent(
+            arena,
+            styles,
+            layouts,
+            font,
+            child,
+            child_abs_x,
+            child_abs_y,
+            scale_factor,
+        ) else {
+            continue;
+        };
+
+        let child_style = styles.get(&child);
+        let child_transform = child_style
+            .map(|s| resolve_transform(s, &child_layout, child_abs_x, child_abs_y, scale_factor))
+            .unwrap_or(Transform::identity());
+        let child_has_filter = child_style.is_some_and(|s| !s.filter.is_empty());
+        let child_is_group =
+            child_opacity < 1.0 || !child_transform.is_identity() || child_has_filter;
+
+        let (cx0, cy0, cx1, cy1) = if child_is_group {
+            let filter_pad = child_style.map_or(0.0, |s| filter_inflation(&s.filter));
+            let (fx0, fy0, fx1, fy1) = (
+                child_extent.0 - filter_pad,
+                child_extent.1 - filter_pad,
+                child_extent.2 + filter_pad,
+                child_extent.3 + filter_pad,
+            );
+            map_rect_aabb(fx0, fy0, fx1, fy1, child_transform)
+        } else {
+            child_extent
+        };
+
+        let (cx0, cy0, cx1, cy1) = match &clip_to_padding {
+            Some(clip) => {
+                let clipped = clip.intersect(&ClipRect {
+                    x0: cx0,
+                    y0: cy0,
+                    x1: cx1,
+                    y1: cy1,
+                });
+                if clipped.is_empty() {
+                    continue;
+                }
+                (clipped.x0, clipped.y0, clipped.x1, clipped.y1)
+            }
+            None => (cx0, cy0, cx1, cy1),
+        };
+
+        min_x = min_x.min(cx0);
+        min_y = min_y.min(cy0);
+        max_x = max_x.max(cx1);
+        max_y = max_y.max(cy1);
+    }
+
+    Some((min_x, min_y, max_x, max_y))
+}
+
+/// What [`group_extent`] decided: either a real, computed bound smaller
+/// than the target it'll composite onto, or a reason it fell back to
+/// the target's own full size instead — see [`group_extent`]'s own doc
+/// for when each reason applies. `#[cfg(test)]`-only: production code
+/// only needs to know bounded-vs-not, but a test asserting a fixture
+/// took the bounded path (catching a silent fallback regression) needs
+/// to know *which* fallback it silently took instead.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FallbackReason {
+    /// [`subtree_extent`] found nothing to paint at all.
+    NothingToPaint,
+    /// A computed bound was non-finite (a non-invertible or otherwise
+    /// degenerate `transform`).
+    NonFinite,
+    /// The computed bound's own area already reaches or exceeds the
+    /// target's — nothing gained from a "bounded" surface that isn't
+    /// actually bounded.
+    AreaReachesTarget,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum GroupSizing {
+    Bounded {
+        width: u32,
+        height: u32,
+        origin: (i32, i32),
+    },
+    /// Nothing in `node`'s own subtree is visible at all — `paint_group`
+    /// returns without painting or compositing anything, the correct
+    /// (not merely convenient) outcome for, e.g., a `0×0` box with a
+    /// `transform` declared, which used to panic on the old canvas-sized
+    /// `Pixmap::new(0, 0).expect(..)`.
+    Empty,
+    FullTarget(FallbackReason),
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_FULL_TARGET_GROUPS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Every [`GroupSizing`] decision [`group_extent`] has made since the
+    /// last [`tests::reset_group_sizing_log`] — a test's own way to
+    /// assert a fixture's groups actually took the bounded path, not a
+    /// silent fallback nobody noticed regressed.
+    static GROUP_SIZING_LOG: std::cell::RefCell<Vec<GroupSizing>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Records `sizing` into [`GROUP_SIZING_LOG`] (test builds only) and
+/// returns it unchanged — every `group_extent` return path goes through
+/// this instead of a bare `return`, so the log always reflects exactly
+/// what callers actually got back.
+fn record_sizing(sizing: GroupSizing) -> GroupSizing {
+    #[cfg(test)]
+    GROUP_SIZING_LOG.with(|log| log.borrow_mut().push(sizing));
+    sizing
+}
+
+/// The region [`group_extent`]'s own 1c visibility clamp treats as
+/// "could end up on screen" — a lightweight stand-in for a real
+/// [`Surface`] (no pixel buffer, just its own bounds) so computing the
+/// clamp never needs to allocate a pixmap the size of whatever region
+/// it's bounding.
+#[derive(Clone, Copy)]
+struct TargetRegion {
+    origin: (i32, i32),
+    width: u32,
+    height: u32,
+}
+
+/// Decides how large a surface [`paint_group`] should allocate for
+/// `node`'s own subtree, and where its own local `(0, 0)` sits in
+/// absolute canvas coordinates — bounded to the subtree's own real
+/// extent (see [`subtree_extent`]) rather than always `target`'s own
+/// full size, clamped further to whatever of that extent could actually
+/// end up visible once `transform` and `target`'s own bounds are
+/// accounted for. See this module's own tests for the differential
+/// proof that a bounded surface paints bit-identical pixels to a
+/// `target`-sized one regardless of which this returns.
+#[allow(clippy::too_many_arguments)]
+fn group_extent(
+    arena: &Arena,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    layouts: &HashMap<NodeId, BoxLayout>,
+    font: &mut Font,
+    node: NodeId,
+    node_abs: (f32, f32),
+    scale_factor: f32,
+    target: TargetRegion,
+    transform: Transform,
+) -> GroupSizing {
+    #[cfg(test)]
+    if FORCE_FULL_TARGET_GROUPS.with(|flag| flag.get()) {
+        return record_sizing(GroupSizing::FullTarget(FallbackReason::AreaReachesTarget));
+    }
+
+    let Some((x0, y0, x1, y1)) = subtree_extent(
+        arena,
+        styles,
+        layouts,
+        font,
+        node,
+        node_abs.0,
+        node_abs.1,
+        scale_factor,
+    ) else {
+        return record_sizing(GroupSizing::FullTarget(FallbackReason::NothingToPaint));
+    };
+
+    let own_filter = styles.get(&node).map_or(&[][..], |s| &s.filter[..]);
+    let pad = filter_inflation(own_filter);
+    let (x0, y0, x1, y1) = (x0 - pad, y0 - pad, x1 + pad, y1 + pad);
+
+    // 1c: clamp to what could possibly be seen — `target`'s own visible
+    // rect, mapped back through `transform` into this group's own
+    // pre-transform space (an inverted, non-invertible `transform`
+    // — `scale(0)`, degenerate — skips the clamp rather than folding to
+    // nothing; the unclamped extent is still a correct, if looser,
+    // bound). Inflated by the same filter reach as above: a pixel just
+    // inside the clamped edge still needs blur samples from just
+    // outside it.
+    let (x0, y0, x1, y1) = match transform.invert() {
+        Some(inverse) => {
+            let target_x0 = target.origin.0 as f32;
+            let target_y0 = target.origin.1 as f32;
+            let target_x1 = target_x0 + target.width as f32;
+            let target_y1 = target_y0 + target.height as f32;
+            let (vx0, vy0, vx1, vy1) =
+                map_rect_aabb(target_x0, target_y0, target_x1, target_y1, inverse);
+            (
+                x0.max(vx0 - pad),
+                y0.max(vy0 - pad),
+                x1.min(vx1 + pad),
+                y1.min(vy1 + pad),
+            )
+        }
+        None => (x0, y0, x1, y1),
+    };
+
+    if !x0.is_finite() || !y0.is_finite() || !x1.is_finite() || !y1.is_finite() {
+        return record_sizing(GroupSizing::FullTarget(FallbackReason::NonFinite));
+    }
+
+    // 1d: snap outward to whole pixels, plus a 1px transparent margin —
+    // `draw_pixmap`'s own edge-pad sampling under a rotated/scaled
+    // composite needs the surface's own edge to actually be transparent,
+    // not real content right up against it (see the differential test
+    // for the case this covers).
+    const MARGIN: f32 = 1.0;
+    let ix0 = (x0 - MARGIN).floor();
+    let iy0 = (y0 - MARGIN).floor();
+    let ix1 = (x1 + MARGIN).ceil();
+    let iy1 = (y1 + MARGIN).ceil();
+
+    if ix1 <= ix0 || iy1 <= iy0 {
+        return record_sizing(GroupSizing::Empty);
+    }
+
+    let width = (ix1 - ix0) as u32;
+    let height = (iy1 - iy0) as u32;
+    if u64::from(width) * u64::from(height) >= u64::from(target.width) * u64::from(target.height) {
+        return record_sizing(GroupSizing::FullTarget(FallbackReason::AreaReachesTarget));
+    }
+
+    record_sizing(GroupSizing::Bounded {
+        width,
+        height,
+        origin: (ix0 as i32, iy0 as i32),
+    })
+}
+
 /// Renders `node`'s own box and its whole subtree into a fresh,
-/// transparent buffer the same size as `buffer`, applies `node`'s own
+/// transparent buffer — sized and positioned by [`group_extent`] to
+/// `node`'s own subtree's real bounds, not always `target`'s own full
+/// size (see that function's own doc) — applies `node`'s own
 /// [`ComputedStyle::filter`] chain to that buffer's pixels (see
 /// [`apply_filters`]), then composites the result onto `buffer` at
 /// `opacity` through `transform` — real CSS's own "group opacity" (every
@@ -395,11 +867,6 @@ const NO_BORDER_SIDE: florui_style::BorderSide = florui_style::BorderSide {
 /// node with more than one applies them together in this one function,
 /// matching real CSS's own single stacking-context-establishing group.
 ///
-/// A full canvas-sized buffer per group, uncached and unpooled — correct,
-/// but not yet the bounded/pooled temporary surfaces real compositing
-/// work eventually needs for many overlapping translucent or transformed
-/// panels at once.
-///
 /// `clip` is an ancestor's clip, exactly as [`paint_node`] takes it —
 /// applied both to what's painted *inside* the group (so a descendant
 /// still respects an ancestor's `overflow: hidden` even though it's
@@ -411,19 +878,66 @@ const NO_BORDER_SIDE: florui_style::BorderSide = florui_style::BorderSide {
 /// an ancestor's clip, not the other way around.
 #[allow(clippy::too_many_arguments)]
 fn paint_group(
-    buffer: &mut Canvas,
+    buffer: &mut Surface,
     arena: &Arena,
     styles: &HashMap<NodeId, ComputedStyle>,
     layouts: &HashMap<NodeId, BoxLayout>,
     font: &mut Font,
     node: NodeId,
+    node_abs: (f32, f32),
     scale_factor: f32,
-    clip: Option<Rc<Mask>>,
+    clip: Option<ClipRect>,
     opacity: f32,
     transform: Transform,
 ) {
-    let mut group = Pixmap::new(buffer.width(), buffer.height())
-        .expect("paint_to_buffer requires a nonzero-sized canvas");
+    let target_rect = ClipRect::from_xywh(
+        buffer.origin.0 as f32,
+        buffer.origin.1 as f32,
+        buffer.width() as f32,
+        buffer.height() as f32,
+    );
+    // A clip already narrower than the whole target tightens what
+    // `group_extent`'s own 1c visibility clamp needs to consider —
+    // harmless to skip (the clamp against the full target alone still
+    // gives a correct, just looser, bound), so an absent clip just
+    // reuses `target_rect` unchanged.
+    let visible_rect = match clip {
+        Some(clip) => target_rect.intersect(&clip),
+        None => target_rect,
+    };
+    let sizing = if visible_rect.is_empty() {
+        GroupSizing::Empty
+    } else {
+        let visible_target = TargetRegion {
+            origin: (visible_rect.x0 as i32, visible_rect.y0 as i32),
+            width: (visible_rect.x1 - visible_rect.x0).max(1.0).ceil() as u32,
+            height: (visible_rect.y1 - visible_rect.y0).max(1.0).ceil() as u32,
+        };
+        group_extent(
+            arena,
+            styles,
+            layouts,
+            font,
+            node,
+            node_abs,
+            scale_factor,
+            visible_target,
+            transform,
+        )
+    };
+    let (width, height, origin) = match sizing {
+        GroupSizing::Empty => return,
+        GroupSizing::Bounded {
+            width,
+            height,
+            origin,
+        } => (width, height, origin),
+        GroupSizing::FullTarget(_) => (buffer.width(), buffer.height(), buffer.origin),
+    };
+    let Some(mut group) = Surface::new(width, height, origin) else {
+        return;
+    };
+    let inner_mask = clip.and_then(|c| c.to_mask(&group));
     paint_node(
         &mut group,
         arena,
@@ -432,17 +946,9 @@ fn paint_group(
         font,
         node,
         scale_factor,
-        clip.as_deref(),
+        inner_mask.as_ref(),
     );
-    let content_clip = clip_for_children(
-        arena,
-        styles,
-        layouts,
-        node,
-        &clip,
-        buffer.width(),
-        buffer.height(),
-    );
+    let content_clip = clip_for_children(arena, styles, layouts, node, clip);
     let child_display = styles.get(&node).map(|s| s.display);
     paint_nodes(
         &mut group,
@@ -457,13 +963,36 @@ fn paint_group(
     );
 
     let filter = styles.get(&node).map_or(&[][..], |s| &s.filter[..]);
-    apply_filters(&mut group, filter);
+    apply_filters(&mut group.pixmap, filter);
 
     let paint = PixmapPaint {
         opacity,
         ..Default::default()
     };
-    buffer.draw_pixmap(0, 0, group.as_ref(), &paint, transform, clip.as_deref());
+    // `draw_pixmap`'s own `(x, y)` places the group's local `(0, 0)` at
+    // that *absolute* position before `transform` (its own `transform`
+    // argument) ever runs — see this crate's own differential test for
+    // why the target's own origin can't just be folded into `(x, y)`
+    // alongside the group's: for a non-identity `transform` (rotate,
+    // scale) that would double-shift, correct only by coincidence for a
+    // translate-only one. Composing it into the transform itself instead
+    // (`translate(-target_origin)` run *after* `transform`, via
+    // `pre_concat` — the same "last-listed runs first" idiom
+    // `resolve_transform` uses) reduces exactly to today's `(0, 0,
+    // transform)` call whenever the target is the root canvas
+    // (`buffer.origin == (0, 0)`), and stays correct for a group nested
+    // inside another bounded one too.
+    let to_target = Transform::from_translate(-(buffer.origin.0 as f32), -(buffer.origin.1 as f32))
+        .pre_concat(transform);
+    let composite_mask = clip.and_then(|c| c.to_mask(buffer));
+    buffer.pixmap.draw_pixmap(
+        group.origin.0,
+        group.origin.1,
+        group.pixmap.as_ref(),
+        &paint,
+        to_target,
+        composite_mask.as_ref(),
+    );
 }
 
 /// The real 2D affine matrix `style`'s own `transform` describes, pivoted
@@ -546,12 +1075,19 @@ pub fn transformed_bounding_box(
     scale_factor: f32,
 ) -> (f32, f32, f32, f32) {
     let transform = resolve_transform(style, layout, x, y, scale_factor);
-    let corners = [
-        (x, y),
-        (x + layout.width, y),
-        (x, y + layout.height),
-        (x + layout.width, y + layout.height),
-    ];
+    let (min_x, min_y, max_x, max_y) =
+        map_rect_aabb(x, y, x + layout.width, y + layout.height, transform);
+    (min_x, min_y, max_x - min_x, max_y - min_y)
+}
+
+/// Maps an axis-aligned rectangle's own four corners through `transform`
+/// and returns the axis-aligned bounding box of the result, as `(min_x,
+/// min_y, max_x, max_y)` — the same corner-mapping
+/// [`transformed_bounding_box`] always did, pulled out so
+/// [`group_extent`] can reuse it for a nested group's own contribution to
+/// its enclosing group's bounds.
+fn map_rect_aabb(x0: f32, y0: f32, x1: f32, y1: f32, transform: Transform) -> (f32, f32, f32, f32) {
+    let corners = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)];
     let mut min_x = f32::INFINITY;
     let mut min_y = f32::INFINITY;
     let mut max_x = f32::NEG_INFINITY;
@@ -564,7 +1100,7 @@ pub fn transformed_bounding_box(
         max_x = max_x.max(point.x);
         max_y = max_y.max(point.y);
     }
-    (min_x, min_y, max_x - min_x, max_y - min_y)
+    (min_x, min_y, max_x, max_y)
 }
 
 /// Samples `buffer` within `node`'s own border box, filters that sample
@@ -575,7 +1111,7 @@ pub fn transformed_bounding_box(
 /// Sampling ignores `clip` (an ancestor's clip stops painting, it doesn't
 /// erase what's already there); only the write-back respects it.
 fn apply_backdrop_filter(
-    buffer: &mut Canvas,
+    buffer: &mut Surface,
     x: f32,
     y: f32,
     width: f32,
@@ -586,17 +1122,18 @@ fn apply_backdrop_filter(
     if functions.is_empty() {
         return;
     }
-    let x0 = x.max(0.0).floor() as i32;
-    let y0 = y.max(0.0).floor() as i32;
-    let x1 = (x + width).min(buffer.width() as f32).ceil() as i32;
-    let y1 = (y + height).min(buffer.height() as f32).ceil() as i32;
+    let (lx, ly) = buffer.local(x, y);
+    let x0 = lx.max(0.0).floor() as i32;
+    let y0 = ly.max(0.0).floor() as i32;
+    let x1 = (lx + width).min(buffer.width() as f32).ceil() as i32;
+    let y1 = (ly + height).min(buffer.height() as f32).ceil() as i32;
     if x1 <= x0 || y1 <= y0 {
         return;
     }
     let Some(region) = IntRect::from_xywh(x0, y0, (x1 - x0) as u32, (y1 - y0) as u32) else {
         return;
     };
-    let Some(mut backdrop) = buffer.clone_rect(region) else {
+    let Some(mut backdrop) = buffer.pixmap.clone_rect(region) else {
         return;
     };
     apply_filters(&mut backdrop, functions);
@@ -604,7 +1141,7 @@ fn apply_backdrop_filter(
         blend_mode: BlendMode::Source,
         ..Default::default()
     };
-    buffer.draw_pixmap(
+    buffer.pixmap.draw_pixmap(
         x0,
         y0,
         backdrop.as_ref(),
@@ -818,7 +1355,7 @@ pub fn paint_order(
 /// against its own content-clip, only a descendant's.
 #[allow(clippy::too_many_arguments)]
 fn paint_node(
-    buffer: &mut Canvas,
+    buffer: &mut Surface,
     arena: &Arena,
     styles: &HashMap<NodeId, ComputedStyle>,
     layouts: &HashMap<NodeId, BoxLayout>,
@@ -967,7 +1504,7 @@ fn paint_node(
 }
 
 fn fill_rect(
-    buffer: &mut Canvas,
+    buffer: &mut Surface,
     x: f32,
     y: f32,
     width: f32,
@@ -975,10 +1512,11 @@ fn fill_rect(
     color: Rgba,
     clip: Option<&Mask>,
 ) {
-    let x0 = x.max(0.0);
-    let y0 = y.max(0.0);
-    let x1 = (x + width).max(0.0).min(buffer.width() as f32);
-    let y1 = (y + height).max(0.0).min(buffer.height() as f32);
+    let (lx, ly) = buffer.local(x, y);
+    let x0 = lx.max(0.0);
+    let y0 = ly.max(0.0);
+    let x1 = (lx + width).max(0.0).min(buffer.width() as f32);
+    let y1 = (ly + height).max(0.0).min(buffer.height() as f32);
     let Some(rect) = Rect::from_ltrb(x0, y0, x1, y1) else {
         return;
     };
@@ -986,7 +1524,9 @@ fn fill_rect(
     let mut paint = Paint::default();
     paint.set_color_rgba8(color.r, color.g, color.b, color.a);
     paint.anti_alias = false;
-    buffer.fill_rect(rect, &paint, Transform::identity(), clip);
+    buffer
+        .pixmap
+        .fill_rect(rect, &paint, Transform::identity(), clip);
 }
 
 /// Paints `border`'s four sides as flat rectangles at the box's own outer
@@ -1000,7 +1540,7 @@ fn fill_rect(
 /// paints identically to a mitered corner anyway.
 #[allow(clippy::too_many_arguments)]
 fn paint_border(
-    buffer: &mut Canvas,
+    buffer: &mut Surface,
     x: f32,
     y: f32,
     width: f32,
@@ -1063,7 +1603,7 @@ fn paint_border(
 /// comma-separated list.
 #[allow(clippy::too_many_arguments)]
 fn paint_box_shadows(
-    buffer: &mut Canvas,
+    buffer: &mut Surface,
     x: f32,
     y: f32,
     width: f32,
@@ -1093,17 +1633,15 @@ fn paint_box_shadows(
 /// (visible through a *transparent* background otherwise, which a real
 /// browser never shows).
 fn paint_outset_shadow(
-    buffer: &mut Canvas,
+    buffer: &mut Surface,
     x: f32,
     y: f32,
     width: f32,
     height: f32,
     shadow: &florui_style::BoxShadow,
 ) {
-    let outer_x = x + shadow.offset_x - shadow.spread_radius;
-    let outer_y = y + shadow.offset_y - shadow.spread_radius;
-    let outer_width = width + 2.0 * shadow.spread_radius;
-    let outer_height = height + 2.0 * shadow.spread_radius;
+    let (outer_x, outer_y, outer_width, outer_height) =
+        outset_shadow_extent(shadow, x, y, width, height);
     fill_rect_minus_hole(
         buffer,
         outer_x,
@@ -1126,7 +1664,7 @@ fn paint_outset_shadow(
 /// [`paint_outset_shadow`]'s own shape, matching real CSS's own "spread
 /// makes an outer shadow bigger, an inner one's hole smaller" rule.
 fn paint_inset_shadow(
-    buffer: &mut Canvas,
+    buffer: &mut Surface,
     x: f32,
     y: f32,
     width: f32,
@@ -1173,7 +1711,7 @@ fn paint_inset_shadow(
 /// [`fill_rect`]'s own no-op handling.
 #[allow(clippy::too_many_arguments)]
 fn fill_rect_minus_hole(
-    buffer: &mut Canvas,
+    buffer: &mut Surface,
     outer_x: f32,
     outer_y: f32,
     outer_width: f32,
@@ -1362,18 +1900,38 @@ fn stamp_rect(
 /// shadow shape itself, then clips the *already-blurred* result away
 /// from the box's own border box — the clip itself stays a hard edge,
 /// only the shape's own outer boundary softens).
+/// The rect an outset `box-shadow` layer's own shape occupies (its region
+/// of interest for a blur too — the shape *is* the region for an outset
+/// shadow, unlike an inset one's differently-shaped hole), as `(x, y,
+/// width, height)`. Shared by [`paint_outset_shadow_blurred`] (which
+/// blurs exactly this) and [`group_extent`] (which needs to know how far
+/// a shadow can paint without running the blur itself), so the two can't
+/// drift apart.
+fn outset_shadow_extent(
+    shadow: &florui_style::BoxShadow,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) -> (f32, f32, f32, f32) {
+    (
+        x + shadow.offset_x - shadow.spread_radius,
+        y + shadow.offset_y - shadow.spread_radius,
+        width + 2.0 * shadow.spread_radius,
+        height + 2.0 * shadow.spread_radius,
+    )
+}
+
 fn paint_outset_shadow_blurred(
-    buffer: &mut Canvas,
+    buffer: &mut Surface,
     x: f32,
     y: f32,
     width: f32,
     height: f32,
     shadow: &florui_style::BoxShadow,
 ) {
-    let outer_x = x + shadow.offset_x - shadow.spread_radius;
-    let outer_y = y + shadow.offset_y - shadow.spread_radius;
-    let outer_width = width + 2.0 * shadow.spread_radius;
-    let outer_height = height + 2.0 * shadow.spread_radius;
+    let (outer_x, outer_y, outer_width, outer_height) =
+        outset_shadow_extent(shadow, x, y, width, height);
 
     let Some(blurred) = rasterize_and_blur(
         outer_x,
@@ -1411,7 +1969,7 @@ fn paint_outset_shadow_blurred(
 /// routine [`paint_outset_shadow_blurred`] uses works here too, with the
 /// hole as the shape and the padding box as the region of interest.
 fn paint_inset_shadow_blurred(
-    buffer: &mut Canvas,
+    buffer: &mut Surface,
     x: f32,
     y: f32,
     width: f32,
@@ -1464,26 +2022,36 @@ fn paint_inset_shadow_blurred(
 /// `buffer` in `color`, skipping any pixel `allowed` rejects or that
 /// falls outside `buffer`'s own bounds.
 fn composite_blurred_shadow(
-    buffer: &mut Canvas,
+    buffer: &mut Surface,
     blurred: &BlurredShape,
     color: Rgba,
     invert: bool,
     allowed: impl Fn(f32, f32) -> bool,
 ) {
-    let canvas_width = buffer.width() as i64;
-    let canvas_height = buffer.height() as i64;
+    // `blurred.origin_x/y` are absolute canvas coordinates (computed from
+    // the shadow's own absolute position, independent of which surface
+    // this ends up composited onto) — `allowed` keeps comparing in that
+    // same absolute space (matching the caller's own absolute
+    // `x`/`width`-based bounds check), only the final pixel index below
+    // converts to `buffer`'s own local one.
+    let surface_width = buffer.width() as i64;
+    let surface_height = buffer.height() as i64;
 
     for local_y in 0..blurred.height {
         let canvas_y = blurred.origin_y as i64 + local_y as i64;
-        if canvas_y < 0 || canvas_y >= canvas_height {
-            continue;
-        }
         for local_x in 0..blurred.width {
             let canvas_x = blurred.origin_x as i64 + local_x as i64;
-            if canvas_x < 0 || canvas_x >= canvas_width {
+            if !allowed(canvas_x as f32, canvas_y as f32) {
                 continue;
             }
-            if !allowed(canvas_x as f32, canvas_y as f32) {
+
+            let (buffer_x, buffer_y) = buffer.local(canvas_x as f32, canvas_y as f32);
+            let (buffer_x, buffer_y) = (buffer_x as i64, buffer_y as i64);
+            if buffer_x < 0
+                || buffer_x >= surface_width
+                || buffer_y < 0
+                || buffer_y >= surface_height
+            {
                 continue;
             }
 
@@ -1493,9 +2061,9 @@ fn composite_blurred_shadow(
                 continue;
             }
 
-            let index = (canvas_y as u32 * buffer.width() + canvas_x as u32) as usize;
-            let dst = buffer.pixels()[index];
-            buffer.pixels_mut()[index] = blend_source_over(dst, color, coverage);
+            let index = (buffer_y as u32 * buffer.width() + buffer_x as u32) as usize;
+            let dst = buffer.pixmap.pixels()[index];
+            buffer.pixmap.pixels_mut()[index] = blend_source_over(dst, color, coverage);
         }
     }
 }
@@ -1567,7 +2135,7 @@ fn to_text_font_family(value: florui_style::FontFamily) -> florui_text::FontFami
     }
 }
 
-fn paint_text(buffer: &mut Canvas, font: &mut Font, params: TextPaint<'_>) {
+fn paint_text(buffer: &mut Surface, font: &mut Font, params: TextPaint<'_>) {
     let TextPaint {
         text,
         font_size,
@@ -1601,7 +2169,7 @@ fn paint_text(buffer: &mut Canvas, font: &mut Font, params: TextPaint<'_>) {
 /// canvas's own (possibly physical) units, the other half of that split.
 #[allow(clippy::too_many_arguments)]
 fn paint_shaped_runs(
-    buffer: &mut Canvas,
+    buffer: &mut Surface,
     runs: &[florui_text::ShapedRun],
     x: f32,
     y: f32,
@@ -1609,6 +2177,11 @@ fn paint_shaped_runs(
     scale_factor: f32,
     clip: Option<&Mask>,
 ) {
+    // Converted to `buffer`'s own local coordinates once, up front —
+    // every glyph's own pen position below builds directly on it, so the
+    // whole path ends up in local space without touching each glyph
+    // individually.
+    let (x, y) = buffer.local(x, y);
     let mut builder = PathBuilder::new();
 
     for run in runs {
@@ -1648,7 +2221,7 @@ fn paint_shaped_runs(
     let mut paint = Paint::default();
     paint.set_color_rgba8(color.r, color.g, color.b, color.a);
     paint.anti_alias = true;
-    buffer.fill_path(
+    buffer.pixmap.fill_path(
         &path,
         &paint,
         FillRule::Winding,
@@ -1715,6 +2288,69 @@ mod tests {
     fn pixel_rgb(buffer: &Canvas, x: u32, y: u32) -> [u8; 3] {
         let pixel = buffer.pixel(x, y).expect("pixel is within the canvas");
         [pixel.red(), pixel.green(), pixel.blue()]
+    }
+
+    /// Runs `paint` (a real `paint_to_buffer` call, or anything that ends
+    /// up calling it) once with [`group_extent`] deciding real bounded
+    /// surfaces, once with every group forced to `target`-sized — the
+    /// keystone correctness check this whole change stands on: since
+    /// every group surface's origin is an integer, every fill still
+    /// lands on the identical sub-pixel coordinate either way (see
+    /// `Surface::local`'s own doc), so the two runs must produce
+    /// pixel-identical output, not merely visually close. Panics with
+    /// the first differing pixel's own coordinates and colors, which is
+    /// far more useful for tracking down a real regression than a bare
+    /// `assert_eq!` on two whole buffers.
+    fn assert_bounded_and_full_target_paint_identically(mut paint: impl FnMut() -> Canvas) {
+        FORCE_FULL_TARGET_GROUPS.with(|flag| flag.set(false));
+        let bounded = paint();
+        FORCE_FULL_TARGET_GROUPS.with(|flag| flag.set(true));
+        let full_target = paint();
+        FORCE_FULL_TARGET_GROUPS.with(|flag| flag.set(false));
+
+        assert_eq!(bounded.width(), full_target.width());
+        assert_eq!(bounded.height(), full_target.height());
+        for y in 0..bounded.height() {
+            for x in 0..bounded.width() {
+                let a = bounded.pixel(x, y).unwrap();
+                let b = full_target.pixel(x, y).unwrap();
+                assert_eq!(
+                    (a.red(), a.green(), a.blue(), a.alpha()),
+                    (b.red(), b.green(), b.blue(), b.alpha()),
+                    "pixel ({x}, {y}) differs between a bounded group surface and a \
+                     target-sized one — bounding changed real output, not just its cost"
+                );
+            }
+        }
+    }
+
+    /// Clears [`GROUP_SIZING_LOG`] and returns its previous contents —
+    /// call right after a real paint, so the returned entries are
+    /// exactly what that one paint's own groups decided.
+    fn take_group_sizing_log() -> Vec<GroupSizing> {
+        GROUP_SIZING_LOG.with(|log| std::mem::take(&mut *log.borrow_mut()))
+    }
+
+    /// Asserts every group `paint` triggers actually took the bounded
+    /// path — the regression this whole log exists to catch: a bug that
+    /// makes `group_extent` silently fall back to `FullTarget` would
+    /// still pass every pixel-correctness test (a target-sized surface
+    /// is still *correct*, just not what this change is for), so
+    /// correctness tests alone can't catch it.
+    fn assert_every_group_was_bounded(paint: impl FnOnce()) {
+        take_group_sizing_log();
+        paint();
+        let log = take_group_sizing_log();
+        assert!(
+            !log.is_empty(),
+            "expected at least one group to be painted, saw none"
+        );
+        for sizing in &log {
+            assert!(
+                matches!(sizing, GroupSizing::Bounded { .. }),
+                "expected every group to be bounded, one instead took {sizing:?}"
+            );
+        }
     }
 
     #[test]
@@ -3881,5 +4517,414 @@ mod tests {
     fn an_empty_backdrop_filter_paints_nothing_extra() {
         let buffer = backdrop_over_red_buffer("");
         assert_eq!(pixel_rgb(&buffer, 5, 5), [0xff, 0, 0]);
+    }
+
+    // --- Bounded group surfaces (`group_extent`/`Surface`) ---
+
+    #[test]
+    fn a_typical_small_box_with_opacity_actually_gets_a_bounded_group_surface() {
+        // The whole point of this change: prove it's not just correct,
+        // but that a normal small animated box actually takes the
+        // bounded path in practice, not a silent fallback that would
+        // leave the original canvas-sized-allocation cost unchanged
+        // while still passing every pixel-correctness test below.
+        assert_every_group_was_bounded(|| {
+            let _ = single_box_buffer(
+                ".box { background-color: #ff0000; opacity: 0.5; }",
+                200,
+                1.0,
+            );
+        });
+    }
+
+    #[test]
+    fn group_extent_classifies_why_it_fell_back_to_the_full_target() {
+        // AreaReachesTarget: a box that exactly fills its own canvas has
+        // nothing to gain from a smaller surface.
+        take_group_sizing_log();
+        let _ = single_box_buffer(".box { background-color: #ff0000; opacity: 0.5; }", 10, 1.0);
+        let log = take_group_sizing_log();
+        assert!(
+            matches!(
+                log.as_slice(),
+                [GroupSizing::FullTarget(FallbackReason::AreaReachesTarget)]
+            ),
+            "expected a single AreaReachesTarget fallback, got {log:?}"
+        );
+
+        // NonFinite: a `scale(0)` transform has no inverse.
+        take_group_sizing_log();
+        let _ = single_box_buffer_at(
+            ".box { background-color: #ff0000; transform: scale(0); }",
+            40,
+            1.0,
+            10.0,
+            10.0,
+        );
+        let log = take_group_sizing_log();
+        assert!(
+            matches!(
+                log.as_slice(),
+                [GroupSizing::FullTarget(FallbackReason::NonFinite)]
+            ),
+            "expected a single NonFinite fallback, got {log:?}"
+        );
+
+        // NothingToPaint: `subtree_extent` bails out entirely when `node`
+        // has no entry in `layouts` at all (the one case that isn't just
+        // an empty box) — `opacity` alone is enough to route it into
+        // `paint_group` even with no layout to size a border box from.
+        let tree: Element = view! { <div class="box" /> };
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(".box { opacity: 0.5; }").unwrap();
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
+        let layouts = HashMap::new();
+        let mut font = Font::load_embedded();
+        take_group_sizing_log();
+        let _ = paint_to_buffer(
+            &mut font,
+            20,
+            20,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            1.0,
+        );
+        let log = take_group_sizing_log();
+        assert!(
+            matches!(
+                log.as_slice(),
+                [GroupSizing::FullTarget(FallbackReason::NothingToPaint)]
+            ),
+            "expected a single NothingToPaint fallback, got {log:?}"
+        );
+    }
+
+    #[test]
+    fn a_rotated_box_at_a_non_zero_position_paints_identically_bounded_or_target_sized() {
+        // The exact case a naive port breaks: `rotate(90deg)` about a
+        // non-zero position composites through a real matrix, not just a
+        // translate, so folding the target's own origin into
+        // `draw_pixmap`'s `(x, y)` instead of into the transform itself
+        // (the two "double-shift" traps this crate's own `paint_group`
+        // doc warns about) would only show up here, never for a
+        // translate-only transform.
+        assert_bounded_and_full_target_paint_identically(|| {
+            single_box_buffer_at(
+                ".box { background-color: #ff0000; transform: rotate(90deg); }",
+                60,
+                1.0,
+                15.0,
+                20.0,
+            )
+        });
+    }
+
+    #[test]
+    fn a_scaled_box_at_a_non_zero_position_paints_identically_bounded_or_target_sized() {
+        assert_bounded_and_full_target_paint_identically(|| {
+            single_box_buffer_at(
+                ".box { background-color: #ff0000; transform: scale(2.5); transform-origin: 20% 80%; }",
+                80,
+                1.0,
+                25.0,
+                10.0,
+            )
+        });
+    }
+
+    #[test]
+    fn a_blurred_filter_paints_identically_bounded_or_target_sized() {
+        assert_bounded_and_full_target_paint_identically(|| {
+            single_box_buffer_at(
+                ".box { background-color: #ff0000; filter: blur(6px); }",
+                80,
+                1.0,
+                30.0,
+                30.0,
+            )
+        });
+    }
+
+    #[test]
+    fn a_box_shadow_inside_a_group_paints_identically_bounded_or_target_sized() {
+        assert_bounded_and_full_target_paint_identically(|| {
+            single_box_buffer_at(
+                ".box {
+                    background-color: #ff0000;
+                    opacity: 0.5;
+                    box-shadow: 4px 4px 6px 2px #000000;
+                }",
+                80,
+                1.0,
+                25.0,
+                25.0,
+            )
+        });
+    }
+
+    #[test]
+    fn a_zero_sized_box_with_a_transform_does_not_panic() {
+        // Used to panic: a 0x0 canvas-sized group buffer failed
+        // `Pixmap::new(0, 0).expect(..)`. `group_extent` now sizes the
+        // group to the (empty) content itself, and `paint_group` treats
+        // `GroupSizing::Empty` as "paint nothing," not an error.
+        let tree: Element = view! { <div class="box" /> };
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(".box { transform: rotate(45deg); }").unwrap();
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
+        let node = arena.roots()[0];
+        let mut layouts = HashMap::new();
+        layouts.insert(
+            node,
+            BoxLayout {
+                x: 5.0,
+                y: 5.0,
+                width: 0.0,
+                height: 0.0,
+            },
+        );
+        let mut font = Font::load_embedded();
+        // Must not panic — the whole point of the test.
+        let _ = paint_to_buffer(
+            &mut font,
+            20,
+            20,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            1.0,
+        );
+    }
+
+    #[test]
+    fn nested_groups_composite_at_the_right_position_and_combined_opacity() {
+        // Outer: opacity 0.5, translated (10, 0). Inner: opacity 0.5,
+        // translated a further (5, 5) within the outer's own box. A
+        // wrong nested-target composite (the same double-shift risk as
+        // the rotation test above, here across two bounded surfaces
+        // instead of one) would land the inner box at the wrong
+        // position, not just the wrong opacity.
+        let tree: Element = view! {
+            <div class="outer">
+                <div class="inner" />
+            </div>
+        };
+        let css = "
+            .outer { width: 10px; height: 10px; opacity: 0.5; transform: translate(10px, 0); }
+            .inner { width: 10px; height: 10px; background-color: #ff0000; opacity: 0.5; transform: translate(5px, 5px); }
+        ";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
+        let outer = arena.roots()[0];
+        let inner = arena.children(outer)[0];
+        let mut layouts = HashMap::new();
+        layouts.insert(
+            outer,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        );
+        layouts.insert(
+            inner,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        );
+        let mut font = Font::load_embedded();
+        let mut paint = || {
+            paint_to_buffer(
+                &mut font,
+                40,
+                40,
+                Rgba::opaque(0, 0, 0),
+                &arena,
+                &styles,
+                &layouts,
+                1.0,
+            )
+        };
+        let buffer = paint();
+
+        // Outer box's own untransformed spot (0,0)-(10,10): untouched.
+        assert_eq!(pixel_rgb(&buffer, 5, 5), [0, 0, 0]);
+        // Inner box lands at outer's translate (10, 0) plus its own
+        // (5, 5) = (15, 5)-(25, 15); combined opacity 0.5 * 0.5 = 0.25
+        // against the canvas's own black.
+        assert_eq!(pixel_rgb(&buffer, 20, 10), [0x40, 0, 0]);
+
+        FORCE_FULL_TARGET_GROUPS.with(|flag| flag.set(false));
+        assert_bounded_and_full_target_paint_identically(paint);
+    }
+
+    #[test]
+    fn overflow_hidden_clips_an_opacity_child_even_through_a_bounded_group_surface() {
+        // The single most important new test for this change: a naive
+        // port that keeps passing canvas-sized clip masks into a smaller
+        // bounded surface hits tiny-skia's own silent size-mismatch
+        // no-op (`RasterPipelineBlitter::new` returns `None`, logged,
+        // never panics) — every fill inside the frame would silently
+        // paint nothing, and this test is what would actually notice.
+        let tree: Element = view! {
+            <div class="frame">
+                <div class="content" />
+            </div>
+        };
+        let css = "
+            .frame { width: 20px; height: 20px; overflow: hidden; }
+            .content { background-color: #ff0000; opacity: 0.5; }
+        ";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
+        let frame = arena.roots()[0];
+        let content = arena.children(frame)[0];
+        let mut layouts = HashMap::new();
+        layouts.insert(
+            frame,
+            BoxLayout {
+                x: 10.0,
+                y: 10.0,
+                width: 20.0,
+                height: 20.0,
+            },
+        );
+        // Spills past the frame on every side, same as the existing
+        // non-group clip test — this time the child itself starts a
+        // group (`opacity: 0.5`), so `paint_group`'s own bounded surface
+        // is what needs to still respect the frame's clip.
+        layouts.insert(
+            content,
+            BoxLayout {
+                x: -10.0,
+                y: -10.0,
+                width: 40.0,
+                height: 40.0,
+            },
+        );
+        let mut font = Font::load_embedded();
+        let buffer = paint_to_buffer(
+            &mut font,
+            60,
+            60,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            1.0,
+        );
+
+        // Inside the frame: the faded red content, not black.
+        assert_eq!(pixel_rgb(&buffer, 15, 15), [0x80, 0, 0]);
+        // Outside the frame, where the content would otherwise spill:
+        // the canvas's own black, not red — proof the clip actually
+        // held.
+        assert_eq!(pixel_rgb(&buffer, 2, 2), [0, 0, 0]);
+        assert_eq!(pixel_rgb(&buffer, 45, 45), [0, 0, 0]);
+    }
+
+    #[test]
+    fn a_backdrop_filter_inside_a_translated_group_still_samples_the_right_pixels() {
+        let tree: Element = view! {
+            <div class="group">
+                <div class="back">
+                    <div class="glass" />
+                </div>
+            </div>
+        };
+        let css = "
+            .group { opacity: 0.99; transform: translate(20px, 20px); }
+            .back { width: 40px; height: 40px; background-color: #ff0000; }
+            .glass { width: 20px; height: 20px; backdrop-filter: brightness(0.5); }
+        ";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
+        let group = arena.roots()[0];
+        let back = arena.children(group)[0];
+        let glass = arena.children(back)[0];
+        let mut layouts = HashMap::new();
+        layouts.insert(
+            group,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 40.0,
+                height: 40.0,
+            },
+        );
+        layouts.insert(
+            back,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 40.0,
+                height: 40.0,
+            },
+        );
+        layouts.insert(
+            glass,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 20.0,
+                height: 20.0,
+            },
+        );
+        let mut font = Font::load_embedded();
+        let buffer = paint_to_buffer(
+            &mut font,
+            80,
+            80,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            1.0,
+        );
+
+        // Inside the glass (translated to (20,20)-(40,40)): dimmed red,
+        // off by one LSB from a plain 0.5 brightness() (0x80) because
+        // `opacity: 0.99` (needed to keep this a real group) also
+        // shaves a fraction off every channel: 0x80 * 0.99 rounds down
+        // to 0x7f.
+        assert_eq!(pixel_rgb(&buffer, 30, 30), [0x7f, 0, 0]);
+        // Inside the group but outside the glass: red, faded by the
+        // same 0.99 group opacity (0xff * 0.99 rounds down to 0xfc).
+        assert_eq!(pixel_rgb(&buffer, 55, 55), [0xfc, 0, 0]);
     }
 }
