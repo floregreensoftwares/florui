@@ -1,0 +1,100 @@
+.page {
+    display: flex;
+    flex-direction: column;
+    width: 900px;
+    padding-top: 24px;
+    padding-right: 24px;
+    padding-bottom: 24px;
+    padding-left: 24px;
+    background-color: #1e1e22;
+    color: #ffffff;
+}
+
+.instructions {
+    font-size: 14px;
+    margin-bottom: 24px;
+}
+
+.grid {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    column-gap: 12px;
+    row-gap: 12px;
+}
+
+.sample {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 140px;
+}
+
+.stage {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    width: 140px;
+    height: 140px;
+    background-color: #2a2a30;
+}
+
+.label {
+    font-size: 11px;
+    margin-top: 8px;
+    color: #cfcfd6;
+}
+
+.box {
+    width: 60px;
+    height: 60px;
+    background-color: #2f7d6c;
+    border-top-width: 10px;
+    border-top-style: solid;
+    border-top-color: #ff0000;
+    border-left-width: 10px;
+    border-left-style: solid;
+    border-left-color: #ff0000;
+}
+
+.translate {
+    transform: translate(20px, 20px);
+}
+
+.translate-pct {
+    transform: translate(50%, 0);
+}
+
+.scale-up {
+    transform: scale(1.5);
+}
+
+.scale-x {
+    transform: scaleX(1.8);
+}
+
+.rotate {
+    transform: rotate(45deg);
+}
+
+.matrix {
+    transform: matrix(1, 0, 0, 1, 20, -20);
+}
+
+.translate-then-rotate {
+    transform: translate(30px, 0) rotate(45deg);
+}
+
+.rotate-then-translate {
+    transform: rotate(45deg) translate(30px, 0);
+}
+
+.faded-and-moved {
+    opacity: 0.5;
+    transform: translate(20px, 20px);
+}
+
+.skewed {
+    transform: skewX(30deg);
+}
