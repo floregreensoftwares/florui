@@ -1,0 +1,26 @@
+.group {
+    display: grid;
+    grid-template-columns: 40px;
+    grid-template-rows: 40px;
+    width: 40px;
+    height: 40px;
+    opacity: 0.5;
+}
+
+.group .back {
+    grid-column: 1;
+    grid-row: 1;
+    width: 30px;
+    height: 30px;
+    background-color: #ff0000;
+}
+
+.group .front {
+    grid-column: 1;
+    grid-row: 1;
+    width: 30px;
+    height: 30px;
+    background-color: #00ff00;
+    margin-top: 10px;
+    margin-left: 10px;
+}

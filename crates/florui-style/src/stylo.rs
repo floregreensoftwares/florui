@@ -851,6 +851,7 @@ fn to_computed_style(values: &ComputedValues) -> ComputedStyle {
     let background = values.get_background();
     let text = values.get_inherited_text();
     let position = values.get_position();
+    let effects = values.get_effects();
     let font = values.get_font();
     let margin = values.get_margin();
     let padding = values.get_padding();
@@ -899,6 +900,11 @@ fn to_computed_style(values: &ComputedValues) -> ComputedStyle {
         column_gap: to_gap(&position.column_gap),
         row_gap: to_gap(&position.row_gap),
         z_index: to_z_index(position.z_index),
+        // Stylo already clamps a declared `opacity` to this range at
+        // computed-value time per spec; clamping again here costs nothing
+        // and keeps this conversion honest on its own, independent of
+        // that upstream guarantee holding across a future Stylo upgrade.
+        opacity: effects.opacity.clamp(0.0, 1.0),
         font_family: to_font_family(&font.font_family),
         border: Edges {
             top: to_border_side(

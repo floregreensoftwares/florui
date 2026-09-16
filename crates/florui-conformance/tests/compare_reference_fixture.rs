@@ -139,3 +139,7 @@ fixture_test!(
     grid_z_index_stacking_matches_chromium,
     "grid-z-index-stacking"
 );
+fixture_test!(
+    grid_group_opacity_overlap_matches_chromium,
+    "grid-group-opacity-overlap"
+);

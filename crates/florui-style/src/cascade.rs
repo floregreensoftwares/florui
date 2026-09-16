@@ -244,6 +244,14 @@ pub struct ComputedStyle {
     /// (see `florui_paint`'s own doc on stacking order). Meaningless
     /// anywhere else, matching real CSS.
     pub z_index: Option<i32>,
+    /// `opacity`, clamped to `0.0..=1.0` (real CSS's own computed-value
+    /// clamp). `1.0` (fully opaque) is the initial value and paints
+    /// exactly as before this property existed. Below `1.0`, painting
+    /// this node's own box *and every descendant* as one composited group
+    /// is what makes it "group" opacity rather than a per-primitive
+    /// multiply — see `florui_paint`'s own doc on why that distinction is
+    /// visible wherever a node's own children overlap each other.
+    pub opacity: f32,
 }
 
 /// Resolves every node in `arena` against `rules` and `state` — real
@@ -406,6 +414,30 @@ mod tests {
         let node = arena.roots()[0];
         assert_eq!(computed[&node].width, None);
         assert_eq!(computed[&node].height, None);
+    }
+
+    #[test]
+    fn opacity_defaults_to_fully_opaque() {
+        let tree: Element = view! { <div /> };
+        let (arena, computed) = styles(&tree, "", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].opacity, 1.0);
+    }
+
+    #[test]
+    fn an_explicit_opacity_resolves_to_its_own_value() {
+        let tree: Element = view! { <div class="ghost" /> };
+        let (arena, computed) = styles(&tree, ".ghost { opacity: 0.4; }", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].opacity, 0.4);
+    }
+
+    #[test]
+    fn an_out_of_range_opacity_clamps_to_0_1() {
+        let tree: Element = view! { <div class="over" /> };
+        let (arena, computed) = styles(&tree, ".over { opacity: 3; }", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].opacity, 1.0);
     }
 
     #[test]

@@ -17,9 +17,13 @@
 //! rasterized with [skrifa](https://github.com/googlefonts/fontations)'s
 //! outline extractor feeding a
 //! [tiny-skia](https://github.com/RazrFalcon/tiny-skia) path, the same
-//! rasterizer backgrounds use — one painting backend, not two. There are
-//! no shadows, opacity, transforms, or clipping yet — `florui_style` has
-//! no properties for any of those either.
+//! rasterizer backgrounds use — one painting backend, not two. A node
+//! with `opacity` below `1.0` paints itself and its whole subtree into an
+//! offscreen buffer first, composited back as one group (see
+//! [`paint_group_with_opacity`]) — real CSS's own group-opacity
+//! semantics, not a per-primitive alpha multiply. There are no shadows,
+//! transforms, or clipping yet — `florui_style` has no properties for
+//! any of those either.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -30,7 +34,7 @@ use florui_text::Font;
 use skrifa::instance::{LocationRef, NormalizedCoord, Size as GlyphSize};
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{FontRef, GlyphId, MetadataProvider};
-use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Rect, Transform};
+use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, PixmapPaint, Rect, Transform};
 
 pub type Canvas = Pixmap;
 
@@ -134,29 +138,123 @@ pub fn paint_to_buffer(
     let mut buffer =
         Pixmap::new(width, height).expect("paint_to_buffer requires a nonzero-sized canvas");
     buffer.fill(to_tiny_skia_color(canvas));
+    paint_nodes(
+        &mut buffer,
+        arena,
+        styles,
+        layouts,
+        font,
+        None,
+        arena.roots(),
+        scale_factor,
+    );
+    buffer
+}
 
-    let mut stack: Vec<NodeId> = paint_order(styles, None, arena.roots())
+/// Paints `nodes` (a set of siblings — document roots when
+/// `parent_display` is `None`, one node's own children otherwise) and
+/// their descendants onto `buffer`, in real paint order (see
+/// [`paint_order`]).
+///
+/// Iterative for the common case — every node fully opaque, the same
+/// walk `paint_to_buffer` always did — but recurses once per ancestor
+/// whose own [`ComputedStyle::opacity`] is below `1.0`, to render that
+/// ancestor's whole subtree into its own offscreen buffer before
+/// compositing it back as a single group (see this module's own doc on
+/// why that's not the same as multiplying each descendant's own paint
+/// individually). Recursion depth tracks the *nesting depth of opacity
+/// groups specifically*, not overall tree depth — an all-opaque subtree
+/// of any depth still walks iteratively, the same guarantee this
+/// module's own deep-tree test already covers. A pathologically deep
+/// chain of nested opacity groups could still overflow the stack;
+/// unguarded for now, a smaller and far less likely bound than the
+/// plain-tree-depth case that motivated this function's own iterative
+/// design in the first place.
+#[allow(clippy::too_many_arguments)]
+fn paint_nodes(
+    buffer: &mut Canvas,
+    arena: &Arena,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    layouts: &HashMap<NodeId, BoxLayout>,
+    font: &mut Font,
+    parent_display: Option<Display>,
+    nodes: &[NodeId],
+    scale_factor: f32,
+) {
+    let mut stack: Vec<NodeId> = paint_order(styles, parent_display, nodes)
         .into_iter()
         .rev()
         .collect();
     while let Some(node) = stack.pop() {
-        paint_node(
-            &mut buffer,
-            arena,
-            styles,
-            layouts,
-            font,
-            node,
-            scale_factor,
-        );
-        let parent_display = styles.get(&node).map(|s| s.display);
+        let opacity = styles.get(&node).map_or(1.0, |s| s.opacity);
+        if opacity <= 0.0 {
+            // Real CSS: a fully transparent subtree still occupies its
+            // own layout box and stays hit-testable, but paints nothing
+            // at all — not "paint it and let zero alpha erase it," which
+            // would still cost the same work for no visible result.
+            continue;
+        }
+        if opacity < 1.0 {
+            paint_group_with_opacity(buffer, arena, styles, layouts, font, node, scale_factor);
+            continue;
+        }
+        paint_node(buffer, arena, styles, layouts, font, node, scale_factor);
+        let child_display = styles.get(&node).map(|s| s.display);
         stack.extend(
-            paint_order(styles, parent_display, arena.children(node))
+            paint_order(styles, child_display, arena.children(node))
                 .into_iter()
                 .rev(),
         );
     }
-    buffer
+}
+
+/// Renders `node`'s own box and its whole subtree into a fresh,
+/// transparent buffer the same size as `buffer`, then composites that
+/// buffer onto `buffer` at `node`'s own [`ComputedStyle::opacity`] —
+/// real CSS's own "group opacity": every overlap *inside* the group
+/// still resolves at full strength against its own siblings (later
+/// paints over earlier exactly as usual), and only the group's own
+/// combined result is faded as one flat image. Painting each descendant
+/// at the reduced opacity individually instead would show every overlap
+/// inside the group as a visibly different, doubled-up alpha — the
+/// difference is only visible where a group's own children overlap each
+/// other, which is exactly why a flat per-primitive multiply isn't
+/// "close enough."
+///
+/// A full canvas-sized buffer per opacity group, uncached and unpooled —
+/// correct, but not yet the bounded/pooled temporary surfaces real
+/// compositing work eventually needs for many overlapping translucent
+/// panels at once.
+fn paint_group_with_opacity(
+    buffer: &mut Canvas,
+    arena: &Arena,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    layouts: &HashMap<NodeId, BoxLayout>,
+    font: &mut Font,
+    node: NodeId,
+    scale_factor: f32,
+) {
+    let opacity = styles.get(&node).map_or(1.0, |s| s.opacity);
+    let mut group = Pixmap::new(buffer.width(), buffer.height())
+        .expect("paint_to_buffer requires a nonzero-sized canvas");
+    paint_node(&mut group, arena, styles, layouts, font, node, scale_factor);
+    let child_display = styles.get(&node).map(|s| s.display);
+    paint_nodes(
+        &mut group,
+        arena,
+        styles,
+        layouts,
+        font,
+        child_display,
+        arena.children(node),
+        scale_factor,
+    );
+
+    let paint = PixmapPaint {
+        opacity,
+        ..Default::default()
+    };
+    buffer.draw_pixmap(0, 0, group.as_ref(), &paint, Transform::identity(), None);
 }
 
 /// `nodes` (a set of siblings — document roots when `parent_display` is
@@ -940,6 +1038,170 @@ mod tests {
             1.0,
         );
         assert_eq!(pixel_rgb(&buffer, 10, 10), [0x1e, 0x1e, 0x22]);
+    }
+
+    #[test]
+    fn an_opacity_below_1_fades_a_solid_box_toward_whatever_is_behind_it() {
+        let tree: Element = view! { <div class="ghost" /> };
+        let css = ".ghost { opacity: 0.5; background-color: #ff0000; }";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let node = arena.roots()[0];
+        let mut layouts = HashMap::new();
+        layouts.insert(
+            node,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 20.0,
+                height: 20.0,
+            },
+        );
+
+        let mut font = Font::load_embedded();
+        let buffer = paint_to_buffer(
+            &mut font,
+            20,
+            20,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            1.0,
+        );
+        let pixel = pixel_rgb(&buffer, 10, 10);
+        assert!(
+            (100..160).contains(&pixel[0]) && pixel[1] == 0 && pixel[2] == 0,
+            "an opaque red box at 50% group opacity over a black canvas should read as \
+             roughly half-strength red, got {pixel:?}"
+        );
+    }
+
+    #[test]
+    fn an_opacity_of_zero_paints_nothing_at_all() {
+        let tree: Element = view! {
+            <div class="card">
+                <div class="ghost" />
+            </div>
+        };
+        let css = "
+            .card { width: 20px; height: 20px; background-color: #1e1e22; }
+            .ghost { opacity: 0; background-color: #ff0000; }
+        ";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let mut font = Font::load_embedded();
+        let layouts =
+            florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
+
+        let buffer = paint_to_buffer(
+            &mut font,
+            20,
+            20,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            1.0,
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 10, 10),
+            [0x1e, 0x1e, 0x22],
+            "an opacity: 0 child must paint nothing at all, leaving its parent's own \
+             background untouched"
+        );
+    }
+
+    #[test]
+    fn group_opacity_does_not_double_blend_children_that_overlap_inside_the_group() {
+        // The whole reason this is "group" opacity and not a per-node
+        // alpha multiply: back and front are both fully opaque relative
+        // to *each other* (front, painted later, fully occludes back
+        // wherever they overlap), and only the group's own combined
+        // result fades against whatever is behind it. Painting each
+        // child at the group's reduced opacity individually instead
+        // would show the overlap as a visibly different red/green blend
+        // (back's red bleeding through front) rather than pure green
+        // faded once.
+        let tree: Element = view! {
+            <div class="group">
+                <div class="back" />
+                <div class="front" />
+            </div>
+        };
+        let css = "
+            .group { opacity: 0.5; }
+            .back { background-color: #ff0000; }
+            .front { background-color: #00ff00; }
+        ";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+
+        let group = arena.roots()[0];
+        let back = arena.children(group)[0];
+        let front = arena.children(group)[1];
+        let mut layouts = HashMap::new();
+        layouts.insert(
+            group,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 40.0,
+                height: 40.0,
+            },
+        );
+        layouts.insert(
+            back,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 30.0,
+                height: 30.0,
+            },
+        );
+        layouts.insert(
+            front,
+            BoxLayout {
+                x: 10.0,
+                y: 10.0,
+                width: 30.0,
+                height: 30.0,
+            },
+        );
+
+        let mut font = Font::load_embedded();
+        let buffer = paint_to_buffer(
+            &mut font,
+            40,
+            40,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            1.0,
+        );
+
+        let overlap = pixel_rgb(&buffer, 20, 20);
+        assert!(
+            overlap[0] < 20,
+            "the overlap must read as green faded by the group's own opacity (red channel \
+             near zero), not a red/green blend from fading each child individually — got \
+             {overlap:?}"
+        );
+        assert!(
+            (100..160).contains(&overlap[1]),
+            "green should be roughly half-strength after the group's 50% opacity, got \
+             {overlap:?}"
+        );
+
+        let red_only = pixel_rgb(&buffer, 5, 20);
+        assert!(
+            (100..160).contains(&red_only[0]) && red_only[1] == 0,
+            "outside the overlap, back's own red must still fade correctly, got {red_only:?}"
+        );
     }
 
     #[test]
