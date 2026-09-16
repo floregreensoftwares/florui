@@ -1,0 +1,20 @@
+{
+  "id": "transform-translate",
+  "description": "A 20x20 box with transform: translate(15px, 10px) -- proves the box paints at its translated position (not its untransformed layout position) and that the reported box geometry moves with it, matching a real getBoundingClientRect().",
+  "html": "index.html",
+  "css": "style.css",
+  "element_id": "el",
+  "viewport": { "width_css_px": 60, "height_css_px": 60, "device_pixel_ratio": 1.0 },
+  "canvas_color": "#ffffff",
+  "florui": {
+    "tag": "div",
+    "class": "box",
+    "css": ".box { width: 20px; height: 20px; background-color: #ff0000; transform: translate(15px, 10px); }",
+    "children": []
+  },
+  "classification": {
+    "kind": "tolerant",
+    "threshold_percent": 3.0,
+    "reason": "Same anti-aliasing/hinting mismatch between Chromium's own rasterizer and Florui's skrifa+tiny-skia one already calibrated for the bare-element fixtures -- this fixture has no text, only a flat translated fill, so the real number is expected to land near the low end of that range."
+  }
+}
