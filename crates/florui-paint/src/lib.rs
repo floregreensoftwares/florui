@@ -34,7 +34,10 @@
 //! own matrix composition, and [`apply_filters`] for the documented
 //! `filter` subset (`blur`/`brightness`/`contrast`/`saturate`), applied to
 //! that same buffer before it's composited — real CSS's own
-//! filter-then-composite order.
+//! filter-then-composite order. `backdrop-filter` (same subset) works the
+//! other way: [`apply_backdrop_filter`] samples what's already painted
+//! behind a node, filters it, and writes it back before that node's own
+//! background/border/content paint on top.
 //!
 //! `box-shadow`'s `blur-radius` is painted too, via a real Gaussian blur
 //! — see [`blur`]'s own module doc: tiny-skia 0.11 (this crate's whole
@@ -65,7 +68,8 @@ use skrifa::instance::{LocationRef, NormalizedCoord, Size as GlyphSize};
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{FontRef, GlyphId, MetadataProvider};
 use tiny_skia::{
-    FillRule, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, PremultipliedColorU8, Rect, Transform,
+    BlendMode, FillRule, IntRect, Mask, Paint, PathBuilder, Pixmap, PixmapPaint,
+    PremultipliedColorU8, Rect, Transform,
 };
 
 pub type Canvas = Pixmap;
@@ -563,6 +567,53 @@ pub fn transformed_bounding_box(
     (min_x, min_y, max_x - min_x, max_y - min_y)
 }
 
+/// Samples `buffer` within `node`'s own border box, filters that sample
+/// (see [`apply_filters`]), then writes it back with `BlendMode::Source`
+/// (replace, not blend) — the filtered sample *is* the new backdrop.
+/// Region is clamped to `buffer`'s own bounds first, since
+/// [`Pixmap::clone_rect`] refuses a rect that isn't fully contained.
+/// Sampling ignores `clip` (an ancestor's clip stops painting, it doesn't
+/// erase what's already there); only the write-back respects it.
+fn apply_backdrop_filter(
+    buffer: &mut Canvas,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    functions: &[FilterFunction],
+    clip: Option<&Mask>,
+) {
+    if functions.is_empty() {
+        return;
+    }
+    let x0 = x.max(0.0).floor() as i32;
+    let y0 = y.max(0.0).floor() as i32;
+    let x1 = (x + width).min(buffer.width() as f32).ceil() as i32;
+    let y1 = (y + height).min(buffer.height() as f32).ceil() as i32;
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let Some(region) = IntRect::from_xywh(x0, y0, (x1 - x0) as u32, (y1 - y0) as u32) else {
+        return;
+    };
+    let Some(mut backdrop) = buffer.clone_rect(region) else {
+        return;
+    };
+    apply_filters(&mut backdrop, functions);
+    let paint = PixmapPaint {
+        blend_mode: BlendMode::Source,
+        ..Default::default()
+    };
+    buffer.draw_pixmap(
+        x0,
+        y0,
+        backdrop.as_ref(),
+        &paint,
+        Transform::identity(),
+        clip,
+    );
+}
+
 /// Applies `functions`' own chain to `pixmap`'s premultiplied pixels in
 /// place, each function processing the *previous* one's own output in
 /// authored order — real CSS's own filter-chain semantics (the
@@ -757,6 +808,9 @@ pub fn paint_order(
 /// Paints `node`'s own background and text — document-order painting
 /// (an overlapping later node always wins) comes from the caller's own
 /// pre-order walk over the whole tree, not from this function recursing.
+/// A `backdrop-filter` runs first (see [`apply_backdrop_filter`]), so
+/// `node`'s own background/border/content paint on top of the already-
+/// filtered backdrop, not the other way around.
 ///
 /// `clip`, if given, is an *ancestor's* clip (see [`clip_for_children`]):
 /// it restricts everything painted here, but `node`'s own `overflow`
@@ -776,6 +830,17 @@ fn paint_node(
     if let Some(&layout) = layouts.get(&node) {
         let style = styles.get(&node);
         let (x, y) = absolute_position(arena, layouts, node);
+
+        let backdrop_filter: &[FilterFunction] = style.map_or(&[][..], |s| &s.backdrop_filter[..]);
+        apply_backdrop_filter(
+            buffer,
+            x,
+            y,
+            layout.width,
+            layout.height,
+            backdrop_filter,
+            clip,
+        );
 
         let border = style.map_or(NO_BORDER, |s| s.border);
         let box_shadow: &[florui_style::BoxShadow] = style.map_or(&[][..], |s| &s.box_shadow[..]);
@@ -3596,5 +3661,70 @@ mod tests {
             [0x40, 0x40, 0x40],
             "mid-gray (0x80) faded to half opacity against black"
         );
+    }
+
+    fn backdrop_over_red_buffer(backdrop_css: &str) -> Canvas {
+        let tree: Element = view! {
+            <div class="back">
+                <div class="glass"></div>
+            </div>
+        };
+        let css = format!(".back {{ background-color: #ff0000; }} .glass {{ {backdrop_css} }}");
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(&css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let back = arena.roots()[0];
+        let glass = arena.children(back)[0];
+        let mut layouts = HashMap::new();
+        layouts.insert(
+            back,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 40.0,
+                height: 40.0,
+            },
+        );
+        layouts.insert(
+            glass,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 20.0,
+                height: 20.0,
+            },
+        );
+        let mut font = Font::load_embedded();
+        paint_to_buffer(
+            &mut font,
+            40,
+            40,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            1.0,
+        )
+    }
+
+    #[test]
+    fn backdrop_filter_darkens_what_is_already_painted_behind_it() {
+        let buffer = backdrop_over_red_buffer("backdrop-filter: brightness(0.5);");
+        assert_eq!(
+            pixel_rgb(&buffer, 5, 5),
+            [0x80, 0, 0],
+            "inside the glass, the red behind it must be dimmed"
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 30, 30),
+            [0xff, 0, 0],
+            "outside the glass, the background is untouched"
+        );
+    }
+
+    #[test]
+    fn an_empty_backdrop_filter_paints_nothing_extra() {
+        let buffer = backdrop_over_red_buffer("");
+        assert_eq!(pixel_rgb(&buffer, 5, 5), [0xff, 0, 0]);
     }
 }

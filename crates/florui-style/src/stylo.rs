@@ -949,16 +949,18 @@ fn to_computed_style(values: &ComputedValues) -> ComputedStyle {
         box_shadow: to_box_shadows(&effects.box_shadow.0, color),
         transform: to_transform(&box_style.transform),
         transform_origin: to_transform_origin(&box_style.transform_origin),
-        filter: to_filter(&effects.filter),
+        filter: to_filter(&effects.filter.0),
+        backdrop_filter: to_filter(&effects.backdrop_filter.0),
     }
 }
 
-/// `filter`'s own function list — see [`crate::cascade::FilterFunction`]'s
-/// own doc for exactly which functions survive and why the rest are
-/// dropped.
+/// Shared by `filter` and `backdrop-filter` — same grammar, and Stylo's
+/// two `OwnedList` wrappers share the same inner `OwnedSlice` type, so
+/// one function converts both. See [`crate::cascade::FilterFunction`] for
+/// which functions survive.
 #[allow(clippy::type_complexity)]
 fn to_filter(
-    value: &style::computed_values::filter::OwnedList<
+    value: &style::OwnedSlice<
         style::values::generics::effects::GenericFilter<
             style::values::computed::Angle,
             style::values::generics::NonNegative<f32>,
@@ -975,7 +977,6 @@ fn to_filter(
 ) -> Vec<FlorFilterFunction> {
     use style::values::generics::effects::GenericFilter;
     value
-        .0
         .iter()
         .filter_map(|f| match f {
             GenericFilter::Blur(length) => Some(FlorFilterFunction::Blur(length.0.px())),
