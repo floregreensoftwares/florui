@@ -32,7 +32,7 @@ use crate::UiRuntime;
 use crate::appearance::DecorationMode;
 use crate::dpi::{self, ViewportScale};
 use crate::gpu::{self, GpuPresenter};
-use crate::window_controls::WindowControls;
+use crate::window_controls::{InputMode, ScreenRect, WindowControls};
 
 #[derive(Debug)]
 pub enum RunError {
@@ -279,6 +279,37 @@ fn scale_layouts(layouts: &HashMap<NodeId, BoxLayout>, factor: f32) -> HashMap<N
         .collect()
 }
 
+/// Collects every [`crate::WINDOW_INPUT_REGION_CLASS`] element's real
+/// screen rectangle from this frame's own committed layout and hands
+/// them to [`WindowControls::sync_input_regions`] — only called under
+/// [`InputMode::Selective`], so an app that never uses it pays nothing.
+fn sync_input_regions(
+    controls: &WindowControls,
+    window: &Window,
+    arena: &florui_style::Arena,
+    physical_layouts: &HashMap<NodeId, BoxLayout>,
+) {
+    let Ok(origin) = window.inner_position() else {
+        return;
+    };
+    let regions: Vec<ScreenRect> = physical_layouts
+        .iter()
+        .filter(|&(&id, _)| {
+            arena
+                .classes(id)
+                .iter()
+                .any(|class| class == crate::WINDOW_INPUT_REGION_CLASS)
+        })
+        .map(|(_, layout)| ScreenRect {
+            left: origin.x + layout.x.round() as i32,
+            top: origin.y + layout.y.round() as i32,
+            right: origin.x + (layout.x + layout.width).round() as i32,
+            bottom: origin.y + (layout.y + layout.height).round() as i32,
+        })
+        .collect();
+    controls.sync_input_regions(&regions);
+}
+
 /// Whichever presentation path [`DesktopHost::resumed`] actually got —
 /// see [`crate::gpu`]'s own doc for the fallback contract between them.
 /// `Cpu` is still `softbuffer`, unchanged from before this existed.
@@ -391,6 +422,11 @@ impl DesktopHost {
 
         let (arena, styles, layouts, font) = runtime.geometry_and_font_mut();
         let physical_layouts = scale_layouts(layouts, scale_factor as f32);
+        if let Some(controls) = &self.controls
+            && controls.input_mode() == InputMode::Selective
+        {
+            sync_input_regions(controls, &window, arena, &physical_layouts);
+        }
         let canvas = florui_paint::paint_to_buffer(
             font,
             size.width,
@@ -454,6 +490,24 @@ impl DesktopHost {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+
+    /// Re-derives `InputMode::Selective`'s screen-space regions from the
+    /// runtime's already-computed layout — no re-render, just the new
+    /// window offset applied to geometry that hasn't otherwise changed.
+    fn resync_input_regions(&self) {
+        let (Some(window), Some(controls), Some(runtime)) =
+            (&self.window, &self.controls, &self.runtime)
+        else {
+            return;
+        };
+        if controls.input_mode() != InputMode::Selective {
+            return;
+        }
+        let scale_factor = self.viewport_scale().scale_factor;
+        let (arena, _, layouts) = runtime.geometry();
+        let physical_layouts = scale_layouts(layouts, scale_factor as f32);
+        sync_input_regions(controls, window, arena, &physical_layouts);
     }
 
     /// Updates `:hover` against the runtime's cached geometry — no
@@ -694,6 +748,12 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
             // `window.scale_factor()` fresh every call, so re-rendering is
             // all this needs.
             WindowEvent::ScaleFactorChanged { .. } => self.update_and_request_redraw(),
+            // A pure move (dragging the window, snapping it) changes
+            // nothing about its content, only where `InputMode::Selective`'s
+            // own screen-space regions sit -- resyncing them here, from
+            // the already-computed layout, avoids paying for a full
+            // re-render on every step of a drag.
+            WindowEvent::Moved(_) => self.resync_input_regions(),
             WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::CursorMoved { position, .. } => {
                 self.handle_cursor_moved(position.x, position.y);

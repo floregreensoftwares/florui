@@ -12,8 +12,17 @@
 //! when it hits this exact element) and [`crate::desktop::DesktopHost`]
 //! calls [`WindowControls::drag`] on press instead of treating it as a
 //! click. Reuses the existing `id` attribute; no new markup concept.
+//!
+//! # Marking an interactive region under [`InputMode::Selective`]
+//!
+//! [`WINDOW_INPUT_REGION_CLASS`] is the same idea for
+//! [`WindowControls::set_input_mode`]'s selective mode, but for
+//! potentially many elements at once, so it's a class, not an `id`:
+//! [`crate::desktop::DesktopHost`] re-collects every element carrying it
+//! after each render and keeps the real window's own input targeting in
+//! sync — an app never computes or tracks a rectangle itself.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -22,6 +31,49 @@ use winit::window::Window;
 
 /// See this module's own doc, "Marking a draggable region."
 pub const WINDOW_DRAG_REGION_ID: &str = "florui-window-drag-region";
+
+/// See this module's own doc, "Marking an interactive region under
+/// `InputMode::Selective`."
+pub const WINDOW_INPUT_REGION_CLASS: &str = "florui-window-input-region";
+
+/// What the real window does with mouse input — see
+/// [`WindowControls::set_input_mode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InputMode {
+    /// Ordinary input targeting — the window receives every click
+    /// normally, exactly like before this existed.
+    #[default]
+    Normal,
+    /// The whole window lets every click pass through to whatever is
+    /// behind it, on any other application — see
+    /// [`crate::overlay`]'s own doc. No-op outside Windows.
+    Passthrough,
+    /// Only elements carrying [`WINDOW_INPUT_REGION_CLASS`] receive
+    /// clicks; everywhere else passes through, on any other
+    /// application, the same as [`InputMode::Passthrough`] — see
+    /// `crate::os::windows::input_regions`'s own doc for why this needs
+    /// a live cursor-tracking hook rather than a plain per-window hit
+    /// test. No-op outside Windows.
+    Selective,
+}
+
+/// A real screen rectangle (physical pixels, not logical/DPI-scaled) —
+/// what [`InputMode::Selective`]'s own hit-testing compares the cursor
+/// against. Computed by [`crate::desktop::DesktopHost`] from the real
+/// committed layout; never constructed by application code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ScreenRect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+impl ScreenRect {
+    pub(crate) fn contains(&self, x: i32, y: i32) -> bool {
+        x >= self.left && x < self.right && y >= self.top && y < self.bottom
+    }
+}
 
 /// Split out of [`WindowControls`] so it's testable without a real
 /// `Window`. `None` (no guard registered) always confirms.
@@ -52,6 +104,7 @@ pub struct WindowControls {
     window: Arc<Window>,
     request_close: Box<dyn Fn()>,
     close_guard: CloseGuard,
+    input_mode: Cell<InputMode>,
 }
 
 impl WindowControls {
@@ -60,6 +113,7 @@ impl WindowControls {
             window,
             request_close: Box::new(request_close),
             close_guard: CloseGuard::default(),
+            input_mode: Cell::new(InputMode::Normal),
         }
     }
 
@@ -82,6 +136,50 @@ impl WindowControls {
     pub fn toggle_maximize(&self) {
         let maximized = self.window.is_maximized();
         self.window.set_maximized(!maximized);
+    }
+
+    pub fn set_always_on_top(&self, enabled: bool) {
+        self.window.set_window_level(if enabled {
+            winit::window::WindowLevel::AlwaysOnTop
+        } else {
+            winit::window::WindowLevel::Normal
+        });
+    }
+
+    /// Borderless fullscreen on the window's current monitor.
+    pub fn set_fullscreen(&self, enabled: bool) {
+        self.window
+            .set_fullscreen(enabled.then_some(winit::window::Fullscreen::Borderless(None)));
+    }
+
+    pub fn is_fullscreen(&self) -> bool {
+        self.window.fullscreen().is_some()
+    }
+
+    /// Switches how the real window targets mouse input — see
+    /// [`InputMode`]'s own doc for what each mode does. `false` (no-op,
+    /// though this mode is still recorded and reported by
+    /// [`Self::input_mode`]) outside Windows.
+    pub fn set_input_mode(&self, mode: InputMode) -> bool {
+        self.input_mode.set(mode);
+        crate::overlay::set_input_mode(&self.window, mode)
+    }
+
+    /// The mode last requested via [`Self::set_input_mode`] —
+    /// [`InputMode::Normal`] if never called.
+    pub fn input_mode(&self) -> InputMode {
+        self.input_mode.get()
+    }
+
+    /// Feeds [`InputMode::Selective`]'s live hit-testing the current
+    /// screen rectangles of every [`WINDOW_INPUT_REGION_CLASS`] element —
+    /// called by [`crate::desktop::DesktopHost`] after every render; a
+    /// no-op whenever [`Self::input_mode`] isn't
+    /// [`InputMode::Selective`].
+    pub(crate) fn sync_input_regions(&self, regions: &[ScreenRect]) {
+        if self.input_mode.get() == InputMode::Selective {
+            crate::overlay::sync_input_regions(&self.window, regions);
+        }
     }
 
     /// Same shutdown path as the OS's own close button, including
@@ -107,6 +205,17 @@ impl WindowControls {
 
     pub(crate) fn confirm_close(&self) -> bool {
         self.close_guard.confirm()
+    }
+}
+
+impl Drop for WindowControls {
+    /// [`InputMode::Selective`]'s hook and [`InputMode::Passthrough`]'s
+    /// `WS_EX_TRANSPARENT` both outlive this struct otherwise — nothing
+    /// else ever un-sets them once the window itself is gone.
+    fn drop(&mut self) {
+        if self.input_mode.get() != InputMode::Normal {
+            crate::overlay::set_input_mode(&self.window, InputMode::Normal);
+        }
     }
 }
 

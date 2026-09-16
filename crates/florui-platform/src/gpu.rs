@@ -82,9 +82,6 @@ use wgpu::{
 };
 use winit::window::Window;
 
-#[cfg(target_os = "windows")]
-use winit::platform::windows::WindowAttributesExtWindows;
-
 /// See this module's own doc for what each state means and the fallback
 /// contract between them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,7 +108,7 @@ pub fn transparent_capable_attributes(
 ) -> winit::window::WindowAttributes {
     let attrs = attrs.with_transparent(true);
     #[cfg(target_os = "windows")]
-    let attrs = attrs.with_no_redirection_bitmap(true);
+    let attrs = crate::os::windows::gpu::transparent_window_attributes(attrs);
     attrs
 }
 
@@ -152,62 +149,12 @@ impl GpuPresenter {
     /// to `softbuffer`.
     pub fn try_new(window: Arc<Window>) -> Option<Self> {
         #[cfg(target_os = "windows")]
-        if let Some(presenter) = Self::try_dx12_direct_composition(window.clone()) {
+        if let Some(presenter) =
+            crate::os::windows::gpu::try_dx12_direct_composition(window.clone())
+        {
             return Some(presenter);
         }
         Self::try_default_opaque(window)
-    }
-
-    #[cfg(target_os = "windows")]
-    fn try_dx12_direct_composition(window: Arc<Window>) -> Option<Self> {
-        let mut backend_options = wgpu::BackendOptions::from_env_or_default();
-        if wgpu::Dx12SwapchainKind::from_env().is_none() {
-            backend_options.dx12.presentation_system = wgpu::Dx12SwapchainKind::DxgiFromVisual;
-        }
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::DX12,
-            backend_options,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        let surface = instance.create_surface(window.clone()).ok()?;
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            compatible_surface: Some(&surface),
-            ..Default::default()
-        }))
-        .ok()?;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("florui-platform GPU presenter (DX12 + DirectComposition)"),
-            ..Default::default()
-        }))
-        .ok()?;
-
-        let capabilities = surface.get_capabilities(&adapter);
-        if !capabilities
-            .alpha_modes
-            .contains(&CompositeAlphaMode::PreMultiplied)
-        {
-            // `PostMultiplied` is real per-pixel alpha too, but panics
-            // `Surface::configure` in this exact DX12 DirectComposition
-            // path on `wgpu` 29.0.4 — see `gpu_transparency_probe`'s own
-            // doc. Only `PreMultiplied` is a live-verified working
-            // choice; anything else falls through to the opaque path.
-            return None;
-        }
-        let format = capabilities
-            .formats
-            .iter()
-            .copied()
-            .find(|f| matches!(f, TextureFormat::Rgba8Unorm))?;
-
-        Self::configure(
-            window,
-            device,
-            queue,
-            surface,
-            format,
-            CompositeAlphaMode::PreMultiplied,
-            PresentationCapability::GpuTransparent,
-        )
     }
 
     /// Whatever backend `wgpu` picks by default, opaque only — the
@@ -247,7 +194,7 @@ impl GpuPresenter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn configure(
+    pub(crate) fn configure(
         window: Arc<Window>,
         device: wgpu::Device,
         queue: wgpu::Queue,
