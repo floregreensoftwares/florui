@@ -28,6 +28,12 @@ const SELECTION_HIGHLIGHT: crate::color::Rgba = crate::color::Rgba::opaque(250, 
 /// Outline around whatever's under the cursor while "Pick element" is
 /// armed, distinct from [`SELECTION_HIGHLIGHT`].
 const PICK_HOVER_HIGHLIGHT: crate::color::Rgba = crate::color::Rgba::opaque(56, 189, 248);
+/// Drawn at the selected node's own padding box, nested inside
+/// [`SELECTION_HIGHLIGHT`]'s border-box outline, only when that node's
+/// own `overflow_clips` is set — the padding box is real CSS's own clip
+/// boundary (see `ComputedStyle::overflow_clips`'s own doc), distinct
+/// from the border box the selection outline already traces.
+const CLIP_HIGHLIGHT: crate::color::Rgba = crate::color::Rgba::opaque(217, 70, 239);
 
 #[derive(Debug)]
 pub enum LiveError {
@@ -225,6 +231,31 @@ fn border_box_rect(node: &InspectorNode) -> Option<ElementBox> {
     })
 }
 
+/// A node's padding box — content plus padding, excluding its border —
+/// real CSS's own clip boundary for `overflow_clips`, see
+/// [`CLIP_HIGHLIGHT`]'s own doc. Despite its name, [`InspectorNode::content`]
+/// already holds the node's whole *border* box (`BoxLayout::width`/
+/// `height` are Taffy's own final border-box size, confirmed directly
+/// against a real laid-out node with both padding and border: a 40x20
+/// content box with padding 8/6/5/7 and a 3px left / 2px top border comes
+/// back as `BoxLayout { width: 57, height: 34 }`, exactly content +
+/// padding + border) — so unlike [`border_box_rect`], which adds padding
+/// and border on top of `content` as if it were already the smaller
+/// content box, the padding box here only has to shed the border.
+fn padding_box_rect(node: &InspectorNode) -> Option<ElementBox> {
+    let content = node.content?;
+    let x = (content.x + node.border.left).max(0.0);
+    let y = (content.y + node.border.top).max(0.0);
+    let width = (content.width - node.border.left - node.border.right).max(0.0);
+    let height = (content.height - node.border.top - node.border.bottom).max(0.0);
+    Some(ElementBox {
+        x: x.round() as u32,
+        y: y.round() as u32,
+        width: width.round() as u32,
+        height: height.round() as u32,
+    })
+}
+
 /// Owns both windows, the `softbuffer` surface, and the event loop;
 /// delegates every rendering, hit-testing, and dispatch decision to one
 /// shared [`UiRuntime`].
@@ -348,6 +379,18 @@ impl LiveHost {
                     SELECTION_HIGHLIGHT,
                     2,
                 );
+                if node.overflow_clips
+                    && let Some(clip_rect) = padding_box_rect(node)
+                {
+                    outline_rect(
+                        &mut pixels,
+                        size.width,
+                        size.height,
+                        clip_rect,
+                        CLIP_HIGHLIGHT,
+                        1,
+                    );
+                }
             }
             if self.picking
                 && let Some(hovered) = self.hovered
@@ -638,5 +681,56 @@ mod tests {
         assert_eq!(node.z_index, None);
         assert_eq!(node.opacity, 1.0);
         assert!(!node.overflow_clips);
+    }
+
+    #[test]
+    fn padding_box_rect_subtracts_only_the_border_from_the_reported_border_box() {
+        // `InspectorNode::content` is `BoxLayout::width`/`height` — Taffy's
+        // own final *border* box, confirmed directly against a real
+        // compute_layout run: a content-box 40x20 element with padding
+        // top/right/bottom/left 5/6/7/8 and a 2px top / 3px left border
+        // comes back as `BoxLayout { width: 57, height: 34 }` (40 + 8 + 6
+        // + 3, 20 + 5 + 7 + 2). These are that exact run's own numbers.
+        let node = InspectorNode {
+            id: 0,
+            depth: 0,
+            tag: "div".to_string(),
+            display: "block".to_string(),
+            background: Rgba::TRANSPARENT,
+            z_index: None,
+            opacity: 1.0,
+            overflow_clips: true,
+            content: Some(ContentBox {
+                x: 0.0,
+                y: 0.0,
+                width: 57.0,
+                height: 34.0,
+            }),
+            padding: Edges {
+                top: 5.0,
+                right: 6.0,
+                bottom: 7.0,
+                left: 8.0,
+            },
+            border: Edges {
+                top: 2.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: 3.0,
+            },
+            margin: Edges {
+                top: Some(0.0),
+                right: Some(0.0),
+                bottom: Some(0.0),
+                left: Some(0.0),
+            },
+            size_cause: None,
+        };
+
+        let rect = padding_box_rect(&node).expect("a laid-out node has a padding box");
+        assert_eq!(rect.x, 3, "shed only the 3px left border, not padding too");
+        assert_eq!(rect.y, 2, "shed only the 2px top border, not padding too");
+        assert_eq!(rect.width, 54, "57 border-box width minus the 3px border");
+        assert_eq!(rect.height, 32, "34 border-box height minus the 2px border");
     }
 }
