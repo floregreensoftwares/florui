@@ -186,6 +186,66 @@ pub struct BoxShadow {
     pub inset: bool,
 }
 
+/// A `<length-percentage>` still carrying its own percentage component
+/// unresolved — real CSS's own computed-value shape for this type. Every
+/// other length field in this crate ([`ComputedStyle::width`], `padding`,
+/// ...) already collapses a percentage to `None`/`0.0` at this layer
+/// because nothing downstream can resolve it without a containing-block
+/// size that isn't known until layout runs — but `transform`'s
+/// `translate()` and `transform-origin` resolve against *this node's
+/// own* already-final box, which paint always has in hand by the time it
+/// reads these fields, so deferring resolution instead of discarding the
+/// percentage costs nothing and matches real CSS instead of
+/// approximating it.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LengthPercentage {
+    pub length: f32,
+    pub percentage: f32,
+}
+
+impl LengthPercentage {
+    /// Real CSS's own `<length-percentage>` resolution: the length
+    /// component plus the percentage component scaled by `basis`.
+    pub fn resolve(&self, basis: f32) -> f32 {
+        self.length + self.percentage * basis
+    }
+}
+
+/// One `transform` function, already reduced to this crate's documented
+/// initial (2D-only) subset. `skew()`/`skewX()`/`skewY()`, every 3D
+/// function (`translateZ`, `rotate3d`, `scale3d`, `matrix3d`,
+/// `perspective`), and the animation-only `interpolatematrix`/
+/// `accumulatematrix` intermediates all parse and cascade correctly
+/// through Stylo but drop out of this list entirely — silently treated
+/// as absent, the least-wrong approximation available without a partial
+/// 2D projection of a genuinely 3D effect. See `florui-paint`'s own doc
+/// for how the surviving functions fold into one 2D affine matrix.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TransformFunction {
+    /// `translate()`/`translateX()`/`translateY()`, unified: a bare
+    /// `translateX(x)` is `Translate(x, 0)`, `translateY(y)` is
+    /// `Translate(0, y)`.
+    Translate(LengthPercentage, LengthPercentage),
+    /// `scale()`/`scaleX()`/`scaleY()`, unified the same way.
+    Scale(f32, f32),
+    /// `rotate()`, in degrees — real CSS's own computed-value unit for
+    /// `<angle>` regardless of the authored unit (`rad`, `turn`, `deg`,
+    /// ...).
+    Rotate(f32),
+    /// `matrix(a, b, c, d, e, f)` — real CSS's own 2D matrix argument
+    /// order and meaning (`x' = a*x + c*y + e`, `y' = b*x + d*y + f`);
+    /// `e`/`f` are always plain lengths (real CSS's own `matrix()` has no
+    /// percentage form), unlike [`Self::Translate`].
+    Matrix {
+        a: f32,
+        b: f32,
+        c: f32,
+        d: f32,
+        e: f32,
+        f: f32,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComputedStyle {
     pub background_color: Rgba,
@@ -296,6 +356,17 @@ pub struct ComputedStyle {
     /// clipping value renders identically: content clips to the padding
     /// box with no scrollbar, as if already scrolled to the origin.
     pub overflow_clips: bool,
+    /// `transform`'s own function list, in authored order — see
+    /// [`TransformFunction`]'s own doc for the supported subset. An empty
+    /// list is real CSS's own `none`, the initial value. Composing these
+    /// into one matrix and resolving [`Self::transform_origin`] against
+    /// this node's own box happens in `florui-paint`, the first place a
+    /// node's final box size is known.
+    pub transform: Vec<TransformFunction>,
+    /// `transform-origin`'s `x`/`y` components — its own `z` component is
+    /// dropped, matching [`TransformFunction`]'s 2D-only scope. `(50%,
+    /// 50%)` (the box's own center) is real CSS's initial value.
+    pub transform_origin: (LengthPercentage, LengthPercentage),
 }
 
 /// Resolves every node in `arena` against `rules` and `state` — real
@@ -1122,5 +1193,210 @@ mod tests {
         );
         let span = arena.find(|a, id| a.tag(id) == "span").unwrap();
         assert!(computed[&span].box_shadow.is_empty());
+    }
+
+    #[test]
+    fn transform_defaults_to_none() {
+        let tree: Element = view! { <div /> };
+        let (arena, computed) = styles(&tree, "", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert!(computed[&node].transform.is_empty());
+    }
+
+    #[test]
+    fn transform_origin_defaults_to_the_boxs_own_center() {
+        let tree: Element = view! { <div /> };
+        let (arena, computed) = styles(&tree, "", &InteractionState::new());
+        let node = arena.roots()[0];
+        let (x, y) = computed[&node].transform_origin;
+        assert_eq!(
+            x,
+            LengthPercentage {
+                length: 0.0,
+                percentage: 0.5
+            }
+        );
+        assert_eq!(
+            y,
+            LengthPercentage {
+                length: 0.0,
+                percentage: 0.5
+            }
+        );
+    }
+
+    #[test]
+    fn translate_resolves_to_its_own_length_and_percentage() {
+        let tree: Element = view! { <div class="moved" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".moved { transform: translate(10px, 25%); }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(
+            computed[&node].transform,
+            vec![TransformFunction::Translate(
+                LengthPercentage {
+                    length: 10.0,
+                    percentage: 0.0
+                },
+                LengthPercentage {
+                    length: 0.0,
+                    percentage: 0.25
+                },
+            )]
+        );
+    }
+
+    #[test]
+    fn translate_x_and_translate_y_each_leave_the_other_axis_at_zero() {
+        let tree: Element = view! { <div class="x" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".x { transform: translateX(5px); }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(
+            computed[&node].transform,
+            vec![TransformFunction::Translate(
+                LengthPercentage {
+                    length: 5.0,
+                    percentage: 0.0
+                },
+                LengthPercentage::default(),
+            )]
+        );
+    }
+
+    #[test]
+    fn scale_x_and_scale_y_default_the_other_axis_to_1() {
+        let tree: Element = view! { <div class="x" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".x { transform: scaleX(2); }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(
+            computed[&node].transform,
+            vec![TransformFunction::Scale(2.0, 1.0)]
+        );
+    }
+
+    #[test]
+    fn rotate_resolves_to_degrees_regardless_of_the_authored_angle_unit() {
+        let tree: Element = view! { <div class="turned" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".turned { transform: rotate(0.5turn); }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(
+            computed[&node].transform,
+            vec![TransformFunction::Rotate(180.0)]
+        );
+    }
+
+    #[test]
+    fn matrix_resolves_to_its_own_six_components_in_css_order() {
+        let tree: Element = view! { <div class="m" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".m { transform: matrix(1, 2, 3, 4, 5, 6); }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(
+            computed[&node].transform,
+            vec![TransformFunction::Matrix {
+                a: 1.0,
+                b: 2.0,
+                c: 3.0,
+                d: 4.0,
+                e: 5.0,
+                f: 6.0,
+            }]
+        );
+    }
+
+    #[test]
+    fn multiple_transform_functions_resolve_in_authored_order() {
+        let tree: Element = view! { <div class="both" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".both { transform: translateX(5px) scale(2); }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(
+            computed[&node].transform,
+            vec![
+                TransformFunction::Translate(
+                    LengthPercentage {
+                        length: 5.0,
+                        percentage: 0.0
+                    },
+                    LengthPercentage::default(),
+                ),
+                TransformFunction::Scale(2.0, 2.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_explicit_transform_origin_resolves_to_its_own_percentage() {
+        let tree: Element = view! { <div class="pivot" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".pivot { transform-origin: 0% 100%; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        let (x, y) = computed[&node].transform_origin;
+        assert_eq!(
+            x,
+            LengthPercentage {
+                length: 0.0,
+                percentage: 0.0
+            }
+        );
+        assert_eq!(
+            y,
+            LengthPercentage {
+                length: 0.0,
+                percentage: 1.0
+            }
+        );
+    }
+
+    #[test]
+    fn a_skew_function_is_dropped_as_an_unsupported_2d_only_gap() {
+        let tree: Element = view! { <div class="skewed" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".skewed { transform: skewX(20deg); }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert!(computed[&node].transform.is_empty());
+    }
+
+    #[test]
+    fn transform_does_not_inherit() {
+        let tree: Element = view! {
+            <div class="moved">
+                <span>{"x"}</span>
+            </div>
+        };
+        let (arena, computed) = styles(
+            &tree,
+            ".moved { transform: translate(10px, 10px); }",
+            &InteractionState::new(),
+        );
+        let span = arena.find(|a, id| a.tag(id) == "span").unwrap();
+        assert!(computed[&span].transform.is_empty());
     }
 }
