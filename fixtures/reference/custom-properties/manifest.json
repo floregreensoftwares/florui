@@ -1,0 +1,16 @@
+{
+  "id": "custom-properties",
+  "description": "A 40x40 box whose background-color reads a declared custom property (--brand) via var(), and whose top border-color reads an undeclared one with a fallback (var(--missing-color, #ff8800)) -- proves both real CSS var() substitution paths resolve correctly all the way through paint, not just at the cascade layer.",
+  "html": "index.html",
+  "css": "style.css",
+  "element_id": "el",
+  "viewport": { "width_css_px": 60, "height_css_px": 60, "device_pixel_ratio": 1.0 },
+  "canvas_color": "#ffffff",
+  "florui": {
+    "tag": "div",
+    "class": "card",
+    "css": ".card { width: 40px; height: 40px; --brand: #2f7d6c; background-color: var(--brand); border-top-width: 6px; border-top-style: solid; border-top-color: var(--missing-color, #ff8800); }",
+    "children": []
+  },
+  "classification": { "kind": "exact" }
+}

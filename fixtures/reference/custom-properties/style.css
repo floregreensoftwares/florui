@@ -1,0 +1,9 @@
+.card {
+    width: 40px;
+    height: 40px;
+    --brand: #2f7d6c;
+    background-color: var(--brand);
+    border-top-width: 6px;
+    border-top-style: solid;
+    border-top-color: var(--missing-color, #ff8800);
+}

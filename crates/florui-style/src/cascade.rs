@@ -1545,4 +1545,87 @@ mod tests {
         let span = arena.find(|a, id| a.tag(id) == "span").unwrap();
         assert!(computed[&span].backdrop_filter.is_empty());
     }
+
+    // CSS custom properties (`--foo`) and `var()` need no conversion code
+    // of this crate's own: Stylo's real cascade already substitutes them
+    // before any longhand (here `background-color`) resolves its own
+    // value, so these tests exist to prove and pin that behavior, not to
+    // exercise anything florui-style itself implements.
+    #[test]
+    fn a_custom_property_resolves_via_var_on_the_same_element() {
+        let tree: Element = view! { <div class="card" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".card { --brand: #ff0000; background-color: var(--brand); }",
+            &InteractionState::new(),
+        );
+        assert_eq!(
+            computed[&arena.roots()[0]].background_color,
+            Rgba::opaque(0xff, 0, 0)
+        );
+    }
+
+    #[test]
+    fn a_custom_property_inherits_to_a_child_that_reads_it_via_var() {
+        let tree: Element = view! {
+            <div class="card">
+                <span class="mirror">{"x"}</span>
+            </div>
+        };
+        let (arena, computed) = styles(
+            &tree,
+            ".card { --brand: #ff0000; } .mirror { background-color: var(--brand); }",
+            &InteractionState::new(),
+        );
+        let span = arena.find(|a, id| a.tag(id) == "span").unwrap();
+        assert_eq!(computed[&span].background_color, Rgba::opaque(0xff, 0, 0));
+    }
+
+    #[test]
+    fn var_falls_back_to_its_own_default_when_the_custom_property_is_undeclared() {
+        let tree: Element = view! { <div class="card" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".card { background-color: var(--missing, #00ff00); }",
+            &InteractionState::new(),
+        );
+        assert_eq!(
+            computed[&arena.roots()[0]].background_color,
+            Rgba::opaque(0, 0xff, 0)
+        );
+    }
+
+    #[test]
+    fn a_custom_property_declared_on_root_reaches_every_descendant() {
+        let tree: Element = view! {
+            <div class="card">
+                <span class="mirror">{"x"}</span>
+            </div>
+        };
+        let (arena, computed) = styles(
+            &tree,
+            ":root { --brand: #ff0000; } .mirror { background-color: var(--brand); }",
+            &InteractionState::new(),
+        );
+        let span = arena.find(|a, id| a.tag(id) == "span").unwrap();
+        assert_eq!(computed[&span].background_color, Rgba::opaque(0xff, 0, 0));
+    }
+
+    #[test]
+    fn a_descendant_redeclaring_a_custom_property_overrides_it_for_its_own_subtree() {
+        let tree: Element = view! {
+            <div class="outer">
+                <div class="inner">
+                    <span class="mirror">{"x"}</span>
+                </div>
+            </div>
+        };
+        let (arena, computed) = styles(
+            &tree,
+            ".outer { --brand: #ff0000; } .inner { --brand: #00ff00; } .mirror { background-color: var(--brand); }",
+            &InteractionState::new(),
+        );
+        let span = arena.find(|a, id| a.tag(id) == "span").unwrap();
+        assert_eq!(computed[&span].background_color, Rgba::opaque(0, 0xff, 0));
+    }
 }
