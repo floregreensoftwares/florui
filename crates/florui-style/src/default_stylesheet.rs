@@ -82,7 +82,7 @@ pub(crate) fn rule() -> Rule {
 mod tests {
     use florui::prelude::*;
 
-    use crate::cascade::{Display, compute};
+    use crate::cascade::{Display, Viewport, compute};
     use crate::interaction::InteractionState;
     use crate::stylesheet_parse::parse_stylesheet;
     use crate::tree::Arena;
@@ -106,7 +106,12 @@ mod tests {
     fn computed_style_of(tag_markup: Element) -> crate::cascade::ComputedStyle {
         let arena = Arena::build(&tag_markup);
         let rules = parse_stylesheet("").unwrap();
-        let computed = compute(&arena, &rules, &InteractionState::new());
+        let computed = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+        );
         computed[&arena.roots()[0]].clone()
     }
 
@@ -145,7 +150,12 @@ mod tests {
         let span = arena.children(div)[0];
         let button = arena.children(div)[1];
         let rules = parse_stylesheet("").unwrap();
-        let computed = compute(&arena, &rules, &InteractionState::new());
+        let computed = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+        );
 
         assert_eq!(computed[&span].display, Display::Inline);
         assert_eq!(computed[&button].display, Display::InlineBlock);
@@ -162,7 +172,12 @@ mod tests {
         let div = arena.roots()[0];
         let button = arena.children(div)[0];
         let rules = parse_stylesheet("").unwrap();
-        let computed = compute(&arena, &rules, &InteractionState::new());
+        let computed = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+        );
 
         let border = computed[&button].border;
         for side in [border.top, border.right, border.bottom, border.left] {
@@ -228,7 +243,12 @@ mod tests {
         let tree: Element = view! { <h1 /> };
         let arena = Arena::build(&tree);
         let rules = parse_stylesheet("* { font-size: 40px; }").unwrap();
-        let computed = compute(&arena, &rules, &InteractionState::new());
+        let computed = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+        );
         let style = &computed[&arena.roots()[0]];
         assert_close(style.font_size, 40.0, "author-overridden font-size");
     }

@@ -24,7 +24,12 @@ fn main() {
         .expect("both stylesheets should parse under florui-style's supported subset");
 
     let arena = Arena::build(&tree);
-    let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+    let styles = florui_style::compute(
+        &arena,
+        &rules,
+        &InteractionState::new(),
+        florui_style::Viewport::default(),
+    );
     let mut font = florui_text::Font::load_embedded();
     let layouts = florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT)
         .expect("layout should not fail for explicitly sized nodes");

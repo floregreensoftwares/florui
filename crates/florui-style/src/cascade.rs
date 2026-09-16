@@ -408,14 +408,37 @@ pub struct ComputedStyle {
     pub backdrop_filter: Vec<FilterFunction>,
 }
 
+/// The viewport `@media` queries evaluate against — real CSS's own
+/// initial containing block size, in CSS pixels (not physical/DPR-scaled
+/// ones: `min-width`/`max-width` are always defined in terms of the
+/// viewport's own CSS pixel size). [`Default`] is this crate's own
+/// placeholder (`1024x768`) for callers — mostly tests — that don't have
+/// a real window and don't care what a size-based query resolves to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Viewport {
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Default for Viewport {
+    fn default() -> Self {
+        Self {
+            width: 1024.0,
+            height: 768.0,
+        }
+    }
+}
+
 /// Resolves every node in `arena` against `rules` and `state` — real
-/// selector matching, cascade, and inheritance, via Stylo.
+/// selector matching, cascade, and inheritance, via Stylo. `viewport` is
+/// what `@media`'s own size features (`min-width`, ...) resolve against.
 pub fn compute(
     arena: &Arena,
     rules: &[Rule],
     state: &InteractionState,
+    viewport: Viewport,
 ) -> HashMap<NodeId, ComputedStyle> {
-    stylo::compute(arena, rules, state)
+    stylo::compute(arena, rules, state, viewport)
 }
 
 #[cfg(test)]
@@ -432,7 +455,7 @@ mod tests {
     ) -> (Arena, HashMap<NodeId, ComputedStyle>) {
         let arena = Arena::build(tree);
         let rules = parse_stylesheet(css).unwrap();
-        let computed = compute(&arena, &rules, state);
+        let computed = compute(&arena, &rules, state, Viewport::default());
         (arena, computed)
     }
 
@@ -541,6 +564,7 @@ mod tests {
             &arena,
             &crate::stylesheet_parse::parse_stylesheet(css).unwrap(),
             &hovered_state,
+            Viewport::default(),
         );
         assert_eq!(
             hovered[&button].background_color,
@@ -1627,5 +1651,97 @@ mod tests {
         );
         let span = arena.find(|a, id| a.tag(id) == "span").unwrap();
         assert_eq!(computed[&span].background_color, Rgba::opaque(0, 0xff, 0));
+    }
+
+    #[test]
+    fn a_min_width_media_query_applies_only_once_the_viewport_is_wide_enough() {
+        let tree: Element = view! { <div class="card" /> };
+        let arena = Arena::build(&tree);
+        let rules =
+            parse_stylesheet("@media (min-width: 500px) { .card { background-color: #ff0000; } }")
+                .unwrap();
+        let node = arena.roots()[0];
+
+        let narrow = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport {
+                width: 400.0,
+                height: 300.0,
+            },
+        );
+        assert_eq!(narrow[&node].background_color, Rgba::TRANSPARENT);
+
+        let wide = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport {
+                width: 600.0,
+                height: 300.0,
+            },
+        );
+        assert_eq!(wide[&node].background_color, Rgba::opaque(0xff, 0, 0));
+    }
+
+    #[test]
+    fn a_max_width_media_query_stops_applying_once_the_viewport_is_too_wide() {
+        let tree: Element = view! { <div class="card" /> };
+        let arena = Arena::build(&tree);
+        let rules =
+            parse_stylesheet("@media (max-width: 500px) { .card { background-color: #ff0000; } }")
+                .unwrap();
+        let node = arena.roots()[0];
+
+        let narrow = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport {
+                width: 400.0,
+                height: 300.0,
+            },
+        );
+        assert_eq!(narrow[&node].background_color, Rgba::opaque(0xff, 0, 0));
+
+        let wide = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport {
+                width: 600.0,
+                height: 300.0,
+            },
+        );
+        assert_eq!(wide[&node].background_color, Rgba::TRANSPARENT);
+    }
+
+    #[test]
+    fn a_height_media_query_never_matches_regardless_of_the_viewports_own_height() {
+        // Documented gap, not a bug: Stylo's own "servo" engine mode (the
+        // one this crate uses) ships a fixed six-feature media table --
+        // width, scan, resolution, device-pixel-ratio, and
+        // prefers-color-scheme -- with no height feature at all, unlike
+        // its "gecko" mode. `min-height`/`max-height`/bare `height`
+        // parse but can never match, no matter the real viewport, so
+        // this crate's own media-query support is width-based only.
+        let tree: Element = view! { <div class="card" /> };
+        let arena = Arena::build(&tree);
+        let rules =
+            parse_stylesheet("@media (min-height: 100px) { .card { background-color: #ff0000; } }")
+                .unwrap();
+        let node = arena.roots()[0];
+
+        let tall = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport {
+                width: 900.0,
+                height: 5000.0,
+            },
+        );
+        assert_eq!(tall[&node].background_color, Rgba::TRANSPARENT);
     }
 }

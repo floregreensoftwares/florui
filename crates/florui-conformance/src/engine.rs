@@ -149,7 +149,15 @@ pub fn render_fixture(
 
     let arena = Arena::build(&tree);
     let rules = parse_stylesheet(css).expect("fixture CSS must be valid");
-    let styles = compute(&arena, &rules, &InteractionState::new());
+    let styles = compute(
+        &arena,
+        &rules,
+        &InteractionState::new(),
+        florui_style::Viewport {
+            width: width_css_px as f32,
+            height: height_css_px as f32,
+        },
+    );
 
     let available = Size {
         width: AvailableSpace::Definite(width_css_px as f32),

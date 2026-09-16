@@ -52,7 +52,7 @@ use crate::cascade::{
     BorderSide as FlorBorderSide, BoxShadow as FlorBoxShadow, ComputedStyle, ContentAlignment,
     Display as FlorDisplay, Edges, FilterFunction as FlorFilterFunction, FlexDirection, FlexWrap,
     FontFamily as FlorFontFamily, ItemAlignment, LengthPercentage as FlorLengthPercentage,
-    TransformFunction as FlorTransformFunction,
+    TransformFunction as FlorTransformFunction, Viewport as FlorViewport,
 };
 use crate::color::Rgba;
 use crate::interaction::InteractionState;
@@ -749,11 +749,11 @@ pub(crate) fn shared_lock() -> &'static SharedRwLock {
     &LOCK
 }
 
-fn device() -> Device {
+fn device(viewport: FlorViewport) -> Device {
     Device::new(
         MediaType::screen(),
         QuirksMode::NoQuirks,
-        euclid::Size2D::new(1024.0, 768.0),
+        euclid::Size2D::new(viewport.width, viewport.height),
         euclid::Scale::new(1.0),
         Box::new(NoFontMetrics),
         ComputedValues::initial_values_with_font_override(FontStruct::initial_values()),
@@ -763,14 +763,16 @@ fn device() -> Device {
 
 /// Computes real Stylo styles for every node in `arena`, driving Stylo's
 /// own selector matching, cascade, and inheritance via [`resolve_style`]
-/// — this crate reimplements none of them.
+/// — this crate reimplements none of them. `viewport` is what `@media`'s
+/// own size features resolve against.
 pub(crate) fn compute(
     arena: &Arena,
     rules: &[Rule],
     state: &InteractionState,
+    viewport: FlorViewport,
 ) -> HashMap<NodeId, ComputedStyle> {
     style::thread_state::enter(style::thread_state::ThreadState::LAYOUT);
-    let result = compute_in_layout_state(arena, rules, state);
+    let result = compute_in_layout_state(arena, rules, state, viewport);
     style::thread_state::exit(style::thread_state::ThreadState::LAYOUT);
     result
 }
@@ -779,6 +781,7 @@ fn compute_in_layout_state(
     arena: &Arena,
     rules: &[Rule],
     state: &InteractionState,
+    viewport: FlorViewport,
 ) -> HashMap<NodeId, ComputedStyle> {
     let mut result = HashMap::new();
     if arena.roots().is_empty() {
@@ -787,7 +790,7 @@ fn compute_in_layout_state(
 
     let (tree, _primary_root) = StyloTree::new(arena, state);
 
-    let mut stylist = Stylist::new(device(), QuirksMode::NoQuirks);
+    let mut stylist = Stylist::new(device(viewport), QuirksMode::NoQuirks);
     let lock = shared_lock();
     // The framework's own default element stylesheet first, under
     // Origin::UserAgent — Stylo's real cascade-origin precedence means an

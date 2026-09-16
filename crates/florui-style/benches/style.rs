@@ -11,7 +11,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use florui::Element;
-use florui_style::{InteractionState, compute, parse_stylesheet};
+use florui_style::{InteractionState, Viewport, compute, parse_stylesheet};
 
 fn deep_tree(depth: usize) -> Element {
     let mut node = Element::node("div", vec![("class".into(), "leaf".into())], Vec::new());
@@ -59,7 +59,14 @@ fn bench_deep_tree(c: &mut Criterion) {
         let rules =
             parse_stylesheet(".leaf { width: 10px; }").expect("benchmark CSS must be valid");
         group.bench_function(format!("{depth}_deep"), |b| {
-            b.iter(|| compute(&arena, &rules, &InteractionState::new()));
+            b.iter(|| {
+                compute(
+                    &arena,
+                    &rules,
+                    &InteractionState::new(),
+                    Viewport::default(),
+                )
+            });
         });
     }
     group.finish();
@@ -81,7 +88,14 @@ fn bench_deep_tree_with_matching(c: &mut Criterion) {
         ";
         let rules = parse_stylesheet(css).expect("benchmark CSS must be valid");
         group.bench_function(format!("{depth}_deep"), |b| {
-            b.iter(|| compute(&arena, &rules, &InteractionState::new()));
+            b.iter(|| {
+                compute(
+                    &arena,
+                    &rules,
+                    &InteractionState::new(),
+                    Viewport::default(),
+                )
+            });
         });
     }
     group.finish();
@@ -96,7 +110,14 @@ fn bench_wide_tree(c: &mut Criterion) {
         let rules =
             parse_stylesheet(".item { width: 10px; }").expect("benchmark CSS must be valid");
         group.bench_function(format!("{n}_children"), |b| {
-            b.iter(|| compute(&arena, &rules, &InteractionState::new()));
+            b.iter(|| {
+                compute(
+                    &arena,
+                    &rules,
+                    &InteractionState::new(),
+                    Viewport::default(),
+                )
+            });
         });
     }
     group.finish();

@@ -112,7 +112,12 @@ impl App {
     }
 
     fn compute(&mut self) -> (HashMap<NodeId, ComputedStyle>, HashMap<NodeId, BoxLayout>) {
-        let styles = florui_style::compute(&self.arena, &self.rules, &self.interaction);
+        let styles = florui_style::compute(
+            &self.arena,
+            &self.rules,
+            &self.interaction,
+            florui_style::Viewport::default(),
+        );
         let layouts =
             florui_layout::compute_layout(&mut self.font, &self.arena, &styles, Size::MAX_CONTENT)
                 .expect("this tree's explicit sizes never produce a layout failure");
