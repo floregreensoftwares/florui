@@ -14,9 +14,11 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use florui::Element;
 use florui_layout::BoxLayout;
+use florui_reactive::provide_context;
 use florui_style::{NodeId, Rgba, StyleError};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use taffy::prelude::*;
@@ -27,7 +29,10 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::window::{Window, WindowId};
 
 use crate::UiRuntime;
+use crate::appearance::DecorationMode;
 use crate::dpi::{self, ViewportScale};
+use crate::gpu::{self, GpuPresenter};
+use crate::window_controls::WindowControls;
 
 #[derive(Debug)]
 pub enum RunError {
@@ -75,19 +80,56 @@ enum UserEvent {
     Dirty,
     /// The watched CSS file (see [`run_with_css_reload`]) changed on disk.
     CssChanged,
+    /// A [`crate::WindowControls::close`] call from inside the component
+    /// tree, routed back through the event loop so it takes the exact
+    /// same [`ActiveEventLoop::exit`] path a real
+    /// `WindowEvent::CloseRequested` (the OS's own close button, still
+    /// live even under [`DecorationMode::Custom`] via, e.g., Alt+F4) —
+    /// one real shutdown path, not two that could drift apart.
+    RequestClose,
+}
+
+/// What [`run_with_options`]/[`run_with_css_reload_and_options`] ask for
+/// about the real window's own chrome — currently just `decorations`, but
+/// its own struct (not a bare [`DecorationMode`] parameter) so a later
+/// addition doesn't need a new `run_with_*_and_*` function of its own.
+/// [`run`]/[`run_with_css_reload`] are thin wrappers over these two with
+/// [`WindowOptions::default`] (system decorations), so every existing
+/// caller keeps working unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WindowOptions {
+    pub decorations: DecorationMode,
 }
 
 /// Opens a window titled `title` and keeps it live over `root` — called
 /// fresh on every render, the way a `#[component]` function normally is.
 /// `css` is parsed once; it does not get watched for changes — for a dev
 /// loop that reloads edited CSS without losing component state, use
-/// [`run_with_css_reload`] instead.
+/// [`run_with_css_reload`] instead. System-decorated — for an
+/// application-drawn title bar instead, use [`run_with_options`].
 ///
 /// Blocks the calling thread until the window closes.
 pub fn run(
     title: &str,
     css: &str,
     canvas_color: Rgba,
+    root: impl Fn() -> Element + 'static,
+) -> Result<(), RunError> {
+    run_with_options(title, css, canvas_color, WindowOptions::default(), root)
+}
+
+/// Same as [`run`], but with explicit control over the real window's own
+/// chrome — see [`WindowOptions`]'s own doc. Under
+/// [`DecorationMode::Custom`], `root`'s own component tree reaches
+/// [`crate::use_window_controls`] to actually drive the window it no
+/// longer has OS-drawn chrome to drive it for free.
+///
+/// Blocks the calling thread until the window closes.
+pub fn run_with_options(
+    title: &str,
+    css: &str,
+    canvas_color: Rgba,
+    options: WindowOptions,
     root: impl Fn() -> Element + 'static,
 ) -> Result<(), RunError> {
     let rules = florui_style::parse_stylesheet(css).map_err(RunError::Stylesheet)?;
@@ -102,6 +144,7 @@ pub fn run(
         rules,
         Box::new(root),
         event_loop.create_proxy(),
+        options,
     );
     event_loop.run_app(&mut host).map_err(RunError::EventLoop)?;
     match host.fatal_error {
@@ -119,11 +162,33 @@ pub fn run(
 ///
 /// A reload that fails to parse is reported to stderr and the previous,
 /// still-valid stylesheet keeps rendering — only the *initial* read at
-/// startup must succeed. Blocks the calling thread until the window closes.
+/// startup must succeed. System-decorated — for an application-drawn
+/// title bar instead, use [`run_with_css_reload_and_options`]. Blocks the
+/// calling thread until the window closes.
 pub fn run_with_css_reload(
     title: &str,
     css_path: impl AsRef<Path>,
     canvas_color: Rgba,
+    root: impl Fn() -> Element + 'static,
+) -> Result<(), RunError> {
+    run_with_css_reload_and_options(
+        title,
+        css_path,
+        canvas_color,
+        WindowOptions::default(),
+        root,
+    )
+}
+
+/// Same as [`run_with_css_reload`], but with explicit control over the
+/// real window's own chrome — see [`WindowOptions`]'s own doc and
+/// [`run_with_options`]'s own note on [`DecorationMode::Custom`]. Blocks
+/// the calling thread until the window closes.
+pub fn run_with_css_reload_and_options(
+    title: &str,
+    css_path: impl AsRef<Path>,
+    canvas_color: Rgba,
+    options: WindowOptions,
     root: impl Fn() -> Element + 'static,
 ) -> Result<(), RunError> {
     let css_path = css_path.as_ref().to_owned();
@@ -144,6 +209,7 @@ pub fn run_with_css_reload(
         rules,
         Box::new(root),
         proxy,
+        options,
     );
     host.css_path = Some(css_path);
     host._css_watcher = Some(watcher);
@@ -213,22 +279,40 @@ fn scale_layouts(layouts: &HashMap<NodeId, BoxLayout>, factor: f32) -> HashMap<N
         .collect()
 }
 
-/// Owns the window, the `softbuffer` surface, and the event loop; delegates
-/// every rendering, hit-testing, and dispatch decision to a [`UiRuntime`].
+/// Whichever presentation path [`DesktopHost::resumed`] actually got —
+/// see [`crate::gpu`]'s own doc for the fallback contract between them.
+/// `Cpu` is still `softbuffer`, unchanged from before this existed.
+enum Presenter {
+    Gpu(Box<GpuPresenter>),
+    Cpu {
+        surface: softbuffer::Surface<Arc<Window>, Arc<Window>>,
+        _context: softbuffer::Context<Arc<Window>>,
+    },
+}
+
+/// Owns the window, the real presenter (GPU-preferred, `softbuffer`
+/// fallback — see [`Presenter`]), and the event loop; delegates every
+/// rendering, hit-testing, and dispatch decision to a [`UiRuntime`].
 struct DesktopHost {
     title: String,
     canvas_color: Rgba,
     rules: Vec<florui_style::Rule>,
     root: Option<Box<dyn Fn() -> Element>>,
+    options: WindowOptions,
     proxy: EventLoopProxy<UserEvent>,
     runtime: Option<UiRuntime>,
     /// The node hit-tested at the last left-button press, if any — a
     /// click only dispatches on release over this same node.
     pressed: Option<NodeId>,
     last_cursor: (f64, f64),
-    window: Option<Rc<Window>>,
-    surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
-    _context: Option<softbuffer::Context<Rc<Window>>>,
+    window: Option<Arc<Window>>,
+    /// Also reachable from the component tree via
+    /// [`crate::use_window_controls`] — kept here too so
+    /// [`Self::handle_press`] can recognize a press on
+    /// [`crate::WINDOW_DRAG_REGION_ID`] and start a real window drag
+    /// itself, without a component needing to wire that up by hand.
+    controls: Option<Rc<WindowControls>>,
+    presenter: Option<Presenter>,
     fatal_error: Option<RunError>,
     /// Only set by [`run_with_css_reload`] — [`run`] leaves this `None`,
     /// and [`Self::reload_css`] is a no-op without it.
@@ -244,19 +328,21 @@ impl DesktopHost {
         rules: Vec<florui_style::Rule>,
         root: Box<dyn Fn() -> Element>,
         proxy: EventLoopProxy<UserEvent>,
+        options: WindowOptions,
     ) -> Self {
         Self {
             title,
             canvas_color,
             rules,
             root: Some(root),
+            options,
             proxy,
             runtime: None,
             pressed: None,
             last_cursor: (0.0, 0.0),
             window: None,
-            surface: None,
-            _context: None,
+            controls: None,
+            presenter: None,
             fatal_error: None,
             css_path: None,
             _css_watcher: None,
@@ -316,29 +402,42 @@ impl DesktopHost {
             scale_factor as f32,
         );
 
-        let Some(surface) = &mut self.surface else {
-            return;
-        };
-        if let Err(error) = surface.resize(width, height) {
-            eprintln!("florui-platform: could not resize the render surface: {error}");
-            return;
-        }
-        let mut buffer = match surface.buffer_mut() {
-            Ok(buffer) => buffer,
-            Err(error) => {
-                eprintln!("florui-platform: render surface buffer unavailable: {error}");
-                return;
+        match &mut self.presenter {
+            Some(Presenter::Gpu(presenter)) => {
+                // tiny-skia's own pixel format is RGBA byte order,
+                // premultiplied — matches `GpuPresenter`'s own upload
+                // texture format exactly, so the painted bytes go straight
+                // across with no channel swizzle.
+                presenter.resize(width.get(), height.get());
+                presenter.present(canvas.data());
             }
-        };
-        // Canvas is always opaque, so premultiplied-by-255 is a no-op.
-        let pixels: Vec<u32> = canvas
-            .pixels()
-            .iter()
-            .map(|p| u32::from_be_bytes([0, p.red(), p.green(), p.blue()]))
-            .collect();
-        buffer.copy_from_slice(&pixels);
-        if let Err(error) = buffer.present() {
-            eprintln!("florui-platform: could not present the frame: {error}");
+            Some(Presenter::Cpu { surface, .. }) => {
+                if let Err(error) = surface.resize(width, height) {
+                    eprintln!("florui-platform: could not resize the render surface: {error}");
+                    return;
+                }
+                let mut buffer = match surface.buffer_mut() {
+                    Ok(buffer) => buffer,
+                    Err(error) => {
+                        eprintln!("florui-platform: render surface buffer unavailable: {error}");
+                        return;
+                    }
+                };
+                // `softbuffer`'s own pixel format has no alpha channel at
+                // all (see `crate::appearance`'s own doc) — the canvas is
+                // always painted fully opaque today regardless, so
+                // dropping alpha here is a no-op, not a lossy conversion.
+                let pixels: Vec<u32> = canvas
+                    .pixels()
+                    .iter()
+                    .map(|p| u32::from_be_bytes([0, p.red(), p.green(), p.blue()]))
+                    .collect();
+                buffer.copy_from_slice(&pixels);
+                if let Err(error) = buffer.present() {
+                    eprintln!("florui-platform: could not present the frame: {error}");
+                }
+            }
+            None => {}
         }
     }
 
@@ -398,13 +497,33 @@ impl DesktopHost {
     /// Remembers whichever node is under the cursor at press time — the
     /// click itself only fires on release, and only if that release lands
     /// back on this same node (so dragging off a button and releasing
-    /// elsewhere cancels it).
+    /// elsewhere cancels it). A press that lands exactly on
+    /// [`crate::WINDOW_DRAG_REGION_ID`] is a different gesture entirely —
+    /// see that constant's own doc — and starts a real window drag
+    /// instead of ever becoming a click candidate; `winit`'s own
+    /// `drag_window` takes over the mouse for the rest of this gesture,
+    /// so there is no matching press to remember here.
     fn handle_press(&mut self) {
         let (x, y) = self.to_logical_cursor(self.last_cursor.0, self.last_cursor.1);
-        self.pressed = self
+        let hit = self
             .runtime
             .as_ref()
             .and_then(|runtime| runtime.hit_test(x, y));
+
+        if hit.is_some_and(|node| self.is_drag_region(node)) {
+            if let Some(controls) = &self.controls {
+                controls.drag();
+            }
+            return;
+        }
+        self.pressed = hit;
+    }
+
+    fn is_drag_region(&self, node: NodeId) -> bool {
+        self.runtime.as_ref().is_some_and(|runtime| {
+            let (arena, ..) = runtime.geometry();
+            arena.id_attr(node) == Some(crate::WINDOW_DRAG_REGION_ID)
+        })
     }
 
     /// Re-reads and re-parses the watched CSS file (see
@@ -460,18 +579,40 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title(self.title.clone());
+        // Always requested — harmless for whichever presenter actually
+        // ends up used (see `gpu::transparent_capable_attributes`'s own
+        // doc), and `crate::gpu::GpuPresenter::try_new` needs the window
+        // to have already been created with these attributes to have any
+        // chance at real `TransparentSurface` compositing.
+        let attrs = gpu::transparent_capable_attributes(
+            Window::default_attributes()
+                .with_title(self.title.clone())
+                .with_decorations(matches!(self.options.decorations, DecorationMode::System)),
+        );
         let window = match event_loop.create_window(attrs) {
-            Ok(window) => Rc::new(window),
+            Ok(window) => Arc::new(window),
             Err(error) => return self.fail(event_loop, RunError::WindowCreation(error)),
         };
-        let context = match softbuffer::Context::new(window.clone()) {
-            Ok(context) => context,
-            Err(error) => return self.fail(event_loop, RunError::SurfaceCreation(error)),
-        };
-        let surface = match softbuffer::Surface::new(&context, window.clone()) {
-            Ok(surface) => surface,
-            Err(error) => return self.fail(event_loop, RunError::SurfaceCreation(error)),
+
+        // GPU-preferred, `softbuffer` fallback — see `crate::gpu`'s own
+        // doc for the two-tier (three-way, counting this CPU path)
+        // capability contract this implements.
+        let presenter = match GpuPresenter::try_new(window.clone()) {
+            Some(gpu_presenter) => Presenter::Gpu(Box::new(gpu_presenter)),
+            None => {
+                let context = match softbuffer::Context::new(window.clone()) {
+                    Ok(context) => context,
+                    Err(error) => return self.fail(event_loop, RunError::SurfaceCreation(error)),
+                };
+                let surface = match softbuffer::Surface::new(&context, window.clone()) {
+                    Ok(surface) => surface,
+                    Err(error) => return self.fail(event_loop, RunError::SurfaceCreation(error)),
+                };
+                Presenter::Cpu {
+                    surface,
+                    _context: context,
+                }
+            }
         };
 
         let viewport = layout_viewport(dpi::viewport_scale(
@@ -482,7 +623,27 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
             .root
             .take()
             .expect("resumed only builds the runtime once, guarded by self.window");
-        let mut runtime = UiRuntime::with_rules(self.rules.clone(), root, viewport);
+
+        // Reachable from the component tree via `crate::use_window_controls`
+        // from this runtime's very first render onward — see
+        // `UiRuntime::with_rules_and_context`'s own doc for why that needs
+        // to be a constructor argument rather than registered afterward.
+        let controls_window = window.clone();
+        let close_proxy = self.proxy.clone();
+        let controls = Rc::new(WindowControls::new(controls_window, move || {
+            let _ = close_proxy.send_event(UserEvent::RequestClose);
+        }));
+        self.controls = Some(Rc::clone(&controls));
+        let context_providers: Vec<Box<dyn Fn()>> = vec![Box::new(move || {
+            provide_context(Rc::clone(&controls));
+        })];
+
+        let mut runtime = UiRuntime::with_rules_and_context(
+            self.rules.clone(),
+            root,
+            viewport,
+            context_providers,
+        );
         let proxy = self.proxy.clone();
         runtime.on_needs_update(move || {
             let _ = proxy.send_event(UserEvent::Dirty);
@@ -499,8 +660,7 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
 
         self.runtime = Some(runtime);
         self.window = Some(window);
-        self._context = Some(context);
-        self.surface = Some(surface);
+        self.presenter = Some(presenter);
         self.redraw();
     }
 
@@ -541,10 +701,11 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
         }
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Dirty => self.update_and_request_redraw(),
             UserEvent::CssChanged => self.reload_css(),
+            UserEvent::RequestClose => event_loop.exit(),
         }
     }
 }

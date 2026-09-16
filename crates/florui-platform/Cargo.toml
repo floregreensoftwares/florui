@@ -10,10 +10,12 @@ name = "florui_platform"
 
 [features]
 default = ["desktop"]
-# winit/softbuffer/notify are only needed by the desktop host, not by the
-# window-independent UiRuntime — a mobile or game host driving UiRuntime
-# on its own shouldn't have to pull them in.
-desktop = ["dep:notify", "dep:softbuffer", "dep:winit"]
+# winit/softbuffer/notify/wgpu/pollster are only needed by the desktop
+# host, not by the window-independent UiRuntime — a mobile or game host
+# driving UiRuntime on its own shouldn't have to pull them in.
+# `dep:windows-sys` is a no-op outside the Windows-only dependency table
+# below — every other target simply never has it in its resolved graph.
+desktop = ["dep:notify", "dep:softbuffer", "dep:winit", "dep:wgpu", "dep:pollster", "dep:windows-sys"]
 
 [dependencies]
 florui = { path = "../florui" }
@@ -26,3 +28,18 @@ notify = { version = "8.2.0", optional = true }
 softbuffer = { version = "0.4.8", optional = true }
 taffy = "0.14"
 winit = { version = "0.30.13", optional = true }
+# `desktop`'s own real GPU presentation path (see `gpu`'s own module
+# doc) — `softbuffer` stays the CPU fallback. Versions match
+# `florui-devtools`'s own existing use of both, for one resolved version
+# across the workspace.
+wgpu = { version = "29.0.4", optional = true }
+pollster = { version = "1.0.1", optional = true }
+
+# Only `crate::caption`'s own dependency — a real, Windows-specific DWM
+# API call (see that module's own doc). Target-scoped so every other
+# platform's dependency graph never has it at all, not merely unused.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+] }

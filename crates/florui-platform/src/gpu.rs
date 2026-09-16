@@ -1,0 +1,386 @@
+//! Real GPU-backed window presentation for [`crate::desktop`]'s
+//! `DesktopHost`, preferred over `softbuffer` whenever a real adapter
+//! comes up — `softbuffer` stays the deliberate CPU fallback when it
+//! doesn't, not a path this crate is dropping. Painting itself is
+//! unchanged either way: [`florui_paint::paint_to_buffer`] still
+//! rasterizes on the CPU exactly as before; only *how the resulting
+//! pixels reach the screen* differs. Uploading a CPU-painted buffer to
+//! the GPU every frame has a real cost this module doesn't eliminate —
+//! it only buys real desktop-compositor alpha, not faster painting; a
+//! true GPU-rendered paint pipeline is a separate, later migration.
+//!
+//! # Two separate questions, not one
+//!
+//! "Can this host render through the GPU at all?" and "can it also
+//! present a genuinely transparent window?" are independent — failing
+//! the second must not force falling back on the first. That's
+//! [`PresentationCapability`]'s own three states, decided once per
+//! window and never silently downgraded later:
+//!
+//! - [`PresentationCapability::GpuTransparent`]: a real adapter/device
+//!   came up *and* the surface negotiated genuine per-pixel alpha
+//!   compositing — the exact `Backends::DX12` +
+//!   `Dx12SwapchainKind::DxgiFromVisual` +
+//!   `with_no_redirection_bitmap(true)` + `CompositeAlphaMode::PreMultiplied`
+//!   recipe the `gpu_transparency_probe` example (see its own doc)
+//!   confirmed live, human-verified against the real desktop, not just
+//!   `Surface::configure` returning success.
+//! - [`PresentationCapability::GpuOpaque`]: a real adapter/device came
+//!   up, but no real alpha compositing mode did (or wasn't attempted) —
+//!   still GPU-presented, just opaque. This is not a failure case:
+//!   GPU rendering with an opaque window is strictly better than
+//!   falling all the way back to the CPU path over a decorative
+//!   capability alone.
+//! - [`PresentationCapability::Cpu`]: no usable GPU adapter came up at
+//!   all — the same `softbuffer` presentation this crate already used
+//!   everywhere, unchanged, and still opaque-only (see
+//!   `crate::appearance`'s own doc for why `softbuffer` itself can
+//!   never do per-pixel alpha).
+//!
+//! No dedicated GPU is required for either GPU-backed capability — an
+//! integrated GPU with the right adapter/driver features is enough, and
+//! "DirectX 12 is installed" alone doesn't guarantee that; the real
+//! adapter/driver combination decides, which is exactly why this is
+//! probed live against a real window rather than assumed from the OS
+//! version.
+//!
+//! # What's validated here, and what isn't yet
+//!
+//! Run live end to end through `crate::desktop::DesktopHost` (the
+//! `counter` example, `cargo run --example counter -p florui-example-app`),
+//! not just this module's own probe: a real window came up through
+//! [`PresentationCapability::GpuTransparent`] on this machine, survived a
+//! live resize (816×639 to 1200×800, reconfigured and repainted correctly
+//! with no distortion or crash), correctly dispatched a real click through
+//! `DesktopHost`'s own hit-testing and `Signal` update (the counter's
+//! value and its derived `x2` both advanced, proving layout, paint, and
+//! presentation all stayed in sync through this path), and survived a
+//! real minimize/restore cycle (process stayed responsive throughout,
+//! resumed rendering correctly afterward, no repeated
+//! `"could not present the frame"` errors). Painted content itself was
+//! opaque throughout that run (the example's own `canvas_color`); the
+//! presentation layer's real alpha capability is proven, but no example
+//! has yet passed a non-opaque `canvas_color` through `DesktopHost` to
+//! confirm an actually see-through *application* window end to end — the
+//! next real thing to verify, not yet done.
+//!
+//! A lost/reset GPU device is handled defensively —
+//! [`GpuPresenter::present`] treats anything other than a successful
+//! texture acquisition as "skip this frame," not a panic — but this
+//! crate does not yet exercise an actual induced device-loss (e.g. a
+//! driver reset) as a real test; that remains an open, tracked gap, not
+//! a silent assumption. Memory footprint was not measured against an
+//! automated budget; color/alpha fidelity was checked by eye against
+//! real screenshots (this module's own probe and the `counter` run
+//! above), not an automated reference image.
+
+use std::sync::Arc;
+
+use wgpu::{
+    CompositeAlphaMode, Extent3d, PresentMode, TexelCopyBufferLayout, TexelCopyTextureInfo,
+    TextureAspect, TextureDimension, TextureFormat, TextureUsages,
+};
+use winit::window::Window;
+
+#[cfg(target_os = "windows")]
+use winit::platform::windows::WindowAttributesExtWindows;
+
+/// See this module's own doc for what each state means and the fallback
+/// contract between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentationCapability {
+    GpuTransparent,
+    GpuOpaque,
+    Cpu,
+}
+
+/// Adds the window attributes a GPU-transparent presentation attempt
+/// needs, on top of whatever `attrs` the caller already built — always
+/// safe to call even when [`GpuPresenter::try_new`] ends up choosing
+/// [`PresentationCapability::GpuOpaque`] or
+/// [`PresentationCapability::Cpu`] instead: a transparent-*capable*
+/// window whose content is always painted fully opaque (this crate's
+/// own default, unchanged) looks identical to a plain opaque window
+/// either way, and `softbuffer`'s own GDI `BitBlt` presentation (see
+/// `crate::appearance`'s own doc) draws to the window's own device
+/// context directly, not through DWM's redirection surface — the one
+/// `with_no_redirection_bitmap` disables — so the CPU fallback path
+/// keeps working under these same attributes too.
+pub fn transparent_capable_attributes(
+    attrs: winit::window::WindowAttributes,
+) -> winit::window::WindowAttributes {
+    let attrs = attrs.with_transparent(true);
+    #[cfg(target_os = "windows")]
+    let attrs = attrs.with_no_redirection_bitmap(true);
+    attrs
+}
+
+pub struct GpuPresenter {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    capability: PresentationCapability,
+    upload_texture: wgpu::Texture,
+    upload_size: (u32, u32),
+}
+
+impl GpuPresenter {
+    pub fn capability(&self) -> PresentationCapability {
+        self.capability
+    }
+
+    /// Tries every presentation path in order, from most to least
+    /// capable, returning the first that actually comes up on a real
+    /// adapter — `None` only when no GPU adapter could be obtained at
+    /// all, the signal `crate::desktop::DesktopHost` uses to fall back
+    /// to `softbuffer`.
+    pub fn try_new(window: Arc<Window>) -> Option<Self> {
+        #[cfg(target_os = "windows")]
+        if let Some(presenter) = Self::try_dx12_direct_composition(window.clone()) {
+            return Some(presenter);
+        }
+        Self::try_default_opaque(window)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn try_dx12_direct_composition(window: Arc<Window>) -> Option<Self> {
+        let mut backend_options = wgpu::BackendOptions::from_env_or_default();
+        if wgpu::Dx12SwapchainKind::from_env().is_none() {
+            backend_options.dx12.presentation_system = wgpu::Dx12SwapchainKind::DxgiFromVisual;
+        }
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::DX12,
+            backend_options,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let surface = instance.create_surface(window.clone()).ok()?;
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface: Some(&surface),
+            ..Default::default()
+        }))
+        .ok()?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("florui-platform GPU presenter (DX12 + DirectComposition)"),
+            ..Default::default()
+        }))
+        .ok()?;
+
+        let capabilities = surface.get_capabilities(&adapter);
+        if !capabilities
+            .alpha_modes
+            .contains(&CompositeAlphaMode::PreMultiplied)
+        {
+            // `PostMultiplied` is real per-pixel alpha too, but panics
+            // `Surface::configure` in this exact DX12 DirectComposition
+            // path on `wgpu` 29.0.4 — see `gpu_transparency_probe`'s own
+            // doc. Only `PreMultiplied` is a live-verified working
+            // choice; anything else falls through to the opaque path.
+            return None;
+        }
+        let format = capabilities
+            .formats
+            .iter()
+            .copied()
+            .find(|f| matches!(f, TextureFormat::Rgba8Unorm))?;
+
+        Self::configure(
+            window,
+            device,
+            queue,
+            surface,
+            format,
+            CompositeAlphaMode::PreMultiplied,
+            PresentationCapability::GpuTransparent,
+        )
+    }
+
+    /// Whatever backend `wgpu` picks by default, opaque only — the
+    /// second-tier fallback: still GPU-rendered, just without real
+    /// per-pixel alpha compositing.
+    fn try_default_opaque(window: Arc<Window>) -> Option<Self> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let surface = instance.create_surface(window.clone()).ok()?;
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface: Some(&surface),
+            ..Default::default()
+        }))
+        .ok()?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("florui-platform GPU presenter (opaque)"),
+            ..Default::default()
+        }))
+        .ok()?;
+
+        let capabilities = surface.get_capabilities(&adapter);
+        let format = capabilities
+            .formats
+            .iter()
+            .copied()
+            .find(|f| matches!(f, TextureFormat::Rgba8Unorm))
+            .or_else(|| capabilities.formats.first().copied())?;
+
+        Self::configure(
+            window,
+            device,
+            queue,
+            surface,
+            format,
+            CompositeAlphaMode::Opaque,
+            PresentationCapability::GpuOpaque,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn configure(
+        window: Arc<Window>,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        surface: wgpu::Surface<'static>,
+        format: TextureFormat,
+        alpha_mode: CompositeAlphaMode,
+        capability: PresentationCapability,
+    ) -> Option<Self> {
+        let size = window.inner_size();
+        let width = size.width.max(1);
+        let height = size.height.max(1);
+        let config = wgpu::SurfaceConfiguration {
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_DST,
+            format,
+            width,
+            height,
+            present_mode: PresentMode::Fifo,
+            desired_maximum_frame_latency: 2,
+            alpha_mode,
+            view_formats: vec![],
+        };
+        surface.configure(&device, &config);
+        let upload_texture = create_upload_texture(&device, format, width, height);
+
+        Some(Self {
+            device,
+            queue,
+            surface,
+            config,
+            capability,
+            upload_texture,
+            upload_size: (width, height),
+        })
+    }
+
+    /// Reconfigures the surface (and its upload texture) for a new
+    /// physical size — the GPU-path equivalent of `softbuffer::Surface::resize`,
+    /// called from the same resize/scale-factor-changed handling
+    /// `crate::desktop::DesktopHost` already had.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        let width = width.max(1);
+        let height = height.max(1);
+        if (width, height) == (self.config.width, self.config.height) {
+            return;
+        }
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(&self.device, &self.config);
+        self.upload_texture =
+            create_upload_texture(&self.device, self.config.format, width, height);
+        self.upload_size = (width, height);
+    }
+
+    /// Uploads `rgba` (tiny-skia's own premultiplied `R,G,B,A` byte
+    /// order — matches this presenter's own `Rgba8Unorm` format
+    /// directly, no channel-swizzling needed) and presents it. `rgba`
+    /// must be exactly `width * height * 4` bytes for the size last
+    /// passed to [`Self::resize`] (or the size at construction, if never
+    /// resized) — a mismatch is a caller bug, not a recoverable runtime
+    /// condition, so this asserts rather than silently corrupting the
+    /// frame.
+    ///
+    /// A lost/outdated/occluded surface, or any other non-success
+    /// texture-acquisition result, skips this frame instead of
+    /// panicking — see this module's own doc for what's and isn't
+    /// exercised here around real device loss.
+    pub fn present(&mut self, rgba: &[u8]) {
+        let (width, height) = self.upload_size;
+        assert_eq!(
+            rgba.len(),
+            (width as usize) * (height as usize) * 4,
+            "present() called with a buffer that doesn't match this presenter's own last-known \
+             size — the caller must resize() before presenting a differently-sized frame"
+        );
+
+        self.queue.write_texture(
+            TexelCopyTextureInfo {
+                texture: &self.upload_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: TextureAspect::All,
+            },
+            rgba,
+            TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
+            _ => return,
+        };
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("florui-platform GPU presenter upload blit"),
+            });
+        encoder.copy_texture_to_texture(
+            TexelCopyTextureInfo {
+                texture: &self.upload_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: TextureAspect::All,
+            },
+            TexelCopyTextureInfo {
+                texture: &frame.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: TextureAspect::All,
+            },
+            Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+        frame.present();
+    }
+}
+
+fn create_upload_texture(
+    device: &wgpu::Device,
+    format: TextureFormat,
+    width: u32,
+    height: u32,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("florui-platform GPU presenter upload texture"),
+        size: Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format,
+        usage: TextureUsages::COPY_SRC | TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
+}

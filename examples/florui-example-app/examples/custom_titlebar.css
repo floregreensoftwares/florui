@@ -1,0 +1,100 @@
+.app {
+    display: flex;
+    flex-direction: column;
+    background-color: #1e1e22;
+    color: #ffffff;
+}
+
+.titlebar {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    height: 40px;
+    padding-left: 12px;
+    padding-right: 8px;
+    background-color: #17171a;
+}
+
+.titlebar-title {
+    font-size: 13px;
+    color: #c8c8cc;
+}
+
+/* The one leaf element `DesktopHost` recognizes as a native drag handle —
+   see `florui_platform::WINDOW_DRAG_REGION_ID`'s own doc. Its `flex-grow`
+   is what actually gives it the width to press on, filling whatever room
+   the title and the button groups on either side don't use. */
+.drag-region {
+    flex-grow: 1;
+    height: 40px;
+}
+
+.titlebar-extra {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+}
+
+.icon-button {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    flex-direction: row;
+    justify-content: center;
+    align-items: center;
+    color: #c8c8cc;
+    border: none;
+}
+
+.icon-button:hover {
+    background-color: #2a2a30;
+}
+
+.window-buttons {
+    display: flex;
+    flex-direction: row;
+    margin-left: 8px;
+}
+
+.window-button {
+    width: 44px;
+    height: 40px;
+    display: flex;
+    flex-direction: row;
+    justify-content: center;
+    align-items: center;
+    color: #c8c8cc;
+    border: none;
+}
+
+.window-button:hover {
+    background-color: #2a2a30;
+}
+
+.close-button {
+    width: 44px;
+    height: 40px;
+    display: flex;
+    flex-direction: row;
+    justify-content: center;
+    align-items: center;
+    color: #c8c8cc;
+    border: none;
+}
+
+.close-button:hover {
+    background-color: #c42b1c;
+    color: #ffffff;
+}
+
+.body {
+    padding-top: 24px;
+    padding-right: 24px;
+    padding-bottom: 24px;
+    padding-left: 24px;
+}
+
+.body-text {
+    font-size: 14px;
+    color: #c8c8cc;
+}

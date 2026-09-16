@@ -1360,8 +1360,11 @@ dependencies = [
  "florui-style",
  "florui-text",
  "notify",
+ "pollster",
  "softbuffer",
  "taffy",
+ "wgpu",
+ "windows-sys 0.60.2",
  "winit",
 ]
 
