@@ -164,19 +164,19 @@ pub struct BorderSide {
 /// spread plus `inset`, all already resolved to concrete pixels (no
 /// percentages in this property's own grammar, unlike `margin`/`padding`,
 /// so unlike [`ComputedStyle::width`] this never needs an `Option`).
-/// `blur_radius` parses and cascades like every other field here, but see
-/// `florui-paint`'s own module doc for why it isn't painted: this crate's
-/// rasterizer (tiny-skia) has no blur/mask-filter primitive, the same
-/// "supported syntax, simplified rendering" tradeoff [`BorderSide`]'s own
-/// doc already documents for unrendered border styles.
+/// `blur_radius` is a real Gaussian blur (`florui-paint`'s own `blur`
+/// module, since this crate's rasterizer, tiny-skia, has no blur
+/// primitive of its own to reach for instead) — see `florui-paint`'s own
+/// module doc for the CSS-spec correspondence between this field and the
+/// blur's actual standard deviation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BoxShadow {
     pub offset_x: f32,
     pub offset_y: f32,
     pub blur_radius: f32,
-    /// Unlike [`Self::blur_radius`], this one *is* painted — a shadow's
-    /// own shape grows or shrinks by this amount on every side before the
-    /// offset is applied, real CSS's own `spread-radius` semantics.
+    /// A shadow's own shape grows or shrinks by this amount on every
+    /// side before the offset is applied, real CSS's own `spread-radius`
+    /// semantics.
     pub spread_radius: f32,
     pub color: Rgba,
     /// `inset` — an outer (drop) shadow paints outside the border box; an
