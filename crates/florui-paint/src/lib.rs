@@ -19,10 +19,18 @@
 //! outline extractor feeding a
 //! [tiny-skia](https://github.com/RazrFalcon/tiny-skia) path, the same
 //! rasterizer backgrounds/borders/shadows use — one painting backend,
-//! not several. A node with `opacity` below `1.0` paints itself and its
-//! whole subtree into an offscreen buffer first, composited back as one
-//! group (see [`paint_group_with_opacity`]) — real CSS's own
-//! group-opacity semantics, not a per-primitive alpha multiply.
+//! not several. A node with `opacity` below `1.0`, a `transform`, or both
+//! paints itself and its whole subtree into an offscreen buffer first,
+//! composited back as one group (see [`paint_group`]) — real CSS's own
+//! group-opacity semantics (not a per-primitive alpha multiply) and its
+//! own "transform moves the whole rendered result, clip included" rule
+//! for transforms, both falling out of the same offscreen-buffer
+//! mechanism for free: the buffer already holds the group's content at
+//! its normal, untransformed position, so compositing it back with a
+//! real matrix instead of the identity one moves everything — background,
+//! border, already-clipped descendants — as a single unit, pivoting
+//! around [`ComputedStyle::transform_origin`]. See [`resolve_transform`]
+//! for the supported `transform` subset and its own matrix composition.
 //!
 //! `box-shadow`'s `blur-radius` is painted too, via a real Gaussian blur
 //! — see [`blur`]'s own module doc: tiny-skia 0.11 (this crate's whole
@@ -33,8 +41,8 @@
 //! instead of going through a `tiny_skia::Paint` fill. A node whose
 //! `overflow` clips content (see [`clip_for_children`]) restricts its own
 //! descendants — never its own border/background — to its padding box;
-//! nested clips intersect. There is no border-radius or transform yet —
-//! `florui_style` has no properties for either.
+//! nested clips intersect. There is no border-radius yet — `florui_style`
+//! has no property for it.
 
 mod blur;
 
@@ -43,7 +51,7 @@ use std::path::Path;
 use std::rc::Rc;
 
 use florui_layout::{BoxLayout, absolute_position};
-use florui_style::{Arena, ComputedStyle, Display, NodeId, Rgba};
+use florui_style::{Arena, ComputedStyle, Display, NodeId, Rgba, TransformFunction};
 use florui_text::Font;
 use skrifa::instance::{LocationRef, NormalizedCoord, Size as GlyphSize};
 use skrifa::outline::{DrawSettings, OutlinePen};
@@ -173,20 +181,21 @@ pub fn paint_to_buffer(
 /// their descendants onto `buffer`, in real paint order (see
 /// [`paint_order`]).
 ///
-/// Iterative for the common case — every node fully opaque, the same
-/// walk `paint_to_buffer` always did — but recurses once per ancestor
-/// whose own [`ComputedStyle::opacity`] is below `1.0`, to render that
-/// ancestor's whole subtree into its own offscreen buffer before
-/// compositing it back as a single group (see this module's own doc on
-/// why that's not the same as multiplying each descendant's own paint
-/// individually). Recursion depth tracks the *nesting depth of opacity
-/// groups specifically*, not overall tree depth — an all-opaque subtree
-/// of any depth still walks iteratively, the same guarantee this
-/// module's own deep-tree test already covers. A pathologically deep
-/// chain of nested opacity groups could still overflow the stack;
-/// unguarded for now, a smaller and far less likely bound than the
-/// plain-tree-depth case that motivated this function's own iterative
-/// design in the first place.
+/// Iterative for the common case — every node fully opaque and
+/// untransformed, the same walk `paint_to_buffer` always did — but
+/// recurses once per ancestor whose own [`ComputedStyle::opacity`] is
+/// below `1.0`, whose own [`ComputedStyle::transform`] isn't empty, or
+/// both, to render that ancestor's whole subtree into its own offscreen
+/// buffer before compositing it back as a single group (see this
+/// module's own doc on why that's not the same as multiplying each
+/// descendant's own paint individually, or transforming each one on its
+/// own). Recursion depth tracks the *nesting depth of these groups
+/// specifically*, not overall tree depth — a subtree with neither still
+/// walks iteratively, the same guarantee this module's own deep-tree test
+/// already covers. A pathologically deep chain of nested groups could
+/// still overflow the stack; unguarded for now, a smaller and far less
+/// likely bound than the plain-tree-depth case that motivated this
+/// function's own iterative design in the first place.
 ///
 /// `clip`, if given, restricts every fill in this call (and everything it
 /// recurses into) to the pixels it marks visible — inherited from an
@@ -224,8 +233,15 @@ fn paint_nodes(
             // would still cost the same work for no visible result.
             continue;
         }
-        if opacity < 1.0 {
-            paint_group_with_opacity(
+        let transform = match (styles.get(&node), layouts.get(&node)) {
+            (Some(style), Some(&layout)) => {
+                let (x, y) = absolute_position(arena, layouts, node);
+                resolve_transform(style, &layout, x, y, scale_factor)
+            }
+            _ => Transform::identity(),
+        };
+        if opacity < 1.0 || !transform.is_identity() {
+            paint_group(
                 buffer,
                 arena,
                 styles,
@@ -234,6 +250,8 @@ fn paint_nodes(
                 node,
                 scale_factor,
                 node_clip,
+                opacity,
+                transform,
             );
             continue;
         }
@@ -344,20 +362,25 @@ const NO_BORDER_SIDE: florui_style::BorderSide = florui_style::BorderSide {
 
 /// Renders `node`'s own box and its whole subtree into a fresh,
 /// transparent buffer the same size as `buffer`, then composites that
-/// buffer onto `buffer` at `node`'s own [`ComputedStyle::opacity`] —
-/// real CSS's own "group opacity": every overlap *inside* the group
-/// still resolves at full strength against its own siblings (later
-/// paints over earlier exactly as usual), and only the group's own
-/// combined result is faded as one flat image. Painting each descendant
-/// at the reduced opacity individually instead would show every overlap
-/// inside the group as a visibly different, doubled-up alpha — the
-/// difference is only visible where a group's own children overlap each
-/// other, which is exactly why a flat per-primitive multiply isn't
-/// "close enough."
+/// buffer onto `buffer` at `opacity` through `transform` — real CSS's own
+/// "group opacity" (every overlap *inside* the group still resolves at
+/// full strength against its own siblings, later paints over earlier
+/// exactly as usual, and only the group's own combined result is faded as
+/// one flat image — painting each descendant at the reduced opacity
+/// individually instead would show every overlap inside the group as a
+/// visibly different, doubled-up alpha) and real CSS's own `transform`
+/// semantics (the buffer already holds `node` at its normal, transform-free
+/// position, so compositing it with a real matrix instead of the identity
+/// one moves the *entire rendered group* — background, border, and every
+/// already-clipped descendant together — as a single rigid image, exactly
+/// what "transform establishes its own coordinate system" means). Called
+/// whenever either condition holds; a node with both applies them
+/// together in the one composite below, matching real CSS's own single
+/// stacking-context-establishing group for either property.
 ///
-/// A full canvas-sized buffer per opacity group, uncached and unpooled —
-/// correct, but not yet the bounded/pooled temporary surfaces real
-/// compositing work eventually needs for many overlapping translucent
+/// A full canvas-sized buffer per group, uncached and unpooled — correct,
+/// but not yet the bounded/pooled temporary surfaces real compositing
+/// work eventually needs for many overlapping translucent or transformed
 /// panels at once.
 ///
 /// `clip` is an ancestor's clip, exactly as [`paint_node`] takes it —
@@ -366,8 +389,11 @@ const NO_BORDER_SIDE: florui_style::BorderSide = florui_style::BorderSide {
 /// rendered into a separate buffer first) and to the final composite
 /// (redundant with the first once the inner paint already respected it,
 /// but cheap and keeps this function correct even if that ever changes).
+/// Left in the ancestor's own untransformed coordinate space in both
+/// places — real CSS clips a transformed box's *rendered result* against
+/// an ancestor's clip, not the other way around.
 #[allow(clippy::too_many_arguments)]
-fn paint_group_with_opacity(
+fn paint_group(
     buffer: &mut Canvas,
     arena: &Arena,
     styles: &HashMap<NodeId, ComputedStyle>,
@@ -376,8 +402,9 @@ fn paint_group_with_opacity(
     node: NodeId,
     scale_factor: f32,
     clip: Option<Rc<Mask>>,
+    opacity: f32,
+    transform: Transform,
 ) {
-    let opacity = styles.get(&node).map_or(1.0, |s| s.opacity);
     let mut group = Pixmap::new(buffer.width(), buffer.height())
         .expect("paint_to_buffer requires a nonzero-sized canvas");
     paint_node(
@@ -416,14 +443,108 @@ fn paint_group_with_opacity(
         opacity,
         ..Default::default()
     };
-    buffer.draw_pixmap(
-        0,
-        0,
-        group.as_ref(),
-        &paint,
-        Transform::identity(),
-        clip.as_deref(),
-    );
+    buffer.draw_pixmap(0, 0, group.as_ref(), &paint, transform, clip.as_deref());
+}
+
+/// The real 2D affine matrix `style`'s own `transform` describes, pivoted
+/// around its own `transform_origin` — [`Transform::identity()`] (a cheap
+/// no-op composite, taken by [`paint_nodes`]'s own fast path) when
+/// `transform` is empty, real CSS's own `none`.
+///
+/// `x`/`y` are `style`'s node's own absolute border-box position in the
+/// canvas's own (possibly HiDPI-scaled) physical pixels — the same
+/// position [`paint_node`] paints that box at. `scale_factor` converts a
+/// `transform` value's own CSS-authored lengths (`translate(10px)`,
+/// `matrix()`'s `e`/`f`) from the logical pixels they're specified in up
+/// to the canvas's physical ones, exactly the split [`paint_shaped_runs`]
+/// already needs for text and for the same reason: `layout` (and this
+/// whole crate's coordinate space) already accounts for HiDPI, but a raw
+/// CSS length read off [`ComputedStyle`] hasn't yet. A `<percentage>`
+/// component needs no such correction — it's already relative to
+/// `layout`'s own (already-scaled) box, so the same ratio holds
+/// regardless of DPR.
+///
+/// Each function in [`ComputedStyle::transform`]'s own list folds into
+/// one running matrix via [`Transform::pre_concat`], in authored order —
+/// real CSS's own composition rule: `transform: A B` maps a point as
+/// `A(B(point))`, so the *last*-listed function acts on the original
+/// point first and the *first*-listed one acts last, in the coordinate
+/// system every earlier function already established. `pre_concat`
+/// builds exactly that: starting from the identity, concatenating `A`
+/// then `B` leaves `A * B`, which maps a point as `A(B(point))` — the
+/// same left-to-right accumulation, not the other order.
+fn resolve_transform(
+    style: &ComputedStyle,
+    layout: &BoxLayout,
+    x: f32,
+    y: f32,
+    scale_factor: f32,
+) -> Transform {
+    if style.transform.is_empty() {
+        return Transform::identity();
+    }
+    let mut list = Transform::identity();
+    for function in &style.transform {
+        let next = match *function {
+            TransformFunction::Translate(tx, ty) => Transform::from_translate(
+                tx.length * scale_factor + tx.percentage * layout.width,
+                ty.length * scale_factor + ty.percentage * layout.height,
+            ),
+            TransformFunction::Scale(sx, sy) => Transform::from_scale(sx, sy),
+            TransformFunction::Rotate(degrees) => Transform::from_rotate(degrees),
+            TransformFunction::Matrix { a, b, c, d, e, f } => {
+                Transform::from_row(a, b, c, d, e * scale_factor, f * scale_factor)
+            }
+        };
+        list = list.pre_concat(next);
+    }
+
+    let (origin_x_lp, origin_y_lp) = style.transform_origin;
+    let origin_x = x + origin_x_lp.length * scale_factor + origin_x_lp.percentage * layout.width;
+    let origin_y = y + origin_y_lp.length * scale_factor + origin_y_lp.percentage * layout.height;
+    Transform::from_translate(origin_x, origin_y)
+        .pre_concat(list)
+        .pre_concat(Transform::from_translate(-origin_x, -origin_y))
+}
+
+/// `node`'s own border box at `(x, y, width, height)`, after applying
+/// [`resolve_transform`] to its four corners and taking the axis-aligned
+/// bounding box of the result — real CSS's own `getBoundingClientRect()`
+/// semantics for a transformed element (CSSOM View's spec: the
+/// *transformed* border box, not the pre-transform layout one). Painting
+/// itself never needs this — [`resolve_transform`]'s own [`Transform`]
+/// composites the whole rendered group directly instead of remeasuring a
+/// box — but anything comparing this crate's own geometry against a real
+/// browser's (`florui-conformance`'s own harness) needs to compare on the
+/// same terms, or every transformed fixture would show a geometry
+/// mismatch that isn't a real bug.
+pub fn transformed_bounding_box(
+    style: &ComputedStyle,
+    layout: &BoxLayout,
+    x: f32,
+    y: f32,
+    scale_factor: f32,
+) -> (f32, f32, f32, f32) {
+    let transform = resolve_transform(style, layout, x, y, scale_factor);
+    let corners = [
+        (x, y),
+        (x + layout.width, y),
+        (x, y + layout.height),
+        (x + layout.width, y + layout.height),
+    ];
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for &(px, py) in &corners {
+        let mut point = tiny_skia::Point { x: px, y: py };
+        transform.map_point(&mut point);
+        min_x = min_x.min(point.x);
+        min_y = min_y.min(point.y);
+        max_x = max_x.max(point.x);
+        max_y = max_y.max(point.y);
+    }
+    (min_x, min_y, max_x - min_x, max_y - min_y)
 }
 
 /// `nodes` (a set of siblings — document roots when `parent_display` is
@@ -2875,5 +2996,282 @@ mod tests {
              one (ink height {height_at_1x}px -> {height_at_2x}px, ratio {ratio:.2}), not stay \
              at the logical size just repositioned"
         );
+    }
+
+    fn single_box_buffer(css: &str, canvas: u32, scale_factor: f32) -> Canvas {
+        single_box_buffer_at(css, canvas, scale_factor, 0.0, 0.0)
+    }
+
+    fn single_box_buffer_at(css: &str, canvas: u32, scale_factor: f32, x: f32, y: f32) -> Canvas {
+        let tree: Element = view! { <div class="box" /> };
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let node = arena.roots()[0];
+        let mut layouts = HashMap::new();
+        layouts.insert(
+            node,
+            BoxLayout {
+                x,
+                y,
+                width: 10.0 * scale_factor,
+                height: 10.0 * scale_factor,
+            },
+        );
+        let mut font = Font::load_embedded();
+        paint_to_buffer(
+            &mut font,
+            canvas,
+            canvas,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            scale_factor,
+        )
+    }
+
+    #[test]
+    fn translate_moves_a_solid_box_to_its_own_new_position() {
+        let buffer = single_box_buffer(
+            ".box { background-color: #ff0000; transform: translate(15px, 5px); }",
+            30,
+            1.0,
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 5, 5),
+            [0, 0, 0],
+            "the box's own untransformed spot must go back to the canvas's clear color"
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 20, 10),
+            [0xff, 0, 0],
+            "the box must actually paint at translate()'s own new position"
+        );
+    }
+
+    #[test]
+    fn translate_percentage_resolves_against_the_nodes_own_box() {
+        // A 10px-wide/tall box: translate(50%, 0) must move it by 5px on
+        // the x axis alone, the percentage resolving against *this
+        // node's own* box (real CSS's own reference box for `translate`),
+        // not some other size.
+        let buffer = single_box_buffer(
+            ".box { background-color: #ff0000; transform: translate(50%, 0); }",
+            20,
+            1.0,
+        );
+        assert_eq!(pixel_rgb(&buffer, 2, 5), [0, 0, 0], "left of the moved box");
+        assert_eq!(
+            pixel_rgb(&buffer, 7, 5),
+            [0xff, 0, 0],
+            "inside the moved box"
+        );
+    }
+
+    #[test]
+    fn translates_own_length_scales_with_a_hidpi_canvas_but_its_percentage_does_not_need_to() {
+        // Same logical move (`translate(10px, 0)` on a box already
+        // scaled to physical pixels by the caller) at two different
+        // scale factors: the *physical* distance the box moves must
+        // scale right along with the canvas, the same correction real
+        // text painting already needs for its own glyph offsets.
+        let buffer_1x = single_box_buffer(
+            ".box { background-color: #ff0000; transform: translate(10px, 0); }",
+            30,
+            1.0,
+        );
+        let buffer_2x = single_box_buffer(
+            ".box { background-color: #ff0000; transform: translate(10px, 0); }",
+            60,
+            2.0,
+        );
+        assert_eq!(
+            pixel_rgb(&buffer_1x, 15, 5),
+            [0xff, 0, 0],
+            "moved 10 logical px at 1x"
+        );
+        assert_eq!(
+            pixel_rgb(&buffer_2x, 30, 10),
+            [0xff, 0, 0],
+            "the same 10 logical px must land 20 physical px over on a 2x canvas"
+        );
+    }
+
+    #[test]
+    fn rotate_pivots_around_the_boxs_own_default_center_origin() {
+        // A box with a red top border only: rotating 180 degrees around
+        // the default center origin must flip that border to the
+        // opposite (bottom) edge — proof both that rotation actually
+        // rotates and that the default `transform-origin` (the box's own
+        // center, not its top-left corner) is right, since pivoting
+        // around the corner would move the whole box off-canvas instead
+        // of flipping it in place.
+        let buffer = single_box_buffer(
+            ".box {
+                background-color: #1e1e22;
+                border-top-width: 3px; border-top-style: solid; border-top-color: #ff0000;
+                transform: rotate(180deg);
+            }",
+            10,
+            1.0,
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 5, 1),
+            [0x1e, 0x1e, 0x22],
+            "the top edge no longer shows the border — it flipped away from here"
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 5, 8),
+            [0xff, 0, 0],
+            "bottom edge now shows the red border"
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 5, 5),
+            [0x1e, 0x1e, 0x22],
+            "the middle stays the box's own background"
+        );
+    }
+
+    #[test]
+    fn scale_grows_the_box_around_its_own_default_center_origin() {
+        // A 10x10 box at (10, 10) — centered at (15, 15) — scaled 2x
+        // around its own default center must span 20x20 still centered
+        // on (15, 15), i.e. (5, 5)-(25, 25): 5px past each of its
+        // original edges on *every* side, not 10px past only the
+        // bottom-right ones (which a top-left-pivoted scale would
+        // produce instead).
+        let buffer = single_box_buffer_at(
+            ".box { background-color: #ff0000; transform: scale(2); }",
+            30,
+            1.0,
+            10.0,
+            10.0,
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 3, 15),
+            [0, 0, 0],
+            "still outside the scaled box's new left edge"
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 7, 15),
+            [0xff, 0, 0],
+            "just inside the scaled box's new left edge"
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 23, 15),
+            [0xff, 0, 0],
+            "just inside the scaled box's new right edge"
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 27, 15),
+            [0, 0, 0],
+            "still outside the scaled box's new right edge"
+        );
+    }
+
+    #[test]
+    fn matrix_produces_the_same_result_as_the_equivalent_translate() {
+        let via_translate = single_box_buffer(
+            ".box { background-color: #ff0000; transform: translate(15px, 5px); }",
+            30,
+            1.0,
+        );
+        let via_matrix = single_box_buffer(
+            ".box { background-color: #ff0000; transform: matrix(1, 0, 0, 1, 15, 5); }",
+            30,
+            1.0,
+        );
+        for y in 0..30 {
+            for x in 0..30 {
+                assert_eq!(
+                    pixel_rgb(&via_matrix, x, y),
+                    pixel_rgb(&via_translate, x, y),
+                    "matrix(1,0,0,1,15,5) must paint identically to translate(15px, 5px) at ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transform_functions_compose_left_to_right_not_commutatively() {
+        // Real CSS composes a transform list so the *last*-listed
+        // function acts on the original point first and the
+        // *first*-listed one acts last, in the coordinate system every
+        // earlier function already established — so `translate(10px, 0)
+        // rotate(90deg)` (rotate first, in the box's own local frame,
+        // then translate in the outer/world frame) must not paint the
+        // same as `rotate(90deg) translate(10px, 0)` (translate first,
+        // then that already-shifted result gets rotated around the
+        // box's own original center). Any reversed composition order
+        // would make these two indistinguishable or swapped.
+        let translate_then_rotate = single_box_buffer(
+            ".box { background-color: #ff0000; transform: translate(10px, 0) rotate(90deg); }",
+            30,
+            1.0,
+        );
+        let rotate_then_translate = single_box_buffer(
+            ".box { background-color: #ff0000; transform: rotate(90deg) translate(10px, 0); }",
+            30,
+            1.0,
+        );
+        let mut any_pixel_differs = false;
+        for y in 0..30 {
+            for x in 0..30 {
+                if pixel_rgb(&translate_then_rotate, x, y)
+                    != pixel_rgb(&rotate_then_translate, x, y)
+                {
+                    any_pixel_differs = true;
+                }
+            }
+        }
+        assert!(
+            any_pixel_differs,
+            "translate(10px,0) rotate(90deg) and rotate(90deg) translate(10px,0) must not paint \
+             identically — composition order matters in real CSS"
+        );
+    }
+
+    #[test]
+    fn opacity_and_transform_apply_together_in_the_same_group() {
+        let buffer = single_box_buffer(
+            ".box { background-color: #ff0000; opacity: 0.5; transform: translate(15px, 0); }",
+            30,
+            1.0,
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 5, 5),
+            [0, 0, 0],
+            "the box's own untransformed spot must be untouched — opacity alone must not leave \
+             it painted in place"
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 20, 5),
+            [0x80, 0, 0],
+            "the moved box must still be faded to half opacity against the canvas's own black"
+        );
+    }
+
+    #[test]
+    fn an_unsupported_skew_function_is_treated_as_identity() {
+        // `skew()` isn't in this crate's documented 2D subset (see
+        // `TransformFunction`'s own doc) and drops out of the resolved
+        // list entirely — so a box with only a skew must paint exactly
+        // where it would with no `transform` at all, not distorted and
+        // not silently discarded along with the rest of its own styles.
+        let with_skew = single_box_buffer(
+            ".box { background-color: #ff0000; transform: skewX(30deg); }",
+            30,
+            1.0,
+        );
+        let without_transform = single_box_buffer(".box { background-color: #ff0000; }", 30, 1.0);
+        for y in 0..30 {
+            for x in 0..30 {
+                assert_eq!(
+                    pixel_rgb(&with_skew, x, y),
+                    pixel_rgb(&without_transform, x, y)
+                );
+            }
+        }
     }
 }

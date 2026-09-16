@@ -51,7 +51,8 @@ use stylo_dom::ElementState;
 use crate::cascade::{
     BorderSide as FlorBorderSide, BoxShadow as FlorBoxShadow, ComputedStyle, ContentAlignment,
     Display as FlorDisplay, Edges, FlexDirection, FlexWrap, FontFamily as FlorFontFamily,
-    ItemAlignment,
+    ItemAlignment, LengthPercentage as FlorLengthPercentage,
+    TransformFunction as FlorTransformFunction,
 };
 use crate::color::Rgba;
 use crate::interaction::InteractionState;
@@ -946,6 +947,99 @@ fn to_computed_style(values: &ComputedValues) -> ComputedStyle {
             to_grid_placement(&position.grid_row_end),
         ),
         box_shadow: to_box_shadows(&effects.box_shadow.0, color),
+        transform: to_transform(&box_style.transform),
+        transform_origin: to_transform_origin(&box_style.transform_origin),
+    }
+}
+
+/// `transform`'s own function list — see
+/// [`crate::cascade::TransformFunction`]'s own doc for exactly which
+/// functions survive and why the rest are dropped.
+fn to_transform(
+    value: &style::values::generics::transform::Transform<
+        style::values::generics::transform::TransformOperation<
+            style::values::computed::Angle,
+            f32,
+            style::values::computed::Length,
+            i32,
+            style::values::computed::LengthPercentage,
+        >,
+    >,
+) -> Vec<FlorTransformFunction> {
+    use style::values::generics::transform::TransformOperation;
+    value
+        .0
+        .iter()
+        .filter_map(|op| match op {
+            TransformOperation::Matrix(m) => Some(FlorTransformFunction::Matrix {
+                a: m.a,
+                b: m.b,
+                c: m.c,
+                d: m.d,
+                e: m.e,
+                f: m.f,
+            }),
+            TransformOperation::Translate(x, y) => Some(FlorTransformFunction::Translate(
+                to_length_percentage(x),
+                to_length_percentage(y),
+            )),
+            TransformOperation::TranslateX(x) => Some(FlorTransformFunction::Translate(
+                to_length_percentage(x),
+                FlorLengthPercentage::default(),
+            )),
+            TransformOperation::TranslateY(y) => Some(FlorTransformFunction::Translate(
+                FlorLengthPercentage::default(),
+                to_length_percentage(y),
+            )),
+            TransformOperation::Scale(sx, sy) => Some(FlorTransformFunction::Scale(*sx, *sy)),
+            TransformOperation::ScaleX(sx) => Some(FlorTransformFunction::Scale(*sx, 1.0)),
+            TransformOperation::ScaleY(sy) => Some(FlorTransformFunction::Scale(1.0, *sy)),
+            TransformOperation::Rotate(angle) => {
+                Some(FlorTransformFunction::Rotate(angle.degrees()))
+            }
+            // Documented unsupported subset: skew, every 3D function, and
+            // the animation-only interpolate/accumulate matrix
+            // intermediates — see `FlorTransformFunction`'s own doc.
+            _ => None,
+        })
+        .collect()
+}
+
+/// `transform-origin`'s `x`/`y` components; its `z` component is dropped
+/// (this crate's `transform` support is 2D-only).
+fn to_transform_origin(
+    value: &style::values::generics::transform::TransformOrigin<
+        style::values::computed::LengthPercentage,
+        style::values::computed::LengthPercentage,
+        style::values::computed::Length,
+    >,
+) -> (FlorLengthPercentage, FlorLengthPercentage) {
+    (
+        to_length_percentage(&value.horizontal),
+        to_length_percentage(&value.vertical),
+    )
+}
+
+/// Decomposes a Stylo `<length-percentage>` into this crate's own
+/// `{ length, percentage }` pair without reaching into its private
+/// representation: [`style::values::computed::LengthPercentage::resolve`]
+/// is affine in its `basis` argument for every value the real grammar can
+/// produce (a plain length, a plain percentage, or any spec-legal
+/// `calc()` mixing the two — CSS never multiplies two percentages
+/// together here), so evaluating it at `0px` and `1px` recovers exactly
+/// the length and percentage coefficients algebraically: `resolve(0px)`
+/// is the length term alone (the percentage term vanishes), and
+/// `resolve(1px) - resolve(0px)` is the percentage term's own coefficient
+/// (since the length term cancels). The same "read Stylo's own real
+/// behavior instead of guessing" spirit as this module's compile-error
+/// type probes, applied to a value instead of a type.
+fn to_length_percentage(value: &style::values::computed::LengthPercentage) -> FlorLengthPercentage {
+    use style::values::computed::Length;
+    let at_zero = value.resolve(Length::new(0.0)).px();
+    let at_one = value.resolve(Length::new(1.0)).px();
+    FlorLengthPercentage {
+        length: at_zero,
+        percentage: at_one - at_zero,
     }
 }
 
