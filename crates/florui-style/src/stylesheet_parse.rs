@@ -21,6 +21,12 @@ use crate::stylo::shared_lock;
 static GRID_ENABLED: LazyLock<()> =
     LazyLock::new(|| stylo_config::set_bool("layout.grid.enabled", true));
 
+/// `backdrop-filter` shares this pref with several properties this crate
+/// doesn't read (`contain`, `mask-image`, `text-overflow`, ...), so
+/// enabling it has no other observable effect here.
+static BACKDROP_FILTER_ENABLED: LazyLock<()> =
+    LazyLock::new(|| stylo_config::set_bool("layout.unimplemented", true));
+
 /// One parsed stylesheet. Opaque: `florui-style` is the only crate that
 /// reads what's inside — everything else only holds, clones, and passes
 /// this to [`crate::cascade::compute`].
@@ -44,6 +50,7 @@ pub fn parse_stylesheet(css: &str) -> Result<Vec<Rule>, StyleError> {
 
 pub(crate) fn parse_stylesheet_with_origin(css: &str, origin: Origin) -> Result<Rule, StyleError> {
     LazyLock::force(&GRID_ENABLED);
+    LazyLock::force(&BACKDROP_FILTER_ENABLED);
     let lock = shared_lock();
     let url = url::Url::parse("about:florui").expect("a fixed, valid URL literal");
     let sheet = Stylesheet::from_str(

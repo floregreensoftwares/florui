@@ -403,6 +403,9 @@ pub struct ComputedStyle {
     /// content); `florui-paint`'s own doc covers how that chain applies
     /// to a node's rendered content.
     pub filter: Vec<FilterFunction>,
+    /// Same grammar/subset as [`Self::filter`], applied to whatever is
+    /// already painted behind this node instead of its own content.
+    pub backdrop_filter: Vec<FilterFunction>,
 }
 
 /// Resolves every node in `arena` against `rules` and `state` — real
@@ -1501,5 +1504,45 @@ mod tests {
         );
         let span = arena.find(|a, id| a.tag(id) == "span").unwrap();
         assert!(computed[&span].filter.is_empty());
+    }
+
+    #[test]
+    fn backdrop_filter_defaults_to_none() {
+        let tree: Element = view! { <div /> };
+        let (arena, computed) = styles(&tree, "", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert!(computed[&node].backdrop_filter.is_empty());
+    }
+
+    #[test]
+    fn backdrop_filter_resolves_the_same_subset_as_filter() {
+        let tree: Element = view! { <div class="glass" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".glass { backdrop-filter: blur(10px) brightness(1.2); }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(
+            computed[&node].backdrop_filter,
+            vec![FilterFunction::Blur(10.0), FilterFunction::Brightness(1.2)]
+        );
+        assert!(computed[&node].filter.is_empty());
+    }
+
+    #[test]
+    fn backdrop_filter_does_not_inherit() {
+        let tree: Element = view! {
+            <div class="glass">
+                <span>{"x"}</span>
+            </div>
+        };
+        let (arena, computed) = styles(
+            &tree,
+            ".glass { backdrop-filter: blur(10px); }",
+            &InteractionState::new(),
+        );
+        let span = arena.find(|a, id| a.tag(id) == "span").unwrap();
+        assert!(computed[&span].backdrop_filter.is_empty());
     }
 }
