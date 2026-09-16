@@ -526,6 +526,14 @@ impl DesktopHost {
         })
     }
 
+    /// Shared by the OS's own `CloseRequested` and `WindowControls::close()`
+    /// — one real close path, both askable to veto.
+    fn should_close(&self) -> bool {
+        self.controls
+            .as_ref()
+            .is_none_or(|controls| controls.confirm_close())
+    }
+
     /// Re-reads and re-parses the watched CSS file (see
     /// [`run_with_css_reload`]), swaps it into the running [`UiRuntime`]
     /// via [`UiRuntime::set_rules`] — never rebuilding the tree, so every
@@ -674,7 +682,11 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                if self.should_close() {
+                    event_loop.exit();
+                }
+            }
             WindowEvent::Resized(_) => self.update_and_request_redraw(),
             // Fires on its own — not bundled into `Resized` — when the
             // window moves to a display with a different scale factor, or
@@ -705,7 +717,11 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
         match event {
             UserEvent::Dirty => self.update_and_request_redraw(),
             UserEvent::CssChanged => self.reload_css(),
-            UserEvent::RequestClose => event_loop.exit(),
+            UserEvent::RequestClose => {
+                if self.should_close() {
+                    event_loop.exit();
+                }
+            }
         }
     }
 }

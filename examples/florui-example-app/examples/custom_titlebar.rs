@@ -12,6 +12,7 @@
 use florui::prelude::*;
 use florui_platform::appearance::DecorationMode;
 use florui_platform::{WINDOW_DRAG_REGION_ID, WindowOptions, use_window_controls};
+use florui_reactive::{Cleanup, use_effect, use_signal};
 use florui_style::Rgba;
 
 const CSS: &str = include_str!("custom_titlebar.css");
@@ -33,9 +34,30 @@ fn title_bar_demo() -> Element {
     let controls = use_window_controls();
     let maximized = controls.as_ref().is_some_and(|c| c.is_maximized());
 
+    // Demonstrates close cancellation: while unsaved, closing (via this
+    // button or the real OS close) is vetoed.
+    let unsaved = use_signal(|| true);
+    {
+        let controls = controls.clone();
+        let unsaved = unsaved.clone();
+        use_effect((), move || {
+            if let Some(controls) = &controls {
+                let unsaved = unsaved.clone();
+                controls.set_close_guard(move || !unsaved.get());
+            }
+            let controls = controls.clone();
+            Some(Box::new(move || {
+                if let Some(controls) = &controls {
+                    controls.clear_close_guard();
+                }
+            }) as Cleanup)
+        });
+    }
+
     let minimize = controls.clone();
     let toggle_maximize = controls.clone();
     let close = controls.clone();
+    let toggle_unsaved = unsaved.clone();
 
     view! {
         <div class="app">
@@ -75,10 +97,22 @@ fn title_bar_demo() -> Element {
             </div>
             <div class="body">
                 <p class="body-text">
-                    {"Drag this window from the empty space in the title bar. The buttons \
-                      on the right are real: minimize, maximize/restore, and close all drive \
-                      the actual window through WindowControls, not the OS's own chrome."}
+                    {"Drag from the empty title bar space. Minimize/maximize/close all drive \
+                      the real window through WindowControls, not OS chrome."}
                 </p>
+                <p class="body-text">
+                    {if unsaved.get() {
+                        "Unsaved changes -- closing is blocked. Try the X or Alt+F4."
+                    } else {
+                        "Saved -- closing works normally."
+                    }}
+                </p>
+                <button
+                    class="window-button"
+                    onclick={move || toggle_unsaved.set(!toggle_unsaved.get())}
+                >
+                    {if unsaved.get() { "Mark saved" } else { "Mark unsaved" }}
+                </button>
             </div>
         </div>
     }
