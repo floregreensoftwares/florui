@@ -72,7 +72,7 @@ mod tests {
     use florui::prelude::*;
 
     use super::*;
-    use crate::cascade::compute;
+    use crate::cascade::{Viewport, compute};
     use crate::color::Rgba;
     use crate::interaction::InteractionState;
     use crate::tree::Arena;
@@ -82,7 +82,12 @@ mod tests {
         let tree: Element = view! { <div class="card" /> };
         let arena = Arena::build(&tree);
         let rules = parse_stylesheet(".card { background-color: #42734f; }").unwrap();
-        let computed = compute(&arena, &rules, &InteractionState::new());
+        let computed = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+        );
         assert_eq!(
             computed[&arena.roots()[0]].background_color,
             Rgba::opaque(0x42, 0x73, 0x4f)
@@ -94,8 +99,18 @@ mod tests {
         let tree: Element = view! { <div class="card" /> };
         let arena = Arena::build(&tree);
         let rules = parse_stylesheet(".card { background-color: #111111; }").unwrap();
-        let first = compute(&arena, &rules, &InteractionState::new());
-        let second = compute(&arena, &rules, &InteractionState::new());
+        let first = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+        );
+        let second = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+        );
         assert_eq!(
             first[&arena.roots()[0]].background_color,
             second[&arena.roots()[0]].background_color

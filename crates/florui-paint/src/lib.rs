@@ -1731,7 +1731,12 @@ mod tests {
 
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
         let mut font = Font::load_embedded();
         let layouts =
             florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
@@ -1765,7 +1770,12 @@ mod tests {
         ";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
         let mut font = Font::load_embedded();
         let layouts =
             florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
@@ -1803,7 +1813,12 @@ mod tests {
         ";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
         let mut font = Font::load_embedded();
         let layouts =
             florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
@@ -1844,7 +1859,12 @@ mod tests {
         ";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
         let mut font = Font::load_embedded();
         let layouts =
             florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
@@ -1903,7 +1923,12 @@ mod tests {
         ";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
         let mut font = Font::load_embedded();
         let layouts =
             florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
@@ -1950,7 +1975,12 @@ mod tests {
         ";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
         let mut font = Font::load_embedded();
         let layouts =
             florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
@@ -1993,7 +2023,12 @@ mod tests {
         ";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
         let mut font = Font::load_embedded();
         let layouts =
             florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
@@ -2035,7 +2070,12 @@ mod tests {
         ";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
         let mut font = Font::load_embedded();
         let layouts =
             florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
@@ -2092,7 +2132,12 @@ mod tests {
         ";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
         let mut font = Font::load_embedded();
         let layouts =
             florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
@@ -2139,7 +2184,12 @@ mod tests {
         let css = ".card { width: 20px; height: 20px; background-color: #ff0000; }";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
         let mut font = Font::load_embedded();
         let layouts =
             florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
@@ -2186,7 +2236,12 @@ mod tests {
         let css = ".back { background-color: #ff0000; } .front { background-color: #00ff00; }";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
 
         let root = arena.roots()[0];
         let back = arena.children(root)[0];
@@ -2248,7 +2303,12 @@ mod tests {
         ";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
 
         let row = arena.roots()[0];
         let front = arena.children(row)[0];
@@ -2311,7 +2371,12 @@ mod tests {
         ";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
 
         let column = arena.roots()[0];
         let front = arena.children(column)[0];
@@ -2372,7 +2437,12 @@ mod tests {
             ".row { display: flex; } .a { z-index: 2; } .b { z-index: -1; } .c { z-index: 2; }";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
 
         let row = arena.roots()[0];
         let children = arena.children(row).to_vec();
@@ -2397,7 +2467,12 @@ mod tests {
         let css = ".card { width: 20px; height: 20px; background-color: #1e1e22; }";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
         let mut font = Font::load_embedded();
         let layouts =
             florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
@@ -2421,7 +2496,12 @@ mod tests {
         let css = ".ghost { opacity: 0.5; background-color: #ff0000; }";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
         let node = arena.roots()[0];
         let mut layouts = HashMap::new();
         layouts.insert(
@@ -2466,7 +2546,12 @@ mod tests {
         ";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
         let mut font = Font::load_embedded();
         let layouts =
             florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
@@ -2513,7 +2598,12 @@ mod tests {
         ";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
 
         let group = arena.roots()[0];
         let back = arena.children(group)[0];
@@ -2592,7 +2682,12 @@ mod tests {
         ";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
 
         let frame = arena.roots()[0];
         let content = arena.children(frame)[0];
@@ -2661,7 +2756,12 @@ mod tests {
         ";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
 
         let frame = arena.roots()[0];
         let content = arena.children(frame)[0];
@@ -2724,7 +2824,12 @@ mod tests {
         ";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
 
         let outer = arena.roots()[0];
         let inner = arena.children(outer)[0];
@@ -2807,7 +2912,12 @@ mod tests {
         ";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
         let node = arena.roots()[0];
         let mut layouts = HashMap::new();
         layouts.insert(
@@ -2849,7 +2959,12 @@ mod tests {
         let css = "h2 { color: #ff0000; font-size: 40px; }";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
         let mut font = Font::load_embedded();
         let layouts =
             florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
@@ -2896,7 +3011,12 @@ mod tests {
                 format!("h2 {{ color: #ff0000; font-size: 60px; font-weight: {font_weight}; }}");
             let arena = Arena::build(&tree);
             let rules = florui_style::parse_stylesheet(&css).unwrap();
-            let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+            let styles = florui_style::compute(
+                &arena,
+                &rules,
+                &InteractionState::new(),
+                florui_style::Viewport::default(),
+            );
             let mut font = Font::load_embedded();
             let layouts =
                 florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT)
@@ -2955,7 +3075,12 @@ mod tests {
         let css = "p { color: #ff0000; font-size: 40px; }";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
         let mut font = Font::load_embedded();
         let layouts =
             florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
@@ -3009,7 +3134,12 @@ mod tests {
         let css = ".card { width: 20px; height: 20px; background-color: #1e1e22; color: #ff0000; }";
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
         let mut font = Font::load_embedded();
         let layouts =
             florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
@@ -3047,7 +3177,12 @@ mod tests {
 
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
         let mut font = Font::load_embedded();
         let layouts =
             florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
@@ -3079,7 +3214,12 @@ mod tests {
 
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
         let mut font = Font::load_embedded();
         let layouts = florui_layout::compute_layout(
             &mut font,
@@ -3174,7 +3314,12 @@ mod tests {
             let css = "h2 { color: #ff0000; font-size: 40px; }";
             let arena = Arena::build(&tree);
             let rules = florui_style::parse_stylesheet(css).unwrap();
-            let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+            let styles = florui_style::compute(
+                &arena,
+                &rules,
+                &InteractionState::new(),
+                florui_style::Viewport::default(),
+            );
             let mut font = Font::load_embedded();
             let layouts =
                 florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT)
@@ -3243,7 +3388,12 @@ mod tests {
         let tree: Element = view! { <div class="box" /> };
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
         let node = arena.roots()[0];
         let mut layouts = HashMap::new();
         layouts.insert(
@@ -3672,7 +3822,12 @@ mod tests {
         let css = format!(".back {{ background-color: #ff0000; }} .glass {{ {backdrop_css} }}");
         let arena = Arena::build(&tree);
         let rules = florui_style::parse_stylesheet(&css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
         let back = arena.roots()[0];
         let glass = arena.children(back)[0];
         let mut layouts = HashMap::new();

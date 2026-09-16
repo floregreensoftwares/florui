@@ -29,7 +29,12 @@ fn arena_styles_layouts(
 ) {
     let arena = Arena::build(tree);
     let rules = florui_style::parse_stylesheet(css).expect("benchmark CSS must be valid");
-    let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+    let styles = florui_style::compute(
+        &arena,
+        &rules,
+        &InteractionState::new(),
+        florui_style::Viewport::default(),
+    );
     let mut font = Font::load_embedded();
     let layouts = compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT)
         .expect("benchmark tree must lay out successfully");

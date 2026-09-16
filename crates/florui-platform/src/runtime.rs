@@ -193,7 +193,12 @@ impl UiRuntime {
         // waker already requeued) make progress before this frame commits.
         self.executor.run_until_stalled();
         self.arena = Arena::build(&tree);
-        self.styles = florui_style::compute(&self.arena, &self.rules, &self.interaction);
+        self.styles = florui_style::compute(
+            &self.arena,
+            &self.rules,
+            &self.interaction,
+            media_viewport(viewport),
+        );
         self.layouts =
             florui_layout::compute_layout(&mut self.font, &self.arena, &self.styles, viewport)
                 .expect("this tree's explicit sizes never produce a layout failure");
@@ -269,6 +274,26 @@ impl UiRuntime {
 
     pub fn clear_dirty(&self) {
         self.dirty.clear();
+    }
+}
+
+/// The viewport `@media`'s own size features resolve against, from
+/// whatever the host actually gave [`UiRuntime::update`] — a definite
+/// axis is the real one; `MinContent`/`MaxContent` (a host measuring its
+/// own intrinsic size, not rendering into a fixed viewport) falls back to
+/// [`florui_style::Viewport::default`]'s own placeholder on that axis,
+/// since there is no real viewport size to report.
+fn media_viewport(viewport: Size<AvailableSpace>) -> florui_style::Viewport {
+    let default = florui_style::Viewport::default();
+    florui_style::Viewport {
+        width: match viewport.width {
+            AvailableSpace::Definite(width) => width,
+            AvailableSpace::MinContent | AvailableSpace::MaxContent => default.width,
+        },
+        height: match viewport.height {
+            AvailableSpace::Definite(height) => height,
+            AvailableSpace::MinContent | AvailableSpace::MaxContent => default.height,
+        },
     }
 }
 

@@ -42,7 +42,7 @@ mod tree;
 pub use cascade::{
     BorderSide, BoxShadow, ComputedStyle, ContentAlignment, Display, Edges, FilterFunction,
     FlexDirection, FlexWrap, FontFamily, GridPlacement, GridTrackSize, ItemAlignment,
-    LengthPercentage, TransformFunction, compute,
+    LengthPercentage, TransformFunction, Viewport, compute,
 };
 pub use color::{ColorParseError, Rgba, parse_hex_color};
 pub use error::StyleError;
@@ -85,7 +85,12 @@ mod integration_tests {
         let rules = parse_stylesheet(css).unwrap();
         let button = arena.find(|a, id| a.tag(id) == "button").unwrap();
 
-        let idle = compute(&arena, &rules, &InteractionState::new());
+        let idle = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+        );
         assert_eq!(
             idle[&button].background_color,
             Rgba::opaque(0x42, 0x73, 0x4f)
@@ -93,7 +98,7 @@ mod integration_tests {
         assert_eq!(idle[&button].color, Rgba::opaque(0xff, 0xff, 0xff));
 
         let hovered_state = InteractionState::new().with_hovered(button);
-        let hovered = compute(&arena, &rules, &hovered_state);
+        let hovered = compute(&arena, &rules, &hovered_state, Viewport::default());
         assert_eq!(
             hovered[&button].background_color,
             Rgba::opaque(0x34, 0x5c, 0x3e)

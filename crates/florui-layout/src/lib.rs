@@ -1253,7 +1253,12 @@ mod tests {
     ) {
         let arena = Arena::build(tree);
         let rules = florui_style::parse_stylesheet(css).unwrap();
-        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+        );
         let mut font = florui_text::Font::load_embedded();
         let layouts = compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
         (arena, styles, layouts)

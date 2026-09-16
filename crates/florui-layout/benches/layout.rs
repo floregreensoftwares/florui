@@ -21,7 +21,12 @@ use taffy::prelude::*;
 fn arena_and_styles(tree: &Element, css: &str) -> (Arena, HashMap<NodeId, ComputedStyle>) {
     let arena = Arena::build(tree);
     let rules = florui_style::parse_stylesheet(css).expect("benchmark CSS must be valid");
-    let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+    let styles = florui_style::compute(
+        &arena,
+        &rules,
+        &InteractionState::new(),
+        florui_style::Viewport::default(),
+    );
     (arena, styles)
 }
 
