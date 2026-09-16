@@ -7,9 +7,10 @@ pub fn FilterTest() -> Element {
     view! {
         <div class="page">
             <span class="instructions">
-                {"Every box starts from the same purple fill (#8040c0). All ten run through \
-                  the exact same real CSS `filter` property this project cascades and paints \
-                  -- nothing here is a special case."}
+                {"Every box starts from the same purple fill (#8040c0), except the last, which \
+                  shows backdrop-filter over a red panel behind it. All run through the exact \
+                  same real CSS filter/backdrop-filter properties this project cascades and \
+                  paints -- nothing here is a special case."}
             </span>
             <div class="grid">
                 <div class="sample">
@@ -51,6 +52,13 @@ pub fn FilterTest() -> Element {
                 <div class="sample">
                     <div class="stage"><div class="box grayscale"></div></div>
                     <span class="label">{"grayscale(1) -- unsupported, stays identity"}</span>
+                </div>
+                <div class="sample">
+                    <div class="stage overlap-stage">
+                        <div class="behind"></div>
+                        <div class="glass"></div>
+                    </div>
+                    <span class="label">{"backdrop-filter: brightness(1.8)"}</span>
                 </div>
             </div>
         </div>

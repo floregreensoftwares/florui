@@ -10,8 +10,10 @@
 use florui_example_app::components::filter_test::{FilterTest, FilterTestProps};
 use florui_style::Rgba;
 
-const FILTER_TEST_CSS_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/src/components/filter_test.css");
+const FILTER_TEST_CSS_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/components/filter_test.css"
+);
 
 fn main() {
     let css = std::fs::read_to_string(FILTER_TEST_CSS_PATH)
