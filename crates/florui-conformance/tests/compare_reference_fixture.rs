@@ -153,3 +153,4 @@ fixture_test!(
 fixture_test!(filter_blur_matches_chromium, "filter-blur");
 fixture_test!(filter_adjustments_matches_chromium, "filter-adjustments");
 fixture_test!(backdrop_filter_matches_chromium, "backdrop-filter");
+fixture_test!(custom_properties_matches_chromium, "custom-properties");
