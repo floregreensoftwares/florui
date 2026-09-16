@@ -34,6 +34,7 @@ mod cascade;
 mod color;
 mod default_stylesheet;
 mod error;
+mod height_media_adapter;
 mod interaction;
 mod stylesheet_parse;
 mod stylo;

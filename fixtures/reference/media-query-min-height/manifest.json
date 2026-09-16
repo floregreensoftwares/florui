@@ -1,0 +1,16 @@
+{
+  "id": "media-query-min-height",
+  "description": "A 40x40 box, gray by default, that turns teal under @media (min-height: 60px) -- which the 80px-tall viewport this fixture declares satisfies -- while a second @media (min-height: 5000px) block (declaring a red top border) never matches at that viewport. Proves min-height/max-height media queries -- unsupported by Stylo's own servo-mode media feature table -- resolve correctly against the real viewport, not just that they parse without error.",
+  "html": "index.html",
+  "css": "style.css",
+  "element_id": "el",
+  "viewport": { "width_css_px": 80, "height_css_px": 80, "device_pixel_ratio": 1.0 },
+  "canvas_color": "#ffffff",
+  "florui": {
+    "tag": "div",
+    "class": "box",
+    "css": ".box { width: 40px; height: 40px; background-color: #808080; } @media (min-height: 60px) { .box { background-color: #2f7d6c; } } @media (min-height: 5000px) { .box { border-top-width: 6px; border-top-style: solid; border-top-color: #ff0000; } }",
+    "children": []
+  },
+  "classification": { "kind": "exact" }
+}

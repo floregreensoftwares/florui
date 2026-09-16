@@ -12,6 +12,7 @@ name = "florui_style"
 florui = { path = "../florui" }
 app_units = "0.7"
 atomic_refcell = "0.1"
+cssparser = "0.35"
 euclid = "0.22"
 selectors = "0.32"
 servo_arc = "0.4"

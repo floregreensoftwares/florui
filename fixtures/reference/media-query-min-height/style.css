@@ -1,0 +1,19 @@
+.box {
+    width: 40px;
+    height: 40px;
+    background-color: #808080;
+}
+
+@media (min-height: 60px) {
+    .box {
+        background-color: #2f7d6c;
+    }
+}
+
+@media (min-height: 5000px) {
+    .box {
+        border-top-width: 6px;
+        border-top-style: solid;
+        border-top-color: #ff0000;
+    }
+}
