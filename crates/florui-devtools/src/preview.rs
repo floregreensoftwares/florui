@@ -227,6 +227,13 @@ impl App {
                 b: self.current.background.b,
                 a: self.current.background.a,
             },
+            // This bootstrap loop has no `ComputedStyle` behind its one
+            // hard-coded element either — real CSS's own initial values,
+            // not an unresolved guess, the same reasoning `zero_edges`
+            // above already documents.
+            z_index: None,
+            opacity: 1.0,
+            overflow_clips: false,
             content,
             padding: zero_edges,
             border: zero_edges,

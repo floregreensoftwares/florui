@@ -38,6 +38,17 @@ pub struct InspectorNode {
     pub tag: String,
     pub display: String,
     pub background: Rgba,
+    /// `z-index`. `None` means `auto` (the initial value) — see
+    /// `florui_style::ComputedStyle::z_index`'s own doc for when it
+    /// actually has an effect (a flex/grid item only, today).
+    pub z_index: Option<i32>,
+    /// `opacity`, already clamped to `0.0..=1.0`. `1.0` is the initial,
+    /// fully-opaque value.
+    pub opacity: f32,
+    /// Whether this node clips its own content (including descendants)
+    /// to its padding box — see
+    /// `florui_style::ComputedStyle::overflow_clips`'s own doc.
+    pub overflow_clips: bool,
     /// `None` when nothing laid this node out (e.g. a plain `display:
     /// inline` child has no box of its own yet) — not fabricated as zero.
     pub content: Option<ContentBox>,
@@ -222,6 +233,13 @@ fn format_margin(edge: Option<f32>) -> String {
     }
 }
 
+fn format_z_index(z_index: Option<i32>) -> String {
+    match z_index {
+        Some(value) => value.to_string(),
+        None => "auto".to_string(),
+    }
+}
+
 fn draw_ui(ui: &mut egui::Ui, model: &InspectorModel) -> Option<InspectorAction> {
     let mut action = None;
 
@@ -270,6 +288,16 @@ fn draw_ui(ui: &mut egui::Ui, model: &InspectorModel) -> Option<InspectorAction>
                 ui.monospace(format!(
                     "background-color: #{:02x}{:02x}{:02x}",
                     node.background.r, node.background.g, node.background.b
+                ));
+                ui.monospace(format!("z-index: {}", format_z_index(node.z_index)));
+                ui.monospace(format!("opacity: {}", node.opacity));
+                ui.monospace(format!(
+                    "overflow: {}",
+                    if node.overflow_clips {
+                        "clips"
+                    } else {
+                        "visible"
+                    }
                 ));
 
                 ui.separator();
