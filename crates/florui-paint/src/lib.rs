@@ -19,18 +19,22 @@
 //! outline extractor feeding a
 //! [tiny-skia](https://github.com/RazrFalcon/tiny-skia) path, the same
 //! rasterizer backgrounds/borders/shadows use — one painting backend,
-//! not several. A node with `opacity` below `1.0`, a `transform`, or both
-//! paints itself and its whole subtree into an offscreen buffer first,
-//! composited back as one group (see [`paint_group`]) — real CSS's own
-//! group-opacity semantics (not a per-primitive alpha multiply) and its
-//! own "transform moves the whole rendered result, clip included" rule
-//! for transforms, both falling out of the same offscreen-buffer
-//! mechanism for free: the buffer already holds the group's content at
-//! its normal, untransformed position, so compositing it back with a
-//! real matrix instead of the identity one moves everything — background,
-//! border, already-clipped descendants — as a single unit, pivoting
-//! around [`ComputedStyle::transform_origin`]. See [`resolve_transform`]
-//! for the supported `transform` subset and its own matrix composition.
+//! not several. A node with `opacity` below `1.0`, a `transform`, a
+//! `filter`, or any combination paints itself and its whole subtree into
+//! an offscreen buffer first, composited back as one group (see
+//! [`paint_group`]) — real CSS's own group-opacity semantics (not a
+//! per-primitive alpha multiply) and its own "transform moves the whole
+//! rendered result, clip included" rule for transforms, both falling out
+//! of the same offscreen-buffer mechanism for free: the buffer already
+//! holds the group's content at its normal, untransformed position, so
+//! compositing it back with a real matrix instead of the identity one
+//! moves everything — background, border, already-clipped descendants —
+//! as a single unit, pivoting around [`ComputedStyle::transform_origin`].
+//! See [`resolve_transform`] for the supported `transform` subset and its
+//! own matrix composition, and [`apply_filters`] for the documented
+//! `filter` subset (`blur`/`brightness`/`contrast`/`saturate`), applied to
+//! that same buffer before it's composited — real CSS's own
+//! filter-then-composite order.
 //!
 //! `box-shadow`'s `blur-radius` is painted too, via a real Gaussian blur
 //! — see [`blur`]'s own module doc: tiny-skia 0.11 (this crate's whole
@@ -38,11 +42,13 @@
 //! crate rasterizes the shadow's own shape into a scratch alpha buffer,
 //! blurs *that* by hand, and composites the result back onto the canvas
 //! pixel by pixel — the one place in this crate that blends manually
-//! instead of going through a `tiny_skia::Paint` fill. A node whose
-//! `overflow` clips content (see [`clip_for_children`]) restricts its own
-//! descendants — never its own border/background — to its padding box;
-//! nested clips intersect. There is no border-radius yet — `florui_style`
-//! has no property for it.
+//! instead of going through a `tiny_skia::Paint` fill (`filter: blur()`
+//! reuses the same hand-rolled Gaussian, run over the group's own already-
+//! rasterized pixels instead of a shape rasterized just for it). A node
+//! whose `overflow` clips content (see [`clip_for_children`]) restricts
+//! its own descendants — never its own border/background — to its
+//! padding box; nested clips intersect. There is no border-radius yet —
+//! `florui_style` has no property for it.
 
 mod blur;
 
@@ -51,7 +57,9 @@ use std::path::Path;
 use std::rc::Rc;
 
 use florui_layout::{BoxLayout, absolute_position};
-use florui_style::{Arena, ComputedStyle, Display, NodeId, Rgba, TransformFunction};
+use florui_style::{
+    Arena, ComputedStyle, Display, FilterFunction, NodeId, Rgba, TransformFunction,
+};
 use florui_text::Font;
 use skrifa::instance::{LocationRef, NormalizedCoord, Size as GlyphSize};
 use skrifa::outline::{DrawSettings, OutlinePen};
@@ -240,7 +248,8 @@ fn paint_nodes(
             }
             _ => Transform::identity(),
         };
-        if opacity < 1.0 || !transform.is_identity() {
+        let has_filter = styles.get(&node).is_some_and(|s| !s.filter.is_empty());
+        if opacity < 1.0 || !transform.is_identity() || has_filter {
             paint_group(
                 buffer,
                 arena,
@@ -361,22 +370,26 @@ const NO_BORDER_SIDE: florui_style::BorderSide = florui_style::BorderSide {
 };
 
 /// Renders `node`'s own box and its whole subtree into a fresh,
-/// transparent buffer the same size as `buffer`, then composites that
-/// buffer onto `buffer` at `opacity` through `transform` — real CSS's own
-/// "group opacity" (every overlap *inside* the group still resolves at
-/// full strength against its own siblings, later paints over earlier
-/// exactly as usual, and only the group's own combined result is faded as
-/// one flat image — painting each descendant at the reduced opacity
-/// individually instead would show every overlap inside the group as a
-/// visibly different, doubled-up alpha) and real CSS's own `transform`
-/// semantics (the buffer already holds `node` at its normal, transform-free
-/// position, so compositing it with a real matrix instead of the identity
-/// one moves the *entire rendered group* — background, border, and every
-/// already-clipped descendant together — as a single rigid image, exactly
-/// what "transform establishes its own coordinate system" means). Called
-/// whenever either condition holds; a node with both applies them
-/// together in the one composite below, matching real CSS's own single
-/// stacking-context-establishing group for either property.
+/// transparent buffer the same size as `buffer`, applies `node`'s own
+/// [`ComputedStyle::filter`] chain to that buffer's pixels (see
+/// [`apply_filters`]), then composites the result onto `buffer` at
+/// `opacity` through `transform` — real CSS's own "group opacity" (every
+/// overlap *inside* the group still resolves at full strength against its
+/// own siblings, later paints over earlier exactly as usual, and only the
+/// group's own combined result is faded as one flat image — painting each
+/// descendant at the reduced opacity individually instead would show
+/// every overlap inside the group as a visibly different, doubled-up
+/// alpha), real CSS's own `transform` semantics (the buffer already holds
+/// `node` at its normal, transform-free position, so compositing it with a
+/// real matrix instead of the identity one moves the *entire rendered
+/// group* — background, border, and every already-clipped descendant
+/// together — as a single rigid image, exactly what "transform
+/// establishes its own coordinate system" means), and real CSS's own
+/// filter-then-composite order (a filter transforms what the element
+/// itself looks like *before* opacity fades it or transform repositions
+/// it, not after). Called whenever any of the three conditions holds; a
+/// node with more than one applies them together in this one function,
+/// matching real CSS's own single stacking-context-establishing group.
 ///
 /// A full canvas-sized buffer per group, uncached and unpooled — correct,
 /// but not yet the bounded/pooled temporary surfaces real compositing
@@ -438,6 +451,9 @@ fn paint_group(
         scale_factor,
         content_clip,
     );
+
+    let filter = styles.get(&node).map_or(&[][..], |s| &s.filter[..]);
+    apply_filters(&mut group, filter);
 
     let paint = PixmapPaint {
         opacity,
@@ -545,6 +561,162 @@ pub fn transformed_bounding_box(
         max_y = max_y.max(point.y);
     }
     (min_x, min_y, max_x - min_x, max_y - min_y)
+}
+
+/// Applies `functions`' own chain to `pixmap`'s premultiplied pixels in
+/// place, each function processing the *previous* one's own output in
+/// authored order — real CSS's own filter-chain semantics (the
+/// first-listed function reads the node's own unfiltered content).
+fn apply_filters(pixmap: &mut Pixmap, functions: &[FilterFunction]) {
+    let (width, height) = (pixmap.width(), pixmap.height());
+    for function in functions {
+        match *function {
+            FilterFunction::Blur(radius) => blur_pixmap_in_place(pixmap, width, height, radius),
+            FilterFunction::Brightness(factor) => {
+                for pixel in pixmap.pixels_mut() {
+                    *pixel = scale_premultiplied(*pixel, factor);
+                }
+            }
+            FilterFunction::Contrast(factor) => {
+                for pixel in pixmap.pixels_mut() {
+                    // Real CSS's own formula operates in normalized
+                    // [0, 1] space as `(color - 0.5) * amount + 0.5`;
+                    // `127.5` is that same midpoint scaled to this
+                    // buffer's own 0..255 range, not the nearby `128`.
+                    *pixel = map_unpremultiplied(*pixel, |c| (c - 127.5) * factor + 127.5);
+                }
+            }
+            FilterFunction::Saturate(factor) => {
+                for pixel in pixmap.pixels_mut() {
+                    *pixel = saturate_premultiplied(*pixel, factor);
+                }
+            }
+        }
+    }
+}
+
+/// `blur()`'s own Gaussian, run independently over each of `pixmap`'s own
+/// four premultiplied channels (including alpha) rather than un-
+/// premultiplying to straight color first: blurring straight color would
+/// let a fully transparent pixel's own arbitrary RGB bleed into a blurred
+/// edge — the dark/bright fringe this crate's own module doc on
+/// premultiplied handling warns against — while blurring every
+/// premultiplied channel identically keeps `rgb <= a` everywhere the
+/// source did, the same invariant [`blur::gaussian_blur_in_place`]'s own
+/// per-channel treatment preserves for any linear operation.
+///
+/// `radius_px` is real CSS's own `<length>` argument to `blur()`, already
+/// the Gaussian's own standard deviation per the Filter Effects spec — a
+/// *different* correspondence than `box-shadow`'s own `blur-radius`
+/// (`radius / 2`, see [`rasterize_and_blur`]'s own doc), since the two
+/// properties define the relationship differently, not a shared radius
+/// convention this crate could factor into one constant.
+fn blur_pixmap_in_place(pixmap: &mut Pixmap, width: u32, height: u32, radius_px: f32) {
+    if radius_px <= 0.0 {
+        return;
+    }
+    let pixel_count = (width as usize) * (height as usize);
+    let mut channels = [
+        vec![0u8; pixel_count],
+        vec![0u8; pixel_count],
+        vec![0u8; pixel_count],
+        vec![0u8; pixel_count],
+    ];
+    for (i, pixel) in pixmap.pixels().iter().enumerate() {
+        channels[0][i] = pixel.red();
+        channels[1][i] = pixel.green();
+        channels[2][i] = pixel.blue();
+        channels[3][i] = pixel.alpha();
+    }
+    for channel in &mut channels {
+        blur::gaussian_blur_in_place(channel, width, height, radius_px);
+    }
+    for (i, pixel) in pixmap.pixels_mut().iter_mut().enumerate() {
+        let alpha = channels[3][i];
+        *pixel = PremultipliedColorU8::from_rgba(
+            channels[0][i].min(alpha),
+            channels[1][i].min(alpha),
+            channels[2][i].min(alpha),
+            alpha,
+        )
+        .unwrap_or(PremultipliedColorU8::TRANSPARENT);
+    }
+}
+
+/// Scales `pixel`'s own color by `factor` (real CSS's own `brightness()`),
+/// clamping each channel to `pixel`'s own alpha rather than `255` —
+/// scaling a premultiplied channel by a non-negative factor and clamping
+/// to alpha is exactly equivalent to un-premultiplying, scaling and
+/// clamping to `255`, then re-premultiplying, without the intermediate
+/// division. `factor` is never negative — real CSS's own grammar already
+/// forbids it (see [`crate::cascade::FilterFunction::Brightness`]'s own
+/// doc via [`crate::cascade`]).
+fn scale_premultiplied(pixel: PremultipliedColorU8, factor: f32) -> PremultipliedColorU8 {
+    let alpha = pixel.alpha();
+    let scale = |channel: u8| ((channel as f32) * factor).round().clamp(0.0, alpha as f32) as u8;
+    PremultipliedColorU8::from_rgba(
+        scale(pixel.red()),
+        scale(pixel.green()),
+        scale(pixel.blue()),
+        alpha,
+    )
+    .unwrap_or(PremultipliedColorU8::TRANSPARENT)
+}
+
+/// Un-premultiplies `pixel`, applies `f` to each of its own R/G/B channels
+/// independently (`contrast()`'s own affine remap doesn't commute with
+/// premultiplication the way [`scale_premultiplied`]'s plain scale does,
+/// so this un-premultiplies first), then re-premultiplies — a fully
+/// transparent pixel passes through unchanged rather than dividing by a
+/// zero alpha.
+fn map_unpremultiplied(
+    pixel: PremultipliedColorU8,
+    mut f: impl FnMut(f32) -> f32,
+) -> PremultipliedColorU8 {
+    let alpha = pixel.alpha();
+    if alpha == 0 {
+        return pixel;
+    }
+    let unpremultiply = |channel: u8| (channel as f32) * 255.0 / (alpha as f32);
+    let repremultiply = |channel: f32| {
+        ((channel.clamp(0.0, 255.0) * (alpha as f32) / 255.0).round() as u8).min(alpha)
+    };
+    PremultipliedColorU8::from_rgba(
+        repremultiply(f(unpremultiply(pixel.red()))),
+        repremultiply(f(unpremultiply(pixel.green()))),
+        repremultiply(f(unpremultiply(pixel.blue()))),
+        alpha,
+    )
+    .unwrap_or(PremultipliedColorU8::TRANSPARENT)
+}
+
+/// `saturate()`'s own luminance-preserving mix: real CSS's own saturate
+/// matrix (CSS Filter Effects' own reference to SVG's `feColorMatrix
+/// type="saturate"`) is algebraically identical to mixing each channel
+/// toward its own Rec.-601-ish luma at `1 - factor` and keeping the rest
+/// at `factor` — `factor` `1.0` is a no-op, `0.0` is grayscale, and above
+/// `1.0` oversaturates.
+fn saturate_premultiplied(pixel: PremultipliedColorU8, factor: f32) -> PremultipliedColorU8 {
+    let alpha = pixel.alpha();
+    if alpha == 0 {
+        return pixel;
+    }
+    let unpremultiply = |channel: u8| (channel as f32) * 255.0 / (alpha as f32);
+    let r = unpremultiply(pixel.red());
+    let g = unpremultiply(pixel.green());
+    let b = unpremultiply(pixel.blue());
+    let luma = 0.213 * r + 0.715 * g + 0.072 * b;
+    let mix = |channel: f32| luma + (channel - luma) * factor;
+    let repremultiply = |channel: f32| {
+        ((channel.clamp(0.0, 255.0) * (alpha as f32) / 255.0).round() as u8).min(alpha)
+    };
+    PremultipliedColorU8::from_rgba(
+        repremultiply(mix(r)),
+        repremultiply(mix(g)),
+        repremultiply(mix(b)),
+        alpha,
+    )
+    .unwrap_or(PremultipliedColorU8::TRANSPARENT)
 }
 
 /// `nodes` (a set of siblings — document roots when `parent_display` is
@@ -3273,5 +3445,156 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn blur_spreads_a_solid_boxs_own_color_past_its_own_edge() {
+        let filtered = single_box_buffer_at(
+            ".box { background-color: #ff0000; filter: blur(6px); }",
+            30,
+            1.0,
+            10.0,
+            10.0,
+        );
+        let unfiltered =
+            single_box_buffer_at(".box { background-color: #ff0000; }", 30, 1.0, 10.0, 10.0);
+        assert_eq!(
+            pixel_rgb(&unfiltered, 8, 15),
+            [0, 0, 0],
+            "sanity check: 2px outside the unblurred box is pure background"
+        );
+        let blurred_pixel = pixel_rgb(&filtered, 8, 15);
+        assert_ne!(
+            blurred_pixel,
+            [0, 0, 0],
+            "a blurred box's own color must bleed past its own original edge"
+        );
+        assert_ne!(
+            blurred_pixel,
+            [0xff, 0, 0],
+            "but not at full strength right at the blur's own reach"
+        );
+    }
+
+    #[test]
+    fn brightness_of_zero_paints_the_box_fully_black_without_touching_its_own_alpha() {
+        let buffer = single_box_buffer(
+            ".box { background-color: #ff8040; filter: brightness(0); }",
+            20,
+            1.0,
+        );
+        assert_eq!(pixel_rgb(&buffer, 5, 5), [0, 0, 0]);
+    }
+
+    #[test]
+    fn brightness_above_one_brightens_and_clamps_at_full_strength() {
+        let buffer = single_box_buffer(
+            ".box { background-color: #804020; filter: brightness(4); }",
+            20,
+            1.0,
+        );
+        // 0x80*4 and 0x40*4 both saturate to 0xff; 0x20*4 = 0x80 exactly.
+        assert_eq!(pixel_rgb(&buffer, 5, 5), [0xff, 0xff, 0x80]);
+    }
+
+    #[test]
+    fn contrast_pushes_a_light_color_further_from_mid_gray() {
+        let buffer = single_box_buffer(
+            ".box { background-color: #c0c0c0; filter: contrast(2); }",
+            20,
+            1.0,
+        );
+        // (0xc0 - 127.5) * 2 + 127.5 = 256.5, clamped to 255.
+        assert_eq!(pixel_rgb(&buffer, 5, 5), [0xff, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn contrast_of_zero_flattens_every_color_to_mid_gray() {
+        let buffer = single_box_buffer(
+            ".box { background-color: #ff0000; filter: contrast(0); }",
+            20,
+            1.0,
+        );
+        assert_eq!(pixel_rgb(&buffer, 5, 5), [0x80, 0x80, 0x80]);
+    }
+
+    #[test]
+    fn saturate_of_zero_desaturates_to_the_colors_own_luma() {
+        let buffer = single_box_buffer(
+            ".box { background-color: #ff0000; filter: saturate(0); }",
+            20,
+            1.0,
+        );
+        // Luma of pure red at this crate's own saturate coefficients:
+        // 0.213 * 255 ~= 54.
+        let [r, g, b] = pixel_rgb(&buffer, 5, 5);
+        assert_eq!(r, g, "a fully desaturated pixel has equal channels");
+        assert_eq!(g, b, "a fully desaturated pixel has equal channels");
+        assert!(
+            (50..=58).contains(&r),
+            "expected red's own luma (~54), got {r}"
+        );
+    }
+
+    #[test]
+    fn filter_functions_apply_in_authored_order_not_commutatively() {
+        // brightness(2) then contrast(0) must land on mid-gray (contrast
+        // ignores whatever brightness already did); contrast(0) then
+        // brightness(2) must double that same mid-gray instead. If this
+        // crate applied the chain in the wrong order, both would produce
+        // the identical result.
+        let brighten_then_flatten = single_box_buffer(
+            ".box { background-color: #300000; filter: brightness(2) contrast(0); }",
+            20,
+            1.0,
+        );
+        let flatten_then_brighten = single_box_buffer(
+            ".box { background-color: #300000; filter: contrast(0) brightness(2); }",
+            20,
+            1.0,
+        );
+        assert_eq!(pixel_rgb(&brighten_then_flatten, 5, 5), [0x80, 0x80, 0x80]);
+        assert_eq!(pixel_rgb(&flatten_then_brighten, 5, 5), [0xff, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn an_unsupported_grayscale_function_is_dropped_from_the_filter_chain() {
+        let with_grayscale = single_box_buffer(
+            ".box { background-color: #ff0000; filter: grayscale(1); }",
+            20,
+            1.0,
+        );
+        let without_filter = single_box_buffer(".box { background-color: #ff0000; }", 20, 1.0);
+        assert_eq!(
+            pixel_rgb(&with_grayscale, 5, 5),
+            pixel_rgb(&without_filter, 5, 5)
+        );
+    }
+
+    #[test]
+    fn filter_opacity_and_transform_all_apply_together() {
+        // filter must act on the box's own unfaded, untransformed
+        // content: contrast(0) flattens it to mid-gray, *then* opacity
+        // fades that gray, *then* translate moves the whole faded result.
+        let buffer = single_box_buffer(
+            ".box {
+                background-color: #ff0000;
+                filter: contrast(0);
+                opacity: 0.5;
+                transform: translate(15px, 0);
+            }",
+            30,
+            1.0,
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 5, 5),
+            [0, 0, 0],
+            "the box's own untransformed spot must be untouched"
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 20, 5),
+            [0x40, 0x40, 0x40],
+            "mid-gray (0x80) faded to half opacity against black"
+        );
     }
 }

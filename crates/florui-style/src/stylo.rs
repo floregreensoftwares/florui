@@ -50,8 +50,8 @@ use stylo_dom::ElementState;
 
 use crate::cascade::{
     BorderSide as FlorBorderSide, BoxShadow as FlorBoxShadow, ComputedStyle, ContentAlignment,
-    Display as FlorDisplay, Edges, FlexDirection, FlexWrap, FontFamily as FlorFontFamily,
-    ItemAlignment, LengthPercentage as FlorLengthPercentage,
+    Display as FlorDisplay, Edges, FilterFunction as FlorFilterFunction, FlexDirection, FlexWrap,
+    FontFamily as FlorFontFamily, ItemAlignment, LengthPercentage as FlorLengthPercentage,
     TransformFunction as FlorTransformFunction,
 };
 use crate::color::Rgba;
@@ -949,7 +949,46 @@ fn to_computed_style(values: &ComputedValues) -> ComputedStyle {
         box_shadow: to_box_shadows(&effects.box_shadow.0, color),
         transform: to_transform(&box_style.transform),
         transform_origin: to_transform_origin(&box_style.transform_origin),
+        filter: to_filter(&effects.filter),
     }
+}
+
+/// `filter`'s own function list — see [`crate::cascade::FilterFunction`]'s
+/// own doc for exactly which functions survive and why the rest are
+/// dropped.
+#[allow(clippy::type_complexity)]
+fn to_filter(
+    value: &style::computed_values::filter::OwnedList<
+        style::values::generics::effects::GenericFilter<
+            style::values::computed::Angle,
+            style::values::generics::NonNegative<f32>,
+            style::values::generics::ZeroToOne<f32>,
+            style::values::generics::NonNegative<style::values::computed::Length>,
+            style::values::generics::effects::GenericSimpleShadow<
+                style::values::generics::color::GenericColor<style::values::computed::Percentage>,
+                style::values::computed::Length,
+                style::values::generics::NonNegative<style::values::computed::Length>,
+            >,
+            style::values::Impossible,
+        >,
+    >,
+) -> Vec<FlorFilterFunction> {
+    use style::values::generics::effects::GenericFilter;
+    value
+        .0
+        .iter()
+        .filter_map(|f| match f {
+            GenericFilter::Blur(length) => Some(FlorFilterFunction::Blur(length.0.px())),
+            GenericFilter::Brightness(factor) => Some(FlorFilterFunction::Brightness(factor.0)),
+            GenericFilter::Contrast(factor) => Some(FlorFilterFunction::Contrast(factor.0)),
+            GenericFilter::Saturate(factor) => Some(FlorFilterFunction::Saturate(factor.0)),
+            // Documented unsupported subset: grayscale, hue-rotate,
+            // invert, the filter list's own opacity(), sepia,
+            // drop-shadow, and url() — see `FlorFilterFunction`'s own
+            // doc.
+            _ => None,
+        })
+        .collect()
 }
 
 /// `transform`'s own function list — see

@@ -246,6 +246,34 @@ pub enum TransformFunction {
     },
 }
 
+/// One `filter` function, already reduced to this crate's documented
+/// initial subset: `blur()`, `brightness()`, `contrast()`, and
+/// `saturate()`. `grayscale()`, `hue-rotate()`, `invert()`, the filter
+/// list's own `opacity()` function (distinct from the `opacity`
+/// property), `sepia()`, `drop-shadow()`, and `url()` all parse and
+/// cascade correctly through Stylo but drop out of this list entirely —
+/// the same treatment [`TransformFunction`] gives its own unsupported
+/// functions. See `florui-paint`'s own doc for how the surviving
+/// functions apply to a node's own rendered content.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FilterFunction {
+    /// `blur(<length>)` — a Gaussian blur radius in pixels; real CSS's
+    /// own grammar already forbids a negative one.
+    Blur(f32),
+    /// `brightness(<factor>)` — `1.0` (`100%`) is a no-op, `0.0` is
+    /// black, and above `1.0` brightens; real CSS's own grammar already
+    /// forbids a negative factor.
+    Brightness(f32),
+    /// `contrast(<factor>)` — `1.0` (`100%`) is a no-op, `0.0` is flat
+    /// mid-gray; real CSS's own grammar already forbids a negative
+    /// factor.
+    Contrast(f32),
+    /// `saturate(<factor>)` — `1.0` (`100%`) is a no-op, `0.0` is
+    /// grayscale; real CSS's own grammar already forbids a negative
+    /// factor.
+    Saturate(f32),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComputedStyle {
     pub background_color: Rgba,
@@ -367,6 +395,14 @@ pub struct ComputedStyle {
     /// dropped, matching [`TransformFunction`]'s 2D-only scope. `(50%,
     /// 50%)` (the box's own center) is real CSS's initial value.
     pub transform_origin: (LengthPercentage, LengthPercentage),
+    /// `filter`'s own function list, in authored order — see
+    /// [`FilterFunction`]'s own doc for the supported subset. An empty
+    /// list is real CSS's own `none`, the initial value. Real CSS applies
+    /// each listed function to the *previous* one's own output in order
+    /// (the first-listed function reads the node's own unfiltered
+    /// content); `florui-paint`'s own doc covers how that chain applies
+    /// to a node's rendered content.
+    pub filter: Vec<FilterFunction>,
 }
 
 /// Resolves every node in `arena` against `rules` and `state` — real
@@ -1398,5 +1434,72 @@ mod tests {
         );
         let span = arena.find(|a, id| a.tag(id) == "span").unwrap();
         assert!(computed[&span].transform.is_empty());
+    }
+
+    #[test]
+    fn filter_defaults_to_none() {
+        let tree: Element = view! { <div /> };
+        let (arena, computed) = styles(&tree, "", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert!(computed[&node].filter.is_empty());
+    }
+
+    #[test]
+    fn blur_resolves_to_its_own_pixel_radius() {
+        let tree: Element = view! { <div class="soft" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".soft { filter: blur(4px); }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].filter, vec![FilterFunction::Blur(4.0)]);
+    }
+
+    #[test]
+    fn brightness_contrast_and_saturate_resolve_to_their_own_factors() {
+        let tree: Element = view! { <div class="adjusted" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".adjusted { filter: brightness(1.5) contrast(0.8) saturate(2); }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(
+            computed[&node].filter,
+            vec![
+                FilterFunction::Brightness(1.5),
+                FilterFunction::Contrast(0.8),
+                FilterFunction::Saturate(2.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_grayscale_function_is_dropped_as_an_unsupported_gap() {
+        let tree: Element = view! { <div class="gray" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".gray { filter: grayscale(1); }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert!(computed[&node].filter.is_empty());
+    }
+
+    #[test]
+    fn filter_does_not_inherit() {
+        let tree: Element = view! {
+            <div class="soft">
+                <span>{"x"}</span>
+            </div>
+        };
+        let (arena, computed) = styles(
+            &tree,
+            ".soft { filter: blur(4px); }",
+            &InteractionState::new(),
+        );
+        let span = arena.find(|a, id| a.tag(id) == "span").unwrap();
+        assert!(computed[&span].filter.is_empty());
     }
 }
