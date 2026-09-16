@@ -1,0 +1,50 @@
+.page {
+    display: flex;
+    flex-direction: column;
+    width: 420px;
+    padding-top: 24px;
+    padding-right: 24px;
+    padding-bottom: 24px;
+    padding-left: 24px;
+    background-color: #1e1e22;
+    color: #ffffff;
+}
+
+.instructions {
+    font-size: 14px;
+    margin-bottom: 24px;
+}
+
+.row {
+    display: flex;
+    flex-direction: column;
+    row-gap: 12px;
+}
+
+.box {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 64px;
+    background-color: #8a8a92;
+    font-size: 13px;
+    color: #1e1e22;
+}
+
+@media (min-height: 500px) {
+    .min-height-box {
+        background-color: #2f7d6c;
+    }
+}
+
+@media (max-height: 900px) {
+    .max-height-box {
+        background-color: #2f7d6c;
+    }
+}
+
+@media (min-height: 500px) and (max-height: 900px) {
+    .both-box {
+        background-color: #2f7d6c;
+    }
+}
