@@ -30,7 +30,9 @@ use std::fmt;
 use florui::Element;
 use florui_layout::{BoxLayout, LayoutError, absolute_position, compute_layout};
 use florui_paint::paint_to_buffer;
-use florui_style::{Arena, InteractionState, NodeId, Rgba, compute, parse_stylesheet};
+use florui_style::{
+    Arena, ComputedStyle, InteractionState, NodeId, Rgba, compute, parse_stylesheet,
+};
 use image::RgbaImage;
 use taffy::prelude::{AvailableSpace, Size};
 
@@ -165,9 +167,11 @@ pub fn render_fixture(
     // children get an exact box from a real inline formatting context,
     // not a plain `Inline` one. Falling back to the wrapper's own box is
     // honest about that gap rather than panicking a fixture that hits it.
-    let element_box_css_px = box_geometry_of(&arena, &layouts, node).unwrap_or_else(|| {
-        box_geometry_of(&arena, &layouts, wrapper).expect("the wrapper always has its own box")
-    });
+    let element_box_css_px =
+        box_geometry_of(&arena, &styles, &layouts, node).unwrap_or_else(|| {
+            box_geometry_of(&arena, &styles, &layouts, wrapper)
+                .expect("the wrapper always has its own box")
+        });
 
     let canvas = Rgba::opaque(0, 0, 0);
     let canvas = florui_style::parse_hex_color(canvas_color).unwrap_or(canvas);
@@ -217,18 +221,31 @@ fn scale_layouts(layouts: &HashMap<NodeId, BoxLayout>, factor: f32) -> HashMap<N
         .collect()
 }
 
+/// A node's own box, in the fixture's logical CSS pixels — after applying
+/// its own `transform`, so a transformed element compares against
+/// Chromium's `getBoundingClientRect()` (which already reports the
+/// *transformed* border box) on the same terms. `scale_factor` is always
+/// `1.0` here regardless of the fixture's own `device_pixel_ratio`: see
+/// this module's own doc for why `element_box_css_px` stays
+/// DPR-independent.
 fn box_geometry_of(
     arena: &Arena,
+    styles: &HashMap<NodeId, ComputedStyle>,
     layouts: &HashMap<NodeId, BoxLayout>,
     node: NodeId,
 ) -> Option<BoxGeometryPx> {
     let layout = *layouts.get(&node)?;
     let (x, y) = absolute_position(arena, layouts, node);
+    let style = styles.get(&node);
+    let (x, y, width, height) = match style {
+        Some(style) => florui_paint::transformed_bounding_box(style, &layout, x, y, 1.0),
+        None => (x, y, layout.width, layout.height),
+    };
     Some(BoxGeometryPx {
         x: f64::from(x),
         y: f64::from(y),
-        width: f64::from(layout.width),
-        height: f64::from(layout.height),
+        width: f64::from(width),
+        height: f64::from(height),
     })
 }
 
@@ -362,5 +379,30 @@ mod tests {
             "getBoundingClientRect-equivalent geometry stays in CSS pixels regardless of DPR, \
              matching Chromium's own real behavior"
         );
+    }
+
+    #[test]
+    fn a_translated_elements_geometry_reflects_the_transform_like_a_real_getboundingclientrect() {
+        // Real CSS: `transform` never moves layout itself, but
+        // `getBoundingClientRect()` reports the *transformed* border box
+        // regardless — so this crate's own `element_box_css_px` must
+        // apply the same transform, or every transformed fixture would
+        // show a geometry mismatch against Chromium that isn't a real
+        // rendering bug.
+        let mut moved = spec("div");
+        moved.class = "moved".to_string();
+        let render = render_fixture(
+            &moved,
+            ".moved { width: 20px; height: 20px; transform: translate(30px, 40px); }",
+            "#000000",
+            200,
+            200,
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(render.element_box_css_px.x, 30.0);
+        assert_eq!(render.element_box_css_px.y, 40.0);
+        assert_eq!(render.element_box_css_px.width, 20.0);
+        assert_eq!(render.element_box_css_px.height, 20.0);
     }
 }
