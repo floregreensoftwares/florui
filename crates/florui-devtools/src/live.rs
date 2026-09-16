@@ -190,6 +190,9 @@ fn push_node(
         tag: arena.tag(id).to_string(),
         display: display_name(style.display).to_string(),
         background: style.background_color,
+        z_index: style.z_index,
+        opacity: style.opacity,
+        overflow_clips: style.overflow_clips,
         content,
         padding: style.padding,
         border,
@@ -594,5 +597,46 @@ impl ApplicationHandler<UserEvent> for LiveHost {
         match event {
             UserEvent::Dirty => self.update_and_request_redraw(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use florui::prelude::*;
+    use florui_style::{InteractionState, compute, parse_stylesheet};
+
+    use super::*;
+
+    #[test]
+    fn inspector_nodes_carry_z_index_opacity_and_overflow_clips_from_real_css() {
+        let tree: Element = view! { <div class="stacked" /> };
+        let css = ".stacked { z-index: 3; opacity: 0.4; overflow: hidden; }";
+        let arena = Arena::build(&tree);
+        let rules = parse_stylesheet(css).unwrap();
+        let styles = compute(&arena, &rules, &InteractionState::new());
+        let layouts = HashMap::new();
+
+        let model = build_inspector_model(&arena, &styles, &layouts, None, false);
+
+        let node = &model.nodes[0];
+        assert_eq!(node.z_index, Some(3));
+        assert_eq!(node.opacity, 0.4);
+        assert!(node.overflow_clips);
+    }
+
+    #[test]
+    fn inspector_nodes_default_to_css_initial_values_with_zero_author_css() {
+        let tree: Element = view! { <div /> };
+        let arena = Arena::build(&tree);
+        let rules = parse_stylesheet("").unwrap();
+        let styles = compute(&arena, &rules, &InteractionState::new());
+        let layouts = HashMap::new();
+
+        let model = build_inspector_model(&arena, &styles, &layouts, None, false);
+
+        let node = &model.nodes[0];
+        assert_eq!(node.z_index, None);
+        assert_eq!(node.opacity, 1.0);
+        assert!(!node.overflow_clips);
     }
 }
