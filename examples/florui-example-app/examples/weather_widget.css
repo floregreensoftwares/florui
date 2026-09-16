@@ -1,0 +1,79 @@
+.widget {
+    display: flex;
+    flex-direction: column;
+    padding-top: 16px;
+    padding-right: 16px;
+    padding-bottom: 16px;
+    padding-left: 16px;
+}
+
+.header {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    background-color: rgba(18, 18, 24, 0.55);
+    padding-top: 8px;
+    padding-right: 12px;
+    padding-bottom: 8px;
+    padding-left: 12px;
+    margin-bottom: 12px;
+    box-shadow: 0px 4px 12px 0px rgba(0, 0, 0, 0.35);
+}
+
+.title {
+    font-size: 14px;
+    color: #ffffff;
+}
+
+.drag-region {
+    flex-grow: 1;
+    height: 24px;
+}
+
+.pin-button {
+    padding-top: 6px;
+    padding-right: 10px;
+    padding-bottom: 6px;
+    padding-left: 10px;
+    background-color: rgba(255, 255, 255, 0.14);
+    color: #ffffff;
+    font-size: 12px;
+}
+
+.pin-button:hover {
+    background-color: rgba(255, 255, 255, 0.24);
+}
+
+.cards {
+    display: flex;
+    flex-direction: row;
+}
+
+.card {
+    display: flex;
+    flex-direction: column;
+    background-color: rgba(18, 18, 24, 0.55);
+    padding-top: 14px;
+    padding-right: 16px;
+    padding-bottom: 14px;
+    padding-left: 16px;
+    margin-right: 12px;
+    box-shadow: 0px 4px 14px 0px rgba(0, 0, 0, 0.35);
+}
+
+.card-label {
+    font-size: 12px;
+    color: #c8c8cc;
+    margin-bottom: 6px;
+}
+
+.card-value {
+    font-size: 26px;
+    color: #ffffff;
+    margin-bottom: 4px;
+}
+
+.card-condition {
+    font-size: 12px;
+    color: #9fb8ff;
+}

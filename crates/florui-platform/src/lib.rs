@@ -37,7 +37,19 @@ pub mod dpi;
 pub mod gpu;
 
 #[cfg(feature = "desktop")]
+mod os;
+
+#[cfg(feature = "desktop")]
+pub mod overlay;
+
+#[cfg(feature = "desktop")]
+pub mod tray;
+
+#[cfg(feature = "desktop")]
 mod window_controls;
 
 #[cfg(feature = "desktop")]
-pub use window_controls::{WINDOW_DRAG_REGION_ID, WindowControls, use_window_controls};
+pub use window_controls::{
+    InputMode, WINDOW_DRAG_REGION_ID, WINDOW_INPUT_REGION_CLASS, WindowControls,
+    use_window_controls,
+};
