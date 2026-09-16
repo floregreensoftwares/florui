@@ -1718,20 +1718,24 @@ mod tests {
     }
 
     #[test]
-    fn a_height_media_query_never_matches_regardless_of_the_viewports_own_height() {
-        // Documented gap, not a bug: Stylo's own "servo" engine mode (the
-        // one this crate uses) ships a fixed six-feature media table --
-        // width, scan, resolution, device-pixel-ratio, and
-        // prefers-color-scheme -- with no height feature at all, unlike
-        // its "gecko" mode. `min-height`/`max-height`/bare `height`
-        // parse but can never match, no matter the real viewport, so
-        // this crate's own media-query support is width-based only.
+    fn a_min_height_media_query_matches_a_tall_enough_viewport() {
         let tree: Element = view! { <div class="card" /> };
         let arena = Arena::build(&tree);
         let rules =
-            parse_stylesheet("@media (min-height: 100px) { .card { background-color: #ff0000; } }")
+            parse_stylesheet("@media (min-height: 500px) { .card { background-color: #ff0000; } }")
                 .unwrap();
         let node = arena.roots()[0];
+
+        let short = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport {
+                width: 900.0,
+                height: 400.0,
+            },
+        );
+        assert_eq!(short[&node].background_color, Rgba::TRANSPARENT);
 
         let tall = compute(
             &arena,
@@ -1739,9 +1743,69 @@ mod tests {
             &InteractionState::new(),
             Viewport {
                 width: 900.0,
-                height: 5000.0,
+                height: 600.0,
+            },
+        );
+        assert_eq!(tall[&node].background_color, Rgba::opaque(0xff, 0, 0));
+    }
+
+    #[test]
+    fn a_max_height_media_query_stops_applying_once_the_viewport_is_too_tall() {
+        let tree: Element = view! { <div class="card" /> };
+        let arena = Arena::build(&tree);
+        let rules =
+            parse_stylesheet("@media (max-height: 500px) { .card { background-color: #ff0000; } }")
+                .unwrap();
+        let node = arena.roots()[0];
+
+        let short = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport {
+                width: 900.0,
+                height: 400.0,
+            },
+        );
+        assert_eq!(short[&node].background_color, Rgba::opaque(0xff, 0, 0));
+
+        let tall = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport {
+                width: 900.0,
+                height: 600.0,
             },
         );
         assert_eq!(tall[&node].background_color, Rgba::TRANSPARENT);
+    }
+
+    #[test]
+    fn a_height_sensitive_stylesheet_is_reused_correctly_across_computes_at_different_heights() {
+        let tree: Element = view! { <div class="card" /> };
+        let arena = Arena::build(&tree);
+        let rules =
+            parse_stylesheet("@media (min-height: 500px) { .card { background-color: #ff0000; } }")
+                .unwrap();
+        let node = arena.roots()[0];
+
+        for height in [400.0, 600.0, 400.0, 600.0] {
+            let computed = compute(
+                &arena,
+                &rules,
+                &InteractionState::new(),
+                Viewport {
+                    width: 900.0,
+                    height,
+                },
+            );
+            let expected = if height >= 500.0 {
+                Rgba::opaque(0xff, 0, 0)
+            } else {
+                Rgba::TRANSPARENT
+            };
+            assert_eq!(computed[&node].background_color, expected);
+        }
     }
 }

@@ -1401,6 +1401,7 @@ dependencies = [
  "app_units",
  "atomic_refcell",
  "criterion",
+ "cssparser",
  "euclid",
  "florui",
  "selectors",

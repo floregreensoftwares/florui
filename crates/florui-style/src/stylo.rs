@@ -797,9 +797,15 @@ fn compute_in_layout_state(
     // application rule below overrides it regardless of specificity or
     // this registration order, the same as a real browser's UA stylesheet.
     let default_rule = crate::default_stylesheet::rule();
-    stylist.append_stylesheet(DocumentStyleSheet(default_rule.stylesheet()), &lock.read());
+    stylist.append_stylesheet(
+        DocumentStyleSheet(default_rule.stylesheet(viewport.height)),
+        &lock.read(),
+    );
     for rule in rules {
-        stylist.append_stylesheet(DocumentStyleSheet(rule.stylesheet()), &lock.read());
+        stylist.append_stylesheet(
+            DocumentStyleSheet(rule.stylesheet(viewport.height)),
+            &lock.read(),
+        );
     }
 
     let guard = lock.read();
