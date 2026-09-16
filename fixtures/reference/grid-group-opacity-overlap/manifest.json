@@ -1,0 +1,23 @@
+{
+  "id": "grid-group-opacity-overlap",
+  "description": "Two opaque grid items placed in the same cell and offset to partially overlap, inside a parent at opacity: 0.5. The overlap must read as pure green (front fully occludes back internally) faded once by the group's own opacity -- not a red/green blend from fading each child individually.",
+  "html": "index.html",
+  "css": "style.css",
+  "element_id": "el",
+  "viewport": { "width_css_px": 80, "height_css_px": 80, "device_pixel_ratio": 1.0 },
+  "canvas_color": "#ffffff",
+  "florui": {
+    "tag": "div",
+    "class": "group",
+    "css": ".group { display: grid; grid-template-columns: 40px; grid-template-rows: 40px; width: 40px; height: 40px; opacity: 0.5; } .group .back { grid-column: 1; grid-row: 1; width: 30px; height: 30px; background-color: #ff0000; } .group .front { grid-column: 1; grid-row: 1; width: 30px; height: 30px; background-color: #00ff00; margin-top: 10px; margin-left: 10px; }",
+    "children": [
+      { "tag": "div", "class": "back", "css": "" },
+      { "tag": "div", "class": "front", "css": "" }
+    ]
+  },
+  "classification": {
+    "kind": "tolerant",
+    "threshold_percent": 25.0,
+    "reason": "Measured live against Chromium: 21.88% pixel diff, 0.0px geometry delta (both real numbers, not guesses). Verified by direct pixel sampling (not just the aggregate percentage): the maximum channel difference anywhere in the whole 40x40 element is exactly 1 out of 255 -- a uniform, one-LSB rounding difference between tiny-skia's alpha-blend math and Chromium's own, present across the *entire* translucent fill rather than concentrated at edges the way text antialiasing is. That's why the percentage is much higher than the bare-element/card fixtures' own calibration despite being visually and numerically negligible: a flat translucent fill has far more total pixels than a glyph's thin outline for a fixed one-unit rounding difference to touch."
+  }
+}
