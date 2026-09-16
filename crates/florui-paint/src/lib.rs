@@ -30,14 +30,17 @@
 //! crate rasterizes the shadow's own shape into a scratch alpha buffer,
 //! blurs *that* by hand, and composites the result back onto the canvas
 //! pixel by pixel — the one place in this crate that blends manually
-//! instead of going through a `tiny_skia::Paint` fill. There is no
-//! border-radius, transform, or clipping yet — `florui_style` has no
-//! properties for either.
+//! instead of going through a `tiny_skia::Paint` fill. A node whose
+//! `overflow` clips content (see [`clip_for_children`]) restricts its own
+//! descendants — never its own border/background — to its padding box;
+//! nested clips intersect. There is no border-radius or transform yet —
+//! `florui_style` has no properties for either.
 
 mod blur;
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::rc::Rc;
 
 use florui_layout::{BoxLayout, absolute_position};
 use florui_style::{Arena, ComputedStyle, Display, NodeId, Rgba};
@@ -46,7 +49,7 @@ use skrifa::instance::{LocationRef, NormalizedCoord, Size as GlyphSize};
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{FontRef, GlyphId, MetadataProvider};
 use tiny_skia::{
-    FillRule, Paint, PathBuilder, Pixmap, PixmapPaint, PremultipliedColorU8, Rect, Transform,
+    FillRule, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, PremultipliedColorU8, Rect, Transform,
 };
 
 pub type Canvas = Pixmap;
@@ -160,6 +163,7 @@ pub fn paint_to_buffer(
         None,
         arena.roots(),
         scale_factor,
+        None,
     );
     buffer
 }
@@ -183,6 +187,17 @@ pub fn paint_to_buffer(
 /// unguarded for now, a smaller and far less likely bound than the
 /// plain-tree-depth case that motivated this function's own iterative
 /// design in the first place.
+///
+/// `clip`, if given, restricts every fill in this call (and everything it
+/// recurses into) to the pixels it marks visible — inherited from an
+/// ancestor whose own `overflow` clips its content; see
+/// [`clip_for_children`] for how a node's own `overflow` narrows it
+/// further for its own children. Shared via [`Rc`] rather than cloned:
+/// most of a tree has no `overflow: hidden` ancestor at all (`clip` stays
+/// `None` all the way down, the same zero-cost path as before this
+/// existed), and even under one, only a node that *itself* clips ever
+/// allocates a new mask — every sibling and descendant that doesn't
+/// clip shares the same one.
 #[allow(clippy::too_many_arguments)]
 fn paint_nodes(
     buffer: &mut Canvas,
@@ -193,12 +208,14 @@ fn paint_nodes(
     parent_display: Option<Display>,
     nodes: &[NodeId],
     scale_factor: f32,
+    clip: Option<Rc<Mask>>,
 ) {
-    let mut stack: Vec<NodeId> = paint_order(styles, parent_display, nodes)
+    let mut stack: Vec<(NodeId, Option<Rc<Mask>>)> = paint_order(styles, parent_display, nodes)
         .into_iter()
         .rev()
+        .map(|id| (id, clip.clone()))
         .collect();
-    while let Some(node) = stack.pop() {
+    while let Some((node, node_clip)) = stack.pop() {
         let opacity = styles.get(&node).map_or(1.0, |s| s.opacity);
         if opacity <= 0.0 {
             // Real CSS: a fully transparent subtree still occupies its
@@ -208,18 +225,122 @@ fn paint_nodes(
             continue;
         }
         if opacity < 1.0 {
-            paint_group_with_opacity(buffer, arena, styles, layouts, font, node, scale_factor);
+            paint_group_with_opacity(
+                buffer,
+                arena,
+                styles,
+                layouts,
+                font,
+                node,
+                scale_factor,
+                node_clip,
+            );
             continue;
         }
-        paint_node(buffer, arena, styles, layouts, font, node, scale_factor);
+        paint_node(
+            buffer,
+            arena,
+            styles,
+            layouts,
+            font,
+            node,
+            scale_factor,
+            node_clip.as_deref(),
+        );
+        let child_clip = clip_for_children(
+            arena,
+            styles,
+            layouts,
+            node,
+            &node_clip,
+            buffer.width(),
+            buffer.height(),
+        );
         let child_display = styles.get(&node).map(|s| s.display);
         stack.extend(
             paint_order(styles, child_display, arena.children(node))
                 .into_iter()
-                .rev(),
+                .rev()
+                .map(|id| (id, child_clip.clone())),
         );
     }
 }
+
+/// The clip a node's own children paint under: `incoming` unchanged
+/// unless `node` itself has [`ComputedStyle::overflow_clips`] set, in
+/// which case its own padding box is intersected into it (or becomes the
+/// whole clip, if there was no `incoming` one yet). Doesn't affect `node`
+/// itself — real CSS's own `overflow` clips a box's *content*, not the
+/// box's own border/background, which is why this only ever changes what
+/// gets passed down, never what [`paint_node`] used for `node` itself.
+///
+/// A node's own text is a documented exception: it's painted by
+/// [`paint_node`] using the *incoming* clip, not this function's result,
+/// so a leaf whose own unbreakable text overflows its own
+/// `overflow: hidden` box isn't self-clipped yet — only a *descendant*
+/// extending past this box is. Narrower than real CSS, but the common
+/// and far more visible case (clipping other elements, e.g. an image
+/// container) works correctly today.
+fn clip_for_children(
+    arena: &Arena,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    layouts: &HashMap<NodeId, BoxLayout>,
+    node: NodeId,
+    incoming: &Option<Rc<Mask>>,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> Option<Rc<Mask>> {
+    let clips = styles.get(&node).is_some_and(|s| s.overflow_clips);
+    if !clips {
+        return incoming.clone();
+    }
+    let Some(&layout) = layouts.get(&node) else {
+        return incoming.clone();
+    };
+    let (x, y) = absolute_position(arena, layouts, node);
+    let border = styles.get(&node).map_or(NO_BORDER, |s| s.border);
+    let padding_box = Rect::from_xywh(
+        x + border.left.width,
+        y + border.top.width,
+        (layout.width - border.left.width - border.right.width).max(0.0),
+        (layout.height - border.top.width - border.bottom.width).max(0.0),
+    );
+    let Some(padding_box) = padding_box else {
+        return incoming.clone();
+    };
+    let mut path_builder = PathBuilder::new();
+    path_builder.push_rect(padding_box);
+    let Some(path) = path_builder.finish() else {
+        return incoming.clone();
+    };
+
+    let mask = match incoming {
+        Some(parent_mask) => {
+            let mut mask = (**parent_mask).clone();
+            mask.intersect_path(&path, FillRule::Winding, true, Transform::identity());
+            mask
+        }
+        None => {
+            let Some(mut mask) = Mask::new(canvas_width, canvas_height) else {
+                return incoming.clone();
+            };
+            mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
+            mask
+        }
+    };
+    Some(Rc::new(mask))
+}
+
+const NO_BORDER: florui_style::Edges<florui_style::BorderSide> = florui_style::Edges {
+    top: NO_BORDER_SIDE,
+    right: NO_BORDER_SIDE,
+    bottom: NO_BORDER_SIDE,
+    left: NO_BORDER_SIDE,
+};
+const NO_BORDER_SIDE: florui_style::BorderSide = florui_style::BorderSide {
+    width: 0.0,
+    color: Rgba::TRANSPARENT,
+};
 
 /// Renders `node`'s own box and its whole subtree into a fresh,
 /// transparent buffer the same size as `buffer`, then composites that
@@ -238,6 +359,14 @@ fn paint_nodes(
 /// correct, but not yet the bounded/pooled temporary surfaces real
 /// compositing work eventually needs for many overlapping translucent
 /// panels at once.
+///
+/// `clip` is an ancestor's clip, exactly as [`paint_node`] takes it —
+/// applied both to what's painted *inside* the group (so a descendant
+/// still respects an ancestor's `overflow: hidden` even though it's
+/// rendered into a separate buffer first) and to the final composite
+/// (redundant with the first once the inner paint already respected it,
+/// but cheap and keeps this function correct even if that ever changes).
+#[allow(clippy::too_many_arguments)]
 fn paint_group_with_opacity(
     buffer: &mut Canvas,
     arena: &Arena,
@@ -246,11 +375,30 @@ fn paint_group_with_opacity(
     font: &mut Font,
     node: NodeId,
     scale_factor: f32,
+    clip: Option<Rc<Mask>>,
 ) {
     let opacity = styles.get(&node).map_or(1.0, |s| s.opacity);
     let mut group = Pixmap::new(buffer.width(), buffer.height())
         .expect("paint_to_buffer requires a nonzero-sized canvas");
-    paint_node(&mut group, arena, styles, layouts, font, node, scale_factor);
+    paint_node(
+        &mut group,
+        arena,
+        styles,
+        layouts,
+        font,
+        node,
+        scale_factor,
+        clip.as_deref(),
+    );
+    let content_clip = clip_for_children(
+        arena,
+        styles,
+        layouts,
+        node,
+        &clip,
+        buffer.width(),
+        buffer.height(),
+    );
     let child_display = styles.get(&node).map(|s| s.display);
     paint_nodes(
         &mut group,
@@ -261,13 +409,21 @@ fn paint_group_with_opacity(
         child_display,
         arena.children(node),
         scale_factor,
+        content_clip,
     );
 
     let paint = PixmapPaint {
         opacity,
         ..Default::default()
     };
-    buffer.draw_pixmap(0, 0, group.as_ref(), &paint, Transform::identity(), None);
+    buffer.draw_pixmap(
+        0,
+        0,
+        group.as_ref(),
+        &paint,
+        Transform::identity(),
+        clip.as_deref(),
+    );
 }
 
 /// `nodes` (a set of siblings — document roots when `parent_display` is
@@ -308,6 +464,11 @@ pub fn paint_order(
 /// Paints `node`'s own background and text — document-order painting
 /// (an overlapping later node always wins) comes from the caller's own
 /// pre-order walk over the whole tree, not from this function recursing.
+///
+/// `clip`, if given, is an *ancestor's* clip (see [`clip_for_children`]):
+/// it restricts everything painted here, but `node`'s own `overflow`
+/// never does — real CSS never clips a box's own border/background
+/// against its own content-clip, only a descendant's.
 #[allow(clippy::too_many_arguments)]
 fn paint_node(
     buffer: &mut Canvas,
@@ -317,22 +478,13 @@ fn paint_node(
     font: &mut Font,
     node: NodeId,
     scale_factor: f32,
+    clip: Option<&Mask>,
 ) {
     if let Some(&layout) = layouts.get(&node) {
         let style = styles.get(&node);
         let (x, y) = absolute_position(arena, layouts, node);
 
-        let no_border_side = florui_style::BorderSide {
-            width: 0.0,
-            color: Rgba::TRANSPARENT,
-        };
-        let no_border = florui_style::Edges {
-            top: no_border_side,
-            right: no_border_side,
-            bottom: no_border_side,
-            left: no_border_side,
-        };
-        let border = style.map_or(no_border, |s| s.border);
+        let border = style.map_or(NO_BORDER, |s| s.border);
         let box_shadow: &[florui_style::BoxShadow] = style.map_or(&[][..], |s| &s.box_shadow[..]);
 
         // Real CSS's own painting order for a normal-flow box with no
@@ -354,7 +506,7 @@ fn paint_node(
 
         let background = style.map_or(Rgba::TRANSPARENT, |s| s.background_color);
         if background.a != 0 {
-            fill_rect(buffer, x, y, layout.width, layout.height, background);
+            fill_rect(buffer, x, y, layout.width, layout.height, background, clip);
         }
 
         paint_box_shadows(
@@ -368,7 +520,7 @@ fn paint_node(
             true,
         );
 
-        paint_border(buffer, x, y, layout.width, layout.height, border);
+        paint_border(buffer, x, y, layout.width, layout.height, border, clip);
 
         let color = style.map_or(Rgba::opaque(0, 0, 0), |s| s.color);
         let no_padding = florui_style::Edges {
@@ -424,6 +576,7 @@ fn paint_node(
                     content_y,
                     color,
                     scale_factor,
+                    clip,
                 );
             }
         } else {
@@ -447,6 +600,7 @@ fn paint_node(
                         y: content_y,
                         wrap_width,
                         scale_factor,
+                        clip,
                     },
                 );
             }
@@ -454,7 +608,15 @@ fn paint_node(
     }
 }
 
-fn fill_rect(buffer: &mut Canvas, x: f32, y: f32, width: f32, height: f32, color: Rgba) {
+fn fill_rect(
+    buffer: &mut Canvas,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    color: Rgba,
+    clip: Option<&Mask>,
+) {
     let x0 = x.max(0.0);
     let y0 = y.max(0.0);
     let x1 = (x + width).max(0.0).min(buffer.width() as f32);
@@ -466,7 +628,7 @@ fn fill_rect(buffer: &mut Canvas, x: f32, y: f32, width: f32, height: f32, color
     let mut paint = Paint::default();
     paint.set_color_rgba8(color.r, color.g, color.b, color.a);
     paint.anti_alias = false;
-    buffer.fill_rect(rect, &paint, Transform::identity(), None);
+    buffer.fill_rect(rect, &paint, Transform::identity(), clip);
 }
 
 /// Paints `border`'s four sides as flat rectangles at the box's own outer
@@ -478,6 +640,7 @@ fn fill_rect(buffer: &mut Canvas, x: f32, y: f32, width: f32, height: f32, color
 /// overlap by their own width at each corner, which a flat single color
 /// per side (this crate's only supported case, real CSS's own `solid`)
 /// paints identically to a mitered corner anyway.
+#[allow(clippy::too_many_arguments)]
 fn paint_border(
     buffer: &mut Canvas,
     x: f32,
@@ -485,9 +648,18 @@ fn paint_border(
     width: f32,
     height: f32,
     border: florui_style::Edges<florui_style::BorderSide>,
+    clip: Option<&Mask>,
 ) {
     if border.top.width > 0.0 {
-        fill_rect(buffer, x, y, width, border.top.width, border.top.color);
+        fill_rect(
+            buffer,
+            x,
+            y,
+            width,
+            border.top.width,
+            border.top.color,
+            clip,
+        );
     }
     if border.bottom.width > 0.0 {
         fill_rect(
@@ -497,10 +669,19 @@ fn paint_border(
             width,
             border.bottom.width,
             border.bottom.color,
+            clip,
         );
     }
     if border.left.width > 0.0 {
-        fill_rect(buffer, x, y, border.left.width, height, border.left.color);
+        fill_rect(
+            buffer,
+            x,
+            y,
+            border.left.width,
+            height,
+            border.left.color,
+            clip,
+        );
     }
     if border.right.width > 0.0 {
         fill_rect(
@@ -510,6 +691,7 @@ fn paint_border(
             border.right.width,
             height,
             border.right.color,
+            clip,
         );
     }
 }
@@ -661,7 +843,15 @@ fn fill_rect_minus_hole(
         // No overlap (including a hole with a non-positive width/height,
         // e.g. an inset shadow whose spread erased it entirely): nothing
         // to subtract.
-        fill_rect(buffer, outer_x, outer_y, outer_width, outer_height, color);
+        fill_rect(
+            buffer,
+            outer_x,
+            outer_y,
+            outer_width,
+            outer_height,
+            color,
+            None,
+        );
         return;
     }
 
@@ -672,6 +862,7 @@ fn fill_rect_minus_hole(
         outer_width,
         clip_y0 - outer_y,
         color,
+        None,
     );
     fill_rect(
         buffer,
@@ -680,6 +871,7 @@ fn fill_rect_minus_hole(
         outer_width,
         outer_y1 - clip_y1,
         color,
+        None,
     );
     fill_rect(
         buffer,
@@ -688,6 +880,7 @@ fn fill_rect_minus_hole(
         clip_x0 - outer_x,
         clip_y1 - clip_y0,
         color,
+        None,
     );
     fill_rect(
         buffer,
@@ -696,6 +889,7 @@ fn fill_rect_minus_hole(
         outer_x1 - clip_x1,
         clip_y1 - clip_y0,
         color,
+        None,
     );
 }
 
@@ -1005,6 +1199,7 @@ struct TextPaint<'a> {
     y: f32,
     wrap_width: f32,
     scale_factor: f32,
+    clip: Option<&'a Mask>,
 }
 
 fn to_text_font_family(value: florui_style::FontFamily) -> florui_text::FontFamily {
@@ -1025,9 +1220,10 @@ fn paint_text(buffer: &mut Canvas, font: &mut Font, params: TextPaint<'_>) {
         y,
         wrap_width,
         scale_factor,
+        clip,
     } = params;
     let shaped = font.shape_wrapped(font_family, text, font_size, font_weight, wrap_width);
-    paint_shaped_runs(buffer, &shaped.runs, x, y, color, scale_factor);
+    paint_shaped_runs(buffer, &shaped.runs, x, y, color, scale_factor, clip);
 }
 
 /// Fills every glyph across `runs` at `(x, y)` — the top-left of the whole
@@ -1045,6 +1241,7 @@ fn paint_text(buffer: &mut Canvas, font: &mut Font, params: TextPaint<'_>) {
 /// every glyph's own outline scale and relative position is still in
 /// logical units here; `scale_factor` blows both back up to the painted
 /// canvas's own (possibly physical) units, the other half of that split.
+#[allow(clippy::too_many_arguments)]
 fn paint_shaped_runs(
     buffer: &mut Canvas,
     runs: &[florui_text::ShapedRun],
@@ -1052,6 +1249,7 @@ fn paint_shaped_runs(
     y: f32,
     color: Rgba,
     scale_factor: f32,
+    clip: Option<&Mask>,
 ) {
     let mut builder = PathBuilder::new();
 
@@ -1097,7 +1295,7 @@ fn paint_shaped_runs(
         &paint,
         FillRule::Winding,
         Transform::identity(),
-        None,
+        clip,
     );
 }
 
@@ -2020,6 +2218,270 @@ mod tests {
         assert!(
             (100..160).contains(&red_only[0]) && red_only[1] == 0,
             "outside the overlap, back's own red must still fade correctly, got {red_only:?}"
+        );
+    }
+
+    #[test]
+    fn overflow_hidden_clips_a_child_that_extends_past_the_parents_padding_box() {
+        let tree: Element = view! {
+            <div class="frame">
+                <div class="content" />
+            </div>
+        };
+        let css = "
+            .frame { width: 20px; height: 20px; overflow: hidden; }
+            .content { background-color: #ff0000; }
+        ";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+
+        let frame = arena.roots()[0];
+        let content = arena.children(frame)[0];
+        let mut layouts = HashMap::new();
+        layouts.insert(
+            frame,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 20.0,
+                height: 20.0,
+            },
+        );
+        // Deliberately much larger than, and positioned to spill past,
+        // the frame's own 20x20 box on every side.
+        layouts.insert(
+            content,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 40.0,
+                height: 40.0,
+            },
+        );
+
+        let mut font = Font::load_embedded();
+        let buffer = paint_to_buffer(
+            &mut font,
+            40,
+            40,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            1.0,
+        );
+
+        assert_eq!(
+            pixel_rgb(&buffer, 10, 10),
+            [0xff, 0, 0],
+            "inside the frame's own bounds, the child must still paint normally"
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 30, 30),
+            [0, 0, 0],
+            "past the frame's own padding box, the child's overflow must be clipped away, \
+             leaving the plain canvas background"
+        );
+    }
+
+    #[test]
+    fn overflow_visible_the_default_does_not_clip_an_overflowing_child() {
+        // The exact same shape as the `overflow: hidden` test above, minus
+        // that one declaration — proves the clip in that test comes from
+        // `overflow: hidden` specifically, not from some other limit (a
+        // canvas edge, a coincidentally-unpainted region) that would make
+        // that test pass for the wrong reason.
+        let tree: Element = view! {
+            <div class="frame">
+                <div class="content" />
+            </div>
+        };
+        let css = "
+            .frame { width: 20px; height: 20px; }
+            .content { background-color: #ff0000; }
+        ";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+
+        let frame = arena.roots()[0];
+        let content = arena.children(frame)[0];
+        let mut layouts = HashMap::new();
+        layouts.insert(
+            frame,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 20.0,
+                height: 20.0,
+            },
+        );
+        layouts.insert(
+            content,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 40.0,
+                height: 40.0,
+            },
+        );
+
+        let mut font = Font::load_embedded();
+        let buffer = paint_to_buffer(
+            &mut font,
+            40,
+            40,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            1.0,
+        );
+
+        assert_eq!(
+            pixel_rgb(&buffer, 30, 30),
+            [0xff, 0, 0],
+            "overflow: visible (the default) must not clip the child at all"
+        );
+    }
+
+    #[test]
+    fn nested_overflow_hidden_clips_to_the_intersection_of_both_ancestors() {
+        // The outer frame alone would let the child show through at
+        // (25, 5) (inside the outer's 30x30 box, outside the inner's own
+        // narrower 15x15 one) -- only the *intersection* of both clips
+        // correctly hides it there too.
+        let tree: Element = view! {
+            <div class="outer">
+                <div class="inner">
+                    <div class="content" />
+                </div>
+            </div>
+        };
+        let css = "
+            .outer { width: 30px; height: 30px; overflow: hidden; }
+            .inner { width: 15px; height: 15px; overflow: hidden; }
+            .content { background-color: #ff0000; }
+        ";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+
+        let outer = arena.roots()[0];
+        let inner = arena.children(outer)[0];
+        let content = arena.children(inner)[0];
+        let mut layouts = HashMap::new();
+        layouts.insert(
+            outer,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 30.0,
+                height: 30.0,
+            },
+        );
+        layouts.insert(
+            inner,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 15.0,
+                height: 15.0,
+            },
+        );
+        layouts.insert(
+            content,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 40.0,
+                height: 40.0,
+            },
+        );
+
+        let mut font = Font::load_embedded();
+        let buffer = paint_to_buffer(
+            &mut font,
+            40,
+            40,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            1.0,
+        );
+
+        assert_eq!(
+            pixel_rgb(&buffer, 5, 5),
+            [0xff, 0, 0],
+            "inside both the inner and outer bounds, the content must still paint"
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 25, 5),
+            [0, 0, 0],
+            "inside the outer's own 30x30 box but past the inner's own narrower 15x15 one, \
+             the intersection of both clips must still hide it"
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 5, 25),
+            [0, 0, 0],
+            "past the outer's own 30x30 box entirely, the intersection must hide it here too"
+        );
+    }
+
+    #[test]
+    fn overflow_hidden_does_not_clip_its_own_background_or_border() {
+        // Real CSS: `overflow` clips a box's *content*, never the box's
+        // own border/background against its own clip -- only a
+        // descendant can be clipped by it.
+        let tree: Element = view! { <div class="frame" /> };
+        let css = "
+            .frame {
+                width: 20px;
+                height: 20px;
+                overflow: hidden;
+                background-color: #ff0000;
+                border-top-width: 4px;
+                border-top-style: solid;
+                border-top-color: #00ff00;
+            }
+        ";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let node = arena.roots()[0];
+        let mut layouts = HashMap::new();
+        layouts.insert(
+            node,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 20.0,
+                height: 20.0,
+            },
+        );
+
+        let mut font = Font::load_embedded();
+        let buffer = paint_to_buffer(
+            &mut font,
+            20,
+            20,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            1.0,
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 2, 2),
+            [0, 0xff, 0],
+            "the frame's own border must still paint in full"
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 10, 10),
+            [0xff, 0, 0],
+            "the frame's own background must still paint in full"
         );
     }
 

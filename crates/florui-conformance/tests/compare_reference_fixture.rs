@@ -145,3 +145,7 @@ fixture_test!(
 );
 fixture_test!(box_shadow_default_matches_chromium, "box-shadow-default");
 fixture_test!(box_shadow_blur_matches_chromium, "box-shadow-blur");
+fixture_test!(
+    overflow_hidden_clip_matches_chromium,
+    "overflow-hidden-clip"
+);
