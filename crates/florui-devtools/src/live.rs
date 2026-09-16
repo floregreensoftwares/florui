@@ -207,27 +207,22 @@ fn push_node(
     });
 }
 
-/// A node's border box (content expanded by its own padding and border) in
-/// the same physical-pixel space the preview paints in.
+/// A node's border box, in the same physical-pixel space the preview
+/// paints in. [`InspectorNode::content`] already *is* this box despite
+/// its name — `BoxLayout::width`/`height` are Taffy's own final
+/// border-box size, padding and border already folded in, not the
+/// smaller inner content box — see [`padding_box_rect`]'s own doc for
+/// the real numbers that confirmed it. This function previously added
+/// padding and border on top of `content` as if it still needed them,
+/// inflating every selection/hover outline well past the node's own real
+/// edges.
 fn border_box_rect(node: &InspectorNode) -> Option<ElementBox> {
     let content = node.content?;
-    let x = (content.x - node.padding.left - node.border.left).max(0.0);
-    let y = (content.y - node.padding.top - node.border.top).max(0.0);
-    let width = content.width
-        + node.padding.left
-        + node.padding.right
-        + node.border.left
-        + node.border.right;
-    let height = content.height
-        + node.padding.top
-        + node.padding.bottom
-        + node.border.top
-        + node.border.bottom;
     Some(ElementBox {
-        x: x.round() as u32,
-        y: y.round() as u32,
-        width: width.max(0.0).round() as u32,
-        height: height.max(0.0).round() as u32,
+        x: content.x.max(0.0).round() as u32,
+        y: content.y.max(0.0).round() as u32,
+        width: content.width.max(0.0).round() as u32,
+        height: content.height.max(0.0).round() as u32,
     })
 }
 
@@ -239,9 +234,8 @@ fn border_box_rect(node: &InspectorNode) -> Option<ElementBox> {
 /// against a real laid-out node with both padding and border: a 40x20
 /// content box with padding 8/6/5/7 and a 3px left / 2px top border comes
 /// back as `BoxLayout { width: 57, height: 34 }`, exactly content +
-/// padding + border) — so unlike [`border_box_rect`], which adds padding
-/// and border on top of `content` as if it were already the smaller
-/// content box, the padding box here only has to shed the border.
+/// padding + border) — so unlike [`border_box_rect`], which needs no
+/// adjustment at all, the padding box here only has to shed the border.
 fn padding_box_rect(node: &InspectorNode) -> Option<ElementBox> {
     let content = node.content?;
     let x = (content.x + node.border.left).max(0.0);
@@ -683,15 +677,14 @@ mod tests {
         assert!(!node.overflow_clips);
     }
 
-    #[test]
-    fn padding_box_rect_subtracts_only_the_border_from_the_reported_border_box() {
-        // `InspectorNode::content` is `BoxLayout::width`/`height` — Taffy's
-        // own final *border* box, confirmed directly against a real
-        // compute_layout run: a content-box 40x20 element with padding
-        // top/right/bottom/left 5/6/7/8 and a 2px top / 3px left border
-        // comes back as `BoxLayout { width: 57, height: 34 }` (40 + 8 + 6
-        // + 3, 20 + 5 + 7 + 2). These are that exact run's own numbers.
-        let node = InspectorNode {
+    /// `InspectorNode::content` is `BoxLayout::width`/`height` — Taffy's
+    /// own final *border* box, confirmed directly against a real
+    /// compute_layout run: a content-box 40x20 element with padding
+    /// top/right/bottom/left 5/6/7/8 and a 2px top / 3px left border
+    /// comes back as `BoxLayout { width: 57, height: 34 }` (40 + 8 + 6 +
+    /// 3, 20 + 5 + 7 + 2). These are that exact run's own numbers.
+    fn node_with_real_border_box() -> InspectorNode {
+        InspectorNode {
             id: 0,
             depth: 0,
             tag: "div".to_string(),
@@ -725,7 +718,32 @@ mod tests {
                 left: Some(0.0),
             },
             size_cause: None,
-        };
+        }
+    }
+
+    #[test]
+    fn border_box_rect_reports_content_unchanged_since_it_already_is_the_border_box() {
+        // Regression test: this function used to add padding and border
+        // on top of `content` as if it still needed them, inflating the
+        // reported box well past the node's own real border-box edges —
+        // see `node_with_real_border_box`'s own doc for why that was
+        // wrong. `width: 57, height: 34` is the *whole* border box, no
+        // adjustment needed at all.
+        let node = node_with_real_border_box();
+
+        let rect = border_box_rect(&node).expect("a laid-out node has a border box");
+        assert_eq!(rect.x, 0);
+        assert_eq!(rect.y, 0);
+        assert_eq!(rect.width, 57, "not 57 + padding + border inflated further");
+        assert_eq!(
+            rect.height, 34,
+            "not 34 + padding + border inflated further"
+        );
+    }
+
+    #[test]
+    fn padding_box_rect_subtracts_only_the_border_from_the_reported_border_box() {
+        let node = node_with_real_border_box();
 
         let rect = padding_box_rect(&node).expect("a laid-out node has a padding box");
         assert_eq!(rect.x, 3, "shed only the 3px left border, not padding too");
