@@ -1,5 +1,6 @@
-//! The parsed shape of a `view!` body, before codegen turns it into Rust
-//! expressions building an `Element` tree.
+//! The parsed shape of a `view!` body — shared by `florui-macros`'s real
+//! codegen and `florui-fmt`'s own formatter (see this crate's own module
+//! doc for why that split exists).
 
 use syn::{Expr, Ident, LitStr};
 
@@ -9,7 +10,7 @@ pub enum Node {
     /// more sibling elements through `IntoNodes`.
     Expr(Expr),
     /// A run of bare text between tags, already reconstructed into a single
-    /// string by [`super::text`].
+    /// string by [`crate::text`].
     Text(String),
     /// A tag: lowercase is a primitive HTML-like element, capitalized is a
     /// component call. `self_closing` tags never carry a `children` value.
@@ -21,6 +22,10 @@ pub enum Node {
     },
 }
 
+// `Expr` genuinely is much larger than `LitStr`, but this tree is parsed
+// once per `view!` invocation (or once per real formatter run), never a
+// hot allocation path boxing would meaningfully help.
+#[allow(clippy::large_enum_variant)]
 #[cfg_attr(test, derive(Debug))]
 pub enum AttrValue {
     Lit(LitStr),

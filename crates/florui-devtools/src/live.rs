@@ -640,7 +640,7 @@ impl ApplicationHandler<UserEvent> for LiveHost {
 #[cfg(test)]
 mod tests {
     use florui::prelude::*;
-    use florui_style::{InteractionState, compute, parse_stylesheet};
+    use florui_style::{InteractionState, Viewport, compute, parse_stylesheet};
 
     use super::*;
 
@@ -650,7 +650,12 @@ mod tests {
         let css = ".stacked { z-index: 3; opacity: 0.4; overflow: hidden; }";
         let arena = Arena::build(&tree);
         let rules = parse_stylesheet(css).unwrap();
-        let styles = compute(&arena, &rules, &InteractionState::new());
+        let styles = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+        );
         let layouts = HashMap::new();
 
         let model = build_inspector_model(&arena, &styles, &layouts, None, false);
@@ -666,7 +671,12 @@ mod tests {
         let tree: Element = view! { <div /> };
         let arena = Arena::build(&tree);
         let rules = parse_stylesheet("").unwrap();
-        let styles = compute(&arena, &rules, &InteractionState::new());
+        let styles = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+        );
         let layouts = HashMap::new();
 
         let model = build_inspector_model(&arena, &styles, &layouts, None, false);

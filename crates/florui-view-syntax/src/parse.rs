@@ -11,7 +11,7 @@
 //! A lowercase tag is checked against the shared [`florui_primitives`]
 //! registry: unknown tags, void elements written with children, and
 //! unsupported `<input type="...">` values are all rejected here, with one
-//! source of truth instead of scattered ad hoc checks. See [`super::text`]
+//! source of truth instead of scattered ad hoc checks. See [`crate::text`]
 //! for how a `text` run is reconstructed and its limits.
 
 use florui_primitives::Content;
@@ -19,8 +19,8 @@ use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream};
 use syn::{Ident, LitStr, Result, Token};
 
-use super::ast::{AttrValue, Node};
-use super::text;
+use crate::ast::{AttrValue, Node};
+use crate::text;
 
 #[cfg_attr(test, derive(Debug))]
 pub struct Nodes(pub Vec<Node>);

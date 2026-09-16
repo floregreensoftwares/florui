@@ -15,7 +15,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote, quote_spanned};
 use syn::Ident;
 
-use super::ast::{AttrValue, Node};
+use florui_view_syntax::{AttrValue, Node};
 
 /// `onclick`, `onmouseenter`, ... — any attribute in this shape names an
 /// event handler rather than a plain string attribute; `view!` has no
