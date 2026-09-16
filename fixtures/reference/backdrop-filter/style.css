@@ -1,0 +1,25 @@
+.group {
+    display: grid;
+    grid-template-columns: 40px;
+    grid-template-rows: 40px;
+    width: 40px;
+    height: 40px;
+}
+
+.group .back {
+    grid-column: 1;
+    grid-row: 1;
+    width: 40px;
+    height: 40px;
+    background-color: #ff0000;
+}
+
+.group .glass {
+    grid-column: 1;
+    grid-row: 1;
+    width: 20px;
+    height: 20px;
+    margin-top: 10px;
+    margin-left: 10px;
+    backdrop-filter: brightness(0.5);
+}
