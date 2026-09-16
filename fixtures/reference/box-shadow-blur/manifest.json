@@ -1,0 +1,19 @@
+{
+  "id": "box-shadow-blur",
+  "description": "A box-shadow with a real declared blur radius, validating this crate's own hand-rolled Gaussian blur against Chromium's real rendering — no text, so pixel comparison is this fixture's precise signal.",
+  "html": "index.html",
+  "css": "style.css",
+  "element_id": "el",
+  "viewport": { "width_css_px": 100, "height_css_px": 100, "device_pixel_ratio": 1.0 },
+  "canvas_color": "#ffffff",
+  "florui": {
+    "tag": "div",
+    "class": "box",
+    "css": ".box { width: 60px; height: 60px; background-color: #ffffff; box-shadow: 4px 4px 14px 0px rgba(0, 0, 0, 0.4); }"
+  },
+  "classification": {
+    "kind": "tolerant",
+    "threshold_percent": 5.0,
+    "reason": "Two independent Gaussian blur implementations (this crate's own hand-rolled one vs. Chromium's) never round every pixel identically along the shadow's own soft gradient, where a difference of 1 unit out of 255 is the whole story: measured live against Chromium at 4.68% differing pixels, every single one of them off by exactly 1 (max_error: 1, mean_error: 0.0468) — sub-perceptible rounding noise, not a shape or position mismatch, comfortably under this threshold."
+  }
+}

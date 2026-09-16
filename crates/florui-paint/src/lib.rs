@@ -24,17 +24,17 @@
 //! group (see [`paint_group_with_opacity`]) — real CSS's own
 //! group-opacity semantics, not a per-primitive alpha multiply.
 //!
-//! `box-shadow`'s `blur-radius` parses and cascades all the way through
-//! [`florui_style::BoxShadow`], but is not painted: tiny-skia 0.11 (this
-//! crate's whole rasterizer) has no Gaussian blur or mask-filter
-//! primitive at all, so there's nothing to rasterize a blur *with* short
-//! of hand-rolling a box-blur pass over a mask, out of scope for this
-//! crate's first slice of the property. Every shadow paints with a hard
-//! edge regardless of its declared blur — a "supported syntax, simplified
-//! rendering" gap, the same shape as this crate's own solid-only borders
-//! (see [`paint_border`]'s own doc). There is no border-radius,
-//! transform, or clipping yet — `florui_style` has no properties for any
-//! of those either.
+//! `box-shadow`'s `blur-radius` is painted too, via a real Gaussian blur
+//! — see [`blur`]'s own module doc: tiny-skia 0.11 (this crate's whole
+//! rasterizer) has no blur or mask-filter primitive of its own, so this
+//! crate rasterizes the shadow's own shape into a scratch alpha buffer,
+//! blurs *that* by hand, and composites the result back onto the canvas
+//! pixel by pixel — the one place in this crate that blends manually
+//! instead of going through a `tiny_skia::Paint` fill. There is no
+//! border-radius, transform, or clipping yet — `florui_style` has no
+//! properties for either.
+
+mod blur;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -45,7 +45,9 @@ use florui_text::Font;
 use skrifa::instance::{LocationRef, NormalizedCoord, Size as GlyphSize};
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{FontRef, GlyphId, MetadataProvider};
-use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, PixmapPaint, Rect, Transform};
+use tiny_skia::{
+    FillRule, Paint, PathBuilder, Pixmap, PixmapPaint, PremultipliedColorU8, Rect, Transform,
+};
 
 pub type Canvas = Pixmap;
 
@@ -534,10 +536,11 @@ fn paint_box_shadows(
         if shadow.color.a == 0 {
             continue;
         }
-        if inset {
-            paint_inset_shadow(buffer, x, y, width, height, border, shadow);
-        } else {
-            paint_outset_shadow(buffer, x, y, width, height, shadow);
+        match (inset, shadow.blur_radius > 0.0) {
+            (false, false) => paint_outset_shadow(buffer, x, y, width, height, shadow),
+            (false, true) => paint_outset_shadow_blurred(buffer, x, y, width, height, shadow),
+            (true, false) => paint_inset_shadow(buffer, x, y, width, height, border, shadow),
+            (true, true) => paint_inset_shadow_blurred(buffer, x, y, width, height, border, shadow),
         }
     }
 }
@@ -694,6 +697,295 @@ fn fill_rect_minus_hole(
         clip_y1 - clip_y0,
         color,
     );
+}
+
+/// A blurred coverage buffer, plus the canvas pixel its own `(0, 0)`
+/// lands on — [`rasterize_and_blur`]'s own output, read back by
+/// [`composite_blurred_shadow`].
+struct BlurredShape {
+    origin_x: i32,
+    origin_y: i32,
+    width: u32,
+    height: u32,
+    coverage: Vec<u8>,
+}
+
+/// Stamps a `shape_width x shape_height` rect (at `shape_x`/`shape_y`,
+/// canvas coordinates) into a fresh buffer covering `region` padded by
+/// [`blur::kernel_radius`] on every side, then blurs the whole buffer with
+/// a real Gaussian of standard deviation `blur_radius / 2.0` (see
+/// `blur`'s own module doc for that CSS-spec correspondence). `region` is
+/// the caller's own region of interest — the only part of the result it
+/// actually reads back — which may differ from the shape itself: an
+/// outset shadow's shape *is* its region of interest, but an inset
+/// shadow's region of interest is the padding box, not the (differently
+/// sized/positioned) hole shape blurred within it. Padding the buffer by
+/// the kernel's own reach beyond `region`, not just beyond the shape,
+/// keeps every value the caller will actually read genuinely unaffected
+/// by this buffer's own edges — see [`blur::gaussian_blur_in_place`]'s
+/// own doc on why that padding has to be real, not merely clamped.
+///
+/// Returns `None` for a degenerate (non-positive) region — nothing to
+/// rasterize or read back.
+#[allow(clippy::too_many_arguments)]
+fn rasterize_and_blur(
+    region_x: f32,
+    region_y: f32,
+    region_width: f32,
+    region_height: f32,
+    shape_x: f32,
+    shape_y: f32,
+    shape_width: f32,
+    shape_height: f32,
+    blur_radius: f32,
+) -> Option<BlurredShape> {
+    if region_width <= 0.0 || region_height <= 0.0 {
+        return None;
+    }
+    let sigma = blur_radius / 2.0;
+    let pad = blur::kernel_radius(sigma) as f32;
+
+    // Snapped to a whole pixel so every later coordinate in this buffer's
+    // own local space is an exact integer offset from a real canvas pixel
+    // — composite_blurred_shadow then never needs to re-round a float.
+    let origin_x = (region_x - pad).round() as i32;
+    let origin_y = (region_y - pad).round() as i32;
+    let width = (region_width + 2.0 * pad).ceil().max(1.0) as u32;
+    let height = (region_height + 2.0 * pad).ceil().max(1.0) as u32;
+
+    let mut coverage = vec![0u8; (width as usize) * (height as usize)];
+    stamp_rect(
+        &mut coverage,
+        width,
+        height,
+        shape_x - origin_x as f32,
+        shape_y - origin_y as f32,
+        shape_width,
+        shape_height,
+        255,
+    );
+
+    blur::gaussian_blur_in_place(&mut coverage, width, height, sigma);
+
+    Some(BlurredShape {
+        origin_x,
+        origin_y,
+        width,
+        height,
+        coverage,
+    })
+}
+
+/// Fills the (clamped-to-buffer) rectangle at `local_x`/`local_y` with
+/// `value` — [`rasterize_and_blur`]'s own way of stamping a shape's
+/// unblurred, hard-edged silhouette before blurring it. A rect that
+/// doesn't overlap the buffer at all (including a non-positive width or
+/// height — an inset shadow's hole erased entirely by its own spread, the
+/// same case [`fill_rect_minus_hole`] already handles for the unblurred
+/// path) simply stamps nothing.
+#[allow(clippy::too_many_arguments)]
+fn stamp_rect(
+    buf: &mut [u8],
+    buf_width: u32,
+    buf_height: u32,
+    local_x: f32,
+    local_y: f32,
+    width: f32,
+    height: f32,
+    value: u8,
+) {
+    let x0 = local_x.max(0.0).round() as i64;
+    let y0 = local_y.max(0.0).round() as i64;
+    let x1 = (local_x + width).min(buf_width as f32).round() as i64;
+    let y1 = (local_y + height).min(buf_height as f32).round() as i64;
+    for row in y0.max(0)..y1.max(0) {
+        for col in x0.max(0)..x1.max(0) {
+            buf[(row as u32 * buf_width + col as u32) as usize] = value;
+        }
+    }
+}
+
+/// An outer (drop) shadow with a real declared blur: the same outer
+/// shape [`paint_outset_shadow`] paints, but blurred (real CSS blurs the
+/// shadow shape itself, then clips the *already-blurred* result away
+/// from the box's own border box — the clip itself stays a hard edge,
+/// only the shape's own outer boundary softens).
+fn paint_outset_shadow_blurred(
+    buffer: &mut Canvas,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    shadow: &florui_style::BoxShadow,
+) {
+    let outer_x = x + shadow.offset_x - shadow.spread_radius;
+    let outer_y = y + shadow.offset_y - shadow.spread_radius;
+    let outer_width = width + 2.0 * shadow.spread_radius;
+    let outer_height = height + 2.0 * shadow.spread_radius;
+
+    let Some(blurred) = rasterize_and_blur(
+        outer_x,
+        outer_y,
+        outer_width,
+        outer_height,
+        outer_x,
+        outer_y,
+        outer_width,
+        outer_height,
+        shadow.blur_radius,
+    ) else {
+        return;
+    };
+
+    composite_blurred_shadow(
+        buffer,
+        &blurred,
+        shadow.color,
+        false,
+        |canvas_x, canvas_y| {
+            // Excluded from the box's own border box — the hard clip real
+            // CSS applies to an outer shadow regardless of its own blur.
+            canvas_x < x || canvas_x >= x + width || canvas_y < y || canvas_y >= y + height
+        },
+    );
+}
+
+/// An inset shadow with a real declared blur. Blurring the *hole* shape
+/// directly (rather than "padding box minus hole", inverted before
+/// blurring) and inverting the coverage only at composite time relies on
+/// the Gaussian blur's own linearity — `blur(255 - hole) == 255 -
+/// blur(hole)` wherever the buffer's padding is real (see
+/// [`rasterize_and_blur`]'s own doc) — so the same rasterize-then-blur
+/// routine [`paint_outset_shadow_blurred`] uses works here too, with the
+/// hole as the shape and the padding box as the region of interest.
+fn paint_inset_shadow_blurred(
+    buffer: &mut Canvas,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    border: florui_style::Edges<florui_style::BorderSide>,
+    shadow: &florui_style::BoxShadow,
+) {
+    let padding_x = x + border.left.width;
+    let padding_y = y + border.top.width;
+    let padding_width = (width - border.left.width - border.right.width).max(0.0);
+    let padding_height = (height - border.top.width - border.bottom.width).max(0.0);
+
+    let hole_x = padding_x + shadow.offset_x + shadow.spread_radius;
+    let hole_y = padding_y + shadow.offset_y + shadow.spread_radius;
+    let hole_width = padding_width - 2.0 * shadow.spread_radius;
+    let hole_height = padding_height - 2.0 * shadow.spread_radius;
+
+    let Some(blurred) = rasterize_and_blur(
+        padding_x,
+        padding_y,
+        padding_width,
+        padding_height,
+        hole_x,
+        hole_y,
+        hole_width,
+        hole_height,
+        shadow.blur_radius,
+    ) else {
+        return;
+    };
+
+    composite_blurred_shadow(
+        buffer,
+        &blurred,
+        shadow.color,
+        true,
+        |canvas_x, canvas_y| {
+            // The hard clip real CSS applies to an inset shadow: never past
+            // its own padding box, regardless of its own blur.
+            canvas_x >= padding_x
+                && canvas_x < padding_x + padding_width
+                && canvas_y >= padding_y
+                && canvas_y < padding_y + padding_height
+        },
+    );
+}
+
+/// Blends `blurred`'s own coverage (or, with `invert`, `255 -` it — see
+/// [`paint_inset_shadow_blurred`]'s own doc for why that's correct) onto
+/// `buffer` in `color`, skipping any pixel `allowed` rejects or that
+/// falls outside `buffer`'s own bounds.
+fn composite_blurred_shadow(
+    buffer: &mut Canvas,
+    blurred: &BlurredShape,
+    color: Rgba,
+    invert: bool,
+    allowed: impl Fn(f32, f32) -> bool,
+) {
+    let canvas_width = buffer.width() as i64;
+    let canvas_height = buffer.height() as i64;
+
+    for local_y in 0..blurred.height {
+        let canvas_y = blurred.origin_y as i64 + local_y as i64;
+        if canvas_y < 0 || canvas_y >= canvas_height {
+            continue;
+        }
+        for local_x in 0..blurred.width {
+            let canvas_x = blurred.origin_x as i64 + local_x as i64;
+            if canvas_x < 0 || canvas_x >= canvas_width {
+                continue;
+            }
+            if !allowed(canvas_x as f32, canvas_y as f32) {
+                continue;
+            }
+
+            let raw = blurred.coverage[(local_y * blurred.width + local_x) as usize];
+            let coverage = if invert { 255 - raw } else { raw };
+            if coverage == 0 {
+                continue;
+            }
+
+            let index = (canvas_y as u32 * buffer.width() + canvas_x as u32) as usize;
+            let dst = buffer.pixels()[index];
+            buffer.pixels_mut()[index] = blend_source_over(dst, color, coverage);
+        }
+    }
+}
+
+/// `u16` fixed-point `a * b / 255`, rounded to nearest — the one
+/// multiply-divide every channel below needs, pulled out once so the
+/// rounding stays consistent across all of them.
+fn mul_div_255(a: u8, b: u8) -> u8 {
+    ((a as u16 * b as u16 + 127) / 255) as u8
+}
+
+/// Standard Porter-Duff "`A` over `B`", both operands already
+/// premultiplied — the real per-pixel compositing math
+/// [`composite_blurred_shadow`] needs, that [`fill_rect`]'s own calls
+/// into tiny-skia get for free from the library instead: this path
+/// writes into an already-painted `Canvas` pixel by pixel, not through a
+/// fresh `tiny_skia::Paint` fill, so there's no library call already
+/// doing this blend to reuse. `src_color`/`src_coverage` are straight
+/// (non-premultiplied) — the same shape [`florui_style::Rgba`] and this
+/// crate's own alpha masks already use — converted to a premultiplied
+/// source here before blending.
+fn blend_source_over(
+    dst: PremultipliedColorU8,
+    src_color: Rgba,
+    src_coverage: u8,
+) -> PremultipliedColorU8 {
+    let src_a = mul_div_255(src_color.a, src_coverage);
+    let src_r = mul_div_255(src_color.r, src_a);
+    let src_g = mul_div_255(src_color.g, src_a);
+    let src_b = mul_div_255(src_color.b, src_a);
+
+    let inv = 255 - src_a;
+    let out_a = (src_a as u16 + mul_div_255(dst.alpha(), inv) as u16).min(255) as u8;
+    let clamp_channel = |src: u8, dst: u8| -> u8 {
+        let value = src as u16 + mul_div_255(dst, inv) as u16;
+        value.min(out_a as u16) as u8
+    };
+    let out_r = clamp_channel(src_r, dst.red());
+    let out_g = clamp_channel(src_g, dst.green());
+    let out_b = clamp_channel(src_b, dst.blue());
+
+    PremultipliedColorU8::from_rgba(out_r, out_g, out_b, out_a).unwrap_or(dst)
 }
 
 /// Shapes `text` (wrapped at `wrap_width`, matching whatever content width
@@ -1172,12 +1464,7 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_blur_radius_is_carried_through_but_does_not_soften_the_painted_edge() {
-        // florui-paint's own module doc: tiny-skia has no blur primitive,
-        // so `blur-radius` parses and cascades but never softens what
-        // gets painted — this shadow must paint identically to the same
-        // shadow with `blur-radius: 0`, not partially transparent at its
-        // edge the way a real blurred shadow would.
+    fn a_declared_blur_radius_softens_the_shadows_own_edge_into_a_gradient() {
         let tree: Element = view! {
             <div class="wrapper">
                 <div class="box" />
@@ -1208,12 +1495,86 @@ mod tests {
             1.0,
         );
 
-        // Just inside the shadow's hard-edged shape: fully opaque red, not
-        // a blurred/blended intermediate color.
-        assert_eq!(pixel_rgb(&buffer, 20, 28), [0xff, 0, 0]);
-        // Just past that edge, one pixel further from the box: back to
-        // the plain unblurred background, with no soft blurred fringe.
-        assert_eq!(pixel_rgb(&buffer, 20, 33), [0, 0, 0]);
+        // The box's own interior never shows the shadow at all, blurred
+        // or not — real CSS clips the *already-blurred* shape away from
+        // the border box, the clip itself staying a hard edge.
+        assert_eq!(
+            pixel_rgb(&buffer, 20, 20),
+            [0x1e, 0x1e, 0x22],
+            "blur must not bleed into the box's own footprint"
+        );
+
+        // Scanning straight down from the box's own bottom edge, at least
+        // one pixel must land strictly between fully red and fully
+        // background — proof of a real gradient, not a hard 0/255 step.
+        let mut found_partial = false;
+        for py in 25..39u32 {
+            let [r, g, b] = pixel_rgb(&buffer, 20, py);
+            if (1..0xff).contains(&r) && g == 0 && b == 0 {
+                found_partial = true;
+            }
+        }
+        assert!(
+            found_partial,
+            "expected a genuine red gradient below the box, found only hard 0/255 steps"
+        );
+    }
+
+    #[test]
+    fn an_inset_shadow_with_blur_softens_near_its_own_edges_but_stays_hard_at_the_padding_box() {
+        let tree: Element = view! {
+            <div class="wrapper">
+                <div class="box" />
+            </div>
+        };
+        let css = "
+            .wrapper {
+                width: 50px; height: 50px; background-color: #000000;
+                padding-top: 15px; padding-right: 15px; padding-bottom: 15px; padding-left: 15px;
+            }
+            .box { width: 20px; height: 20px; background-color: #1e1e22; box-shadow: inset 0px 0px 6px 0px #ff0000; }
+        ";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(&arena, &rules, &InteractionState::new());
+        let mut font = Font::load_embedded();
+        let layouts =
+            florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
+
+        let buffer = paint_to_buffer(
+            &mut font,
+            50,
+            50,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            1.0,
+        );
+
+        // Deep in the box's own center (well beyond the blur's own
+        // reach from any edge): completely untouched by the shadow.
+        assert_eq!(
+            pixel_rgb(&buffer, 25, 25),
+            [0x1e, 0x1e, 0x22],
+            "a zero-offset inset shadow with a small blur must not reach the box's own center"
+        );
+        // One pixel in from the box's own left edge: inside the blur's
+        // reach, so a genuine partial red tint, not the flat background.
+        let [near_edge_r, _, near_edge_b] = pixel_rgb(&buffer, 16, 25);
+        assert!(
+            near_edge_r > 0x1e && near_edge_b < 0x22,
+            "expected a visible red tint blended in near the box's own edge, got \
+             rgb component readings r={near_edge_r:#x} b={near_edge_b:#x}"
+        );
+        // Outside the box (and so outside the padding box) entirely: the
+        // hard clip at the padding box still holds despite the blur —
+        // no soft fringe leaking past it.
+        assert_eq!(
+            pixel_rgb(&buffer, 10, 25),
+            [0, 0, 0],
+            "an inset shadow, blurred or not, must never paint past its own padding box"
+        );
     }
 
     #[test]
