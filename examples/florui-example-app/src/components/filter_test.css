@@ -87,3 +87,29 @@
 .grayscale {
     filter: grayscale(1);
 }
+
+.overlap-stage {
+    display: grid;
+    grid-template-columns: 140px;
+    grid-template-rows: 100px;
+}
+
+.behind {
+    grid-column: 1;
+    grid-row: 1;
+    width: 100px;
+    height: 70px;
+    margin-top: 15px;
+    margin-left: 20px;
+    background-color: #d94f4f;
+}
+
+.glass {
+    grid-column: 1;
+    grid-row: 1;
+    width: 60px;
+    height: 40px;
+    margin-top: 30px;
+    margin-left: 40px;
+    backdrop-filter: brightness(1.8);
+}
