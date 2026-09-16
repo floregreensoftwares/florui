@@ -1,0 +1,20 @@
+{
+  "id": "filter-blur",
+  "description": "A 30x30 solid box with filter: blur(8px), inset 30px from the viewport's own top-left so the blurred edge has room to spread without hitting the canvas boundary. Proves both that the blur spreads past the box's own original edge and that the blur radius's own real-CSS correspondence to a Gaussian standard deviation is right, not just that something got blurry.",
+  "html": "index.html",
+  "css": "style.css",
+  "element_id": "el",
+  "viewport": { "width_css_px": 120, "height_css_px": 120, "device_pixel_ratio": 1.0 },
+  "canvas_color": "#ffffff",
+  "florui": {
+    "tag": "div",
+    "class": "box",
+    "css": ".box { width: 30px; height: 30px; margin-top: 30px; margin-left: 30px; background-color: #ff0000; filter: blur(8px); }",
+    "children": []
+  },
+  "classification": {
+    "kind": "tolerant",
+    "threshold_percent": 20.0,
+    "reason": "Measured directly against a real Chromium capture: ~12% of pixels differ, max_error 3 of 255, all concentrated in a speckled ring right at the blur's own steepest gradient falloff -- both the shape's center and its far, fully-faded edge match exactly. That pattern is two independently-implemented Gaussian kernels disagreeing by a couple of intensity levels in the transition band, not a wrong blur radius or a structural mismatch (either of which would show as an offset, a wrong overall size, or a uniform full-field error instead)."
+  }
+}

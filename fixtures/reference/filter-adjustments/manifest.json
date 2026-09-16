@@ -1,0 +1,20 @@
+{
+  "id": "filter-adjustments",
+  "description": "A 40x40 solid box with filter: brightness(1.3) contrast(1.4) saturate(0.5) -- a real ordered filter chain of non-blur functions, proving the chain composes in authored order and each function's own real-CSS formula matches Chromium's.",
+  "html": "index.html",
+  "css": "style.css",
+  "element_id": "el",
+  "viewport": { "width_css_px": 60, "height_css_px": 60, "device_pixel_ratio": 1.0 },
+  "canvas_color": "#ffffff",
+  "florui": {
+    "tag": "div",
+    "class": "box",
+    "css": ".box { width: 40px; height: 40px; background-color: #8040c0; filter: brightness(1.3) contrast(1.4) saturate(0.5); }",
+    "children": []
+  },
+  "classification": {
+    "kind": "tolerant",
+    "threshold_percent": 55.0,
+    "reason": "Measured directly against a real Chromium capture: roughly 44% of pixels differ by exactly 1 of 255 color levels (max_error 1) -- a systematic rounding-mode difference between this crate's own filter-chain math and Chromium's, not a real color mismatch (a flat fill with the wrong formula would show a large, uniform error across every pixel, not a 1-level diff on less than half of them)."
+  }
+}

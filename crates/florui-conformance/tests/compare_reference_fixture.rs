@@ -150,3 +150,5 @@ fixture_test!(
     overflow_hidden_clip_matches_chromium,
     "overflow-hidden-clip"
 );
+fixture_test!(filter_blur_matches_chromium, "filter-blur");
+fixture_test!(filter_adjustments_matches_chromium, "filter-adjustments");
