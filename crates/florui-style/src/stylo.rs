@@ -857,7 +857,6 @@ fn to_computed_style(values: &ComputedValues) -> ComputedStyle {
     let margin = values.get_margin();
     let padding = values.get_padding();
     let border = values.get_border();
-    let effects = values.get_effects();
 
     // `color`'s own computed value is always already-resolved (real CSS
     // never leaves it as `currentcolor`); resolving it first lets
