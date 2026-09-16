@@ -21,6 +21,12 @@
 //! braces, and parentheses always arrive as a single balanced [`TokenTree::Group`],
 //! never as standalone punctuation, so a parenthesized aside is just one
 //! token as far as this is concerned and gets a normal leading space.
+//!
+//! This same reconstruction is what `florui-fmt` re-emits for a text node
+//! it reformats — not a new formatting decision of its own, just echoing
+//! back the identical normalization this module already performs, so a
+//! text run round-trips through formatting exactly as it already does
+//! through real macro expansion.
 
 use proc_macro2::{Delimiter, TokenTree};
 use syn::Result;

@@ -21,6 +21,7 @@ use florui_conformance::run_history::{
 use florui_devtools::diagnostics::{dim_text, failure, success};
 
 mod doctor;
+mod fmt;
 
 #[derive(Parser)]
 #[command(name = "florui", about = "Florui project CLI")]
@@ -131,6 +132,17 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Reformats `view!`-containing `.rs` files — see `fmt`'s own module
+    /// doc for exactly what this does and does not reformat.
+    Fmt {
+        /// Files or directories to format. Defaults to the whole
+        /// resolved workspace when none are given.
+        paths: Vec<PathBuf>,
+        /// Report which files would change without writing anything;
+        /// exits 1 if any would.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -185,6 +197,7 @@ fn main() -> ExitCode {
             json,
             strict,
         }),
+        Command::Fmt { paths, check } => fmt::run(fmt::Options { paths, check }),
     }
 }
 
