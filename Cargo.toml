@@ -23,3 +23,23 @@ members = [
 license = "MIT OR Apache-2.0"
 edition = "2024"
 rust-version = "1.94"
+
+# A `dev` build otherwise runs these at opt-level 0 like everything
+# else, and they're measurably the hot path for a real animation --
+# rasterization, text shaping, CSS cascade, layout. Scoped to just these
+# crates (not `[profile.dev.package."*"]`) so the dozens of other
+# dependencies that never show up in that path don't pay for a cold
+# build they don't need; florui's own crates stay at opt-level 0 for a
+# fast edit-compile loop.
+[profile.dev.package.tiny-skia]
+opt-level = 2
+[profile.dev.package.tiny-skia-path]
+opt-level = 2
+[profile.dev.package.skrifa]
+opt-level = 2
+[profile.dev.package.harfrust]
+opt-level = 2
+[profile.dev.package.stylo]
+opt-level = 2
+[profile.dev.package.taffy]
+opt-level = 2
