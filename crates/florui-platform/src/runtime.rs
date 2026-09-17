@@ -14,7 +14,9 @@ use florui::Element;
 use florui_layout::BoxLayout;
 use florui_reactive::executor::{Executor, LocalExecutor};
 use florui_reactive::{DirtyFlag, Scope, provide_context};
-use florui_style::{Arena, ComputedStyle, InteractionState, NodeId, Rule, StyleError};
+use florui_style::{
+    AnimationTimeline, Arena, ComputedStyle, InteractionState, NodeId, Rule, StyleError,
+};
 use taffy::prelude::*;
 
 use crate::size_observer::SizeObserverRegistry;
@@ -29,6 +31,12 @@ pub struct UiRuntime {
     arena: Arena,
     styles: HashMap<NodeId, ComputedStyle>,
     layouts: HashMap<NodeId, BoxLayout>,
+    /// Carries real `transition`/`@keyframes` state across [`Self::update`]
+    /// calls, sampled against a real wall clock captured once at
+    /// [`Self::with_rules_and_context`] — see
+    /// [`florui_style::AnimationTimeline`]'s own doc.
+    animation_timeline: AnimationTimeline,
+    animation_epoch: std::time::Instant,
     /// The one long-lived font this runtime's own [`Self::update`] lays out
     /// with — loading one builds a whole Parley `FontContext` (and, with
     /// fontique's default `system_fonts: true`, enumerates the system's
@@ -110,6 +118,8 @@ impl UiRuntime {
             arena: Arena::build(&Element::Fragment(Vec::new())),
             styles: HashMap::new(),
             layouts: HashMap::new(),
+            animation_timeline: AnimationTimeline::new(),
+            animation_epoch: std::time::Instant::now(),
             font: florui_text::Font::load_embedded(),
             executor: Rc::new(LocalExecutor::new()),
             size_observers: Rc::new(SizeObserverRegistry::new()),
@@ -193,11 +203,14 @@ impl UiRuntime {
         // waker already requeued) make progress before this frame commits.
         self.executor.run_until_stalled();
         self.arena = Arena::build(&tree);
+        self.animation_timeline
+            .advance_to(self.animation_epoch.elapsed().as_secs_f64());
         self.styles = florui_style::compute(
             &self.arena,
             &self.rules,
             &self.interaction,
             media_viewport(viewport),
+            &mut self.animation_timeline,
         );
         self.layouts =
             florui_layout::compute_layout(&mut self.font, &self.arena, &self.styles, viewport)
@@ -205,6 +218,14 @@ impl UiRuntime {
         // After layout, not before: a committed-size observer must see
         // this render's own real geometry, not the previous one's.
         self.size_observers.notify(&self.arena, &self.layouts);
+    }
+
+    /// Whether the most recent [`Self::update`] left any `transition`/
+    /// `@keyframes` animation still in progress — a host's cue to keep
+    /// scheduling redraws (and calling `update` again) on its own timer
+    /// rather than waiting for the next real input/state event.
+    pub fn is_animating(&self) -> bool {
+        self.animation_timeline.is_animating()
     }
 
     /// The geometry computed by the most recent [`Self::update`].

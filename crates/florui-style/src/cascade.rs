@@ -432,13 +432,16 @@ impl Default for Viewport {
 /// Resolves every node in `arena` against `rules` and `state` — real
 /// selector matching, cascade, and inheritance, via Stylo. `viewport` is
 /// what `@media`'s own size features (`min-width`, ...) resolve against.
+/// `timeline` carries `transition`/`@keyframes` state across calls — see
+/// [`crate::AnimationTimeline`]'s own doc.
 pub fn compute(
     arena: &Arena,
     rules: &[Rule],
     state: &InteractionState,
     viewport: Viewport,
+    timeline: &mut crate::animation::AnimationTimeline,
 ) -> HashMap<NodeId, ComputedStyle> {
-    stylo::compute(arena, rules, state, viewport)
+    stylo::compute(arena, rules, state, viewport, timeline)
 }
 
 #[cfg(test)]
@@ -455,7 +458,13 @@ mod tests {
     ) -> (Arena, HashMap<NodeId, ComputedStyle>) {
         let arena = Arena::build(tree);
         let rules = parse_stylesheet(css).unwrap();
-        let computed = compute(&arena, &rules, state, Viewport::default());
+        let computed = compute(
+            &arena,
+            &rules,
+            state,
+            Viewport::default(),
+            &mut crate::AnimationTimeline::default(),
+        );
         (arena, computed)
     }
 
@@ -565,6 +574,7 @@ mod tests {
             &crate::stylesheet_parse::parse_stylesheet(css).unwrap(),
             &hovered_state,
             Viewport::default(),
+            &mut crate::AnimationTimeline::default(),
         );
         assert_eq!(
             hovered[&button].background_color,
@@ -1670,6 +1680,7 @@ mod tests {
                 width: 400.0,
                 height: 300.0,
             },
+            &mut crate::AnimationTimeline::default(),
         );
         assert_eq!(narrow[&node].background_color, Rgba::TRANSPARENT);
 
@@ -1681,6 +1692,7 @@ mod tests {
                 width: 600.0,
                 height: 300.0,
             },
+            &mut crate::AnimationTimeline::default(),
         );
         assert_eq!(wide[&node].background_color, Rgba::opaque(0xff, 0, 0));
     }
@@ -1702,6 +1714,7 @@ mod tests {
                 width: 400.0,
                 height: 300.0,
             },
+            &mut crate::AnimationTimeline::default(),
         );
         assert_eq!(narrow[&node].background_color, Rgba::opaque(0xff, 0, 0));
 
@@ -1713,6 +1726,7 @@ mod tests {
                 width: 600.0,
                 height: 300.0,
             },
+            &mut crate::AnimationTimeline::default(),
         );
         assert_eq!(wide[&node].background_color, Rgba::TRANSPARENT);
     }
@@ -1734,6 +1748,7 @@ mod tests {
                 width: 900.0,
                 height: 400.0,
             },
+            &mut crate::AnimationTimeline::default(),
         );
         assert_eq!(short[&node].background_color, Rgba::TRANSPARENT);
 
@@ -1745,6 +1760,7 @@ mod tests {
                 width: 900.0,
                 height: 600.0,
             },
+            &mut crate::AnimationTimeline::default(),
         );
         assert_eq!(tall[&node].background_color, Rgba::opaque(0xff, 0, 0));
     }
@@ -1766,6 +1782,7 @@ mod tests {
                 width: 900.0,
                 height: 400.0,
             },
+            &mut crate::AnimationTimeline::default(),
         );
         assert_eq!(short[&node].background_color, Rgba::opaque(0xff, 0, 0));
 
@@ -1777,6 +1794,7 @@ mod tests {
                 width: 900.0,
                 height: 600.0,
             },
+            &mut crate::AnimationTimeline::default(),
         );
         assert_eq!(tall[&node].background_color, Rgba::TRANSPARENT);
     }
@@ -1799,6 +1817,7 @@ mod tests {
                     width: 900.0,
                     height,
                 },
+                &mut crate::AnimationTimeline::default(),
             );
             let expected = if height >= 500.0 {
                 Rgba::opaque(0xff, 0, 0)
@@ -1807,5 +1826,136 @@ mod tests {
             };
             assert_eq!(computed[&node].background_color, expected);
         }
+    }
+
+    #[test]
+    fn a_background_color_transition_starts_on_a_class_change_and_samples_in_between() {
+        let css = "
+            .box {
+                background-color: #ff0000;
+                transition-property: background-color;
+                transition-duration: 1s;
+                transition-timing-function: linear;
+            }
+            .box.on { background-color: #0000ff; }
+        ";
+        let rules = parse_stylesheet(css).unwrap();
+        let mut timeline = crate::AnimationTimeline::new();
+
+        let off: Element = view! { <div class="box" /> };
+        let off_arena = Arena::build(&off);
+        let off_node = off_arena.roots()[0];
+        let baseline = compute(
+            &off_arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+            &mut timeline,
+        );
+        assert_eq!(
+            baseline[&off_node].background_color,
+            Rgba::opaque(0xff, 0, 0)
+        );
+
+        // Same structural identity (a lone root `<div>`), new class — the
+        // transition should just be starting, still at its from-value.
+        let on: Element = view! { <div class="box on" /> };
+        let on_arena = Arena::build(&on);
+        let on_node = on_arena.roots()[0];
+        let started = compute(
+            &on_arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+            &mut timeline,
+        );
+        assert_eq!(started[&on_node].background_color, Rgba::opaque(0xff, 0, 0));
+
+        // Halfway through a 1s linear transition: red and blue only ever
+        // differ in the red/blue channels, so this should land near the
+        // midpoint of each rather than either endpoint.
+        timeline.advance_to(0.5);
+        let midway = compute(
+            &on_arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+            &mut timeline,
+        );
+        let sampled = midway[&on_node].background_color;
+        assert!(
+            (sampled.r as i32 - 128).abs() <= 5 && (sampled.b as i32 - 128).abs() <= 5,
+            "expected a color near the midpoint of red and blue, got {sampled:?}"
+        );
+
+        // Past the full duration: the transition has finished, so this is
+        // just the declared end value again.
+        timeline.advance_to(2.0);
+        let finished = compute(
+            &on_arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+            &mut timeline,
+        );
+        assert_eq!(
+            finished[&on_node].background_color,
+            Rgba::opaque(0, 0, 0xff)
+        );
+    }
+
+    #[test]
+    fn a_keyframes_animation_samples_opacity_partway_through() {
+        let css = "
+            .box {
+                opacity: 0;
+                animation-name: fade;
+                animation-duration: 10s;
+                animation-timing-function: linear;
+                animation-fill-mode: forwards;
+            }
+            @keyframes fade {
+                from { opacity: 0; }
+                to { opacity: 1; }
+            }
+        ";
+        let rules = parse_stylesheet(css).unwrap();
+        let mut timeline = crate::AnimationTimeline::new();
+        let tree: Element = view! { <div class="box" /> };
+        let arena = Arena::build(&tree);
+        let node = arena.roots()[0];
+
+        let start = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+            &mut timeline,
+        );
+        assert!((start[&node].opacity - 0.0).abs() < 0.01);
+
+        timeline.advance_to(5.0);
+        let midway = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+            &mut timeline,
+        );
+        assert!(
+            (midway[&node].opacity - 0.5).abs() < 0.05,
+            "expected opacity near 0.5 at the animation's midpoint, got {}",
+            midway[&node].opacity
+        );
+
+        timeline.advance_to(20.0);
+        let finished = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+            &mut timeline,
+        );
+        assert!((finished[&node].opacity - 1.0).abs() < 0.01);
     }
 }

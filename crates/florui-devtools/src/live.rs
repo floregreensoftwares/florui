@@ -655,6 +655,7 @@ mod tests {
             &rules,
             &InteractionState::new(),
             Viewport::default(),
+            &mut florui_style::AnimationTimeline::default(),
         );
         let layouts = HashMap::new();
 
@@ -676,6 +677,7 @@ mod tests {
             &rules,
             &InteractionState::new(),
             Viewport::default(),
+            &mut florui_style::AnimationTimeline::default(),
         );
         let layouts = HashMap::new();
 

@@ -30,6 +30,7 @@
 //! directly (see its docs) — there is no pointer/keyboard event system
 //! here to derive it from yet.
 
+mod animation;
 mod cascade;
 mod color;
 mod default_stylesheet;
@@ -40,6 +41,7 @@ mod stylesheet_parse;
 mod stylo;
 mod tree;
 
+pub use animation::AnimationTimeline;
 pub use cascade::{
     BorderSide, BoxShadow, ComputedStyle, ContentAlignment, Display, Edges, FilterFunction,
     FlexDirection, FlexWrap, FontFamily, GridPlacement, GridTrackSize, ItemAlignment,
@@ -91,6 +93,7 @@ mod integration_tests {
             &rules,
             &InteractionState::new(),
             Viewport::default(),
+            &mut crate::AnimationTimeline::default(),
         );
         assert_eq!(
             idle[&button].background_color,
@@ -99,7 +102,13 @@ mod integration_tests {
         assert_eq!(idle[&button].color, Rgba::opaque(0xff, 0xff, 0xff));
 
         let hovered_state = InteractionState::new().with_hovered(button);
-        let hovered = compute(&arena, &rules, &hovered_state, Viewport::default());
+        let hovered = compute(
+            &arena,
+            &rules,
+            &hovered_state,
+            Viewport::default(),
+            &mut crate::AnimationTimeline::default(),
+        );
         assert_eq!(
             hovered[&button].background_color,
             Rgba::opaque(0x34, 0x5c, 0x3e)

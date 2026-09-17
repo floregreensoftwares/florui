@@ -344,6 +344,14 @@ struct DesktopHost {
     /// itself, without a component needing to wire that up by hand.
     controls: Option<Rc<WindowControls>>,
     presenter: Option<Presenter>,
+    /// When a `transition`/`@keyframes` animation still needs sampling —
+    /// `None` once nothing is animating. Read and rescheduled only in
+    /// [`ApplicationHandler::about_to_wait`], which runs after every loop
+    /// iteration regardless of what triggered it (input, a `Signal::set`,
+    /// or a previous animation wake), so it always sees whatever the most
+    /// recent [`Self::redraw`] left here — no separate cross-thread
+    /// signal needed to drive continuous repaints.
+    next_animation_wake: Option<std::time::Instant>,
     fatal_error: Option<RunError>,
     /// Only set by [`run_with_css_reload`] — [`run`] leaves this `None`,
     /// and [`Self::reload_css`] is a no-op without it.
@@ -374,6 +382,7 @@ impl DesktopHost {
             window: None,
             controls: None,
             presenter: None,
+            next_animation_wake: None,
             fatal_error: None,
             css_path: None,
             _css_watcher: None,
@@ -477,6 +486,27 @@ impl DesktopHost {
         }
     }
 
+    /// The real handler for `WindowEvent::RedrawRequested`: if the reason
+    /// this frame was requested is [`Self::next_animation_wake`] having
+    /// come due, advances the animation timeline first so the paint below
+    /// reflects the current instant — otherwise this is a plain repaint
+    /// (a resize, an exposed region) and [`Self::redraw`] alone is
+    /// correct, matching the design's own separation of "update" from
+    /// "paint" everywhere else.
+    fn redraw_for_frame(&mut self) {
+        let deadline_due = self
+            .next_animation_wake
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline);
+        if deadline_due {
+            let viewport = layout_viewport(self.viewport_scale());
+            if let Some(runtime) = &mut self.runtime {
+                runtime.update(viewport);
+            }
+            self.refresh_animation_schedule();
+        }
+        self.redraw();
+    }
+
     /// Re-renders against the current viewport and requests a repaint —
     /// used both after a resize and after a [`UserEvent::Dirty`], so any
     /// `Signal::set` anywhere under the root reaches the screen without
@@ -490,6 +520,24 @@ impl DesktopHost {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+        self.refresh_animation_schedule();
+    }
+
+    /// Recomputes [`Self::next_animation_wake`] from
+    /// [`UiRuntime::is_animating`] — called after every `runtime.update`
+    /// site, so whichever one most recently ran always leaves an accurate
+    /// deadline for [`ApplicationHandler::about_to_wait`] to act on. A
+    /// stale deadline is intentional between calls: a real transition/
+    /// animation samples at whatever instant it actually gets painted at
+    /// (`Transition::calculate_value` is time-based, not tied to landing
+    /// exactly on a 16ms boundary), so nothing here needs to be exact —
+    /// only to keep asking for another frame while it's still true.
+    fn refresh_animation_schedule(&mut self) {
+        self.next_animation_wake = self
+            .runtime
+            .as_ref()
+            .filter(|runtime| runtime.is_animating())
+            .map(|_| std::time::Instant::now() + std::time::Duration::from_millis(16));
     }
 
     /// Re-derives `InputMode::Selective`'s screen-space regions from the
@@ -546,6 +594,7 @@ impl DesktopHost {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+        self.refresh_animation_schedule();
     }
 
     /// Remembers whichever node is under the cursor at press time — the
@@ -724,6 +773,42 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
         self.window = Some(window);
         self.presenter = Some(presenter);
         self.redraw();
+        // A `@keyframes` animation already running on mount (no `:hover`
+        // or other interaction needed to start it) needs a deadline set
+        // here — every other call site only does this after an `update()`
+        // this constructor's own first render already ran.
+        self.refresh_animation_schedule();
+    }
+
+    /// Runs after every loop iteration, whatever triggered it (input, a
+    /// `UserEvent`, a previous animation wake) — the one place this host
+    /// decides the control flow for the *next* iteration, so an animation
+    /// deadline set by any of those triggers is always picked up here
+    /// rather than needing its own dedicated wake path.
+    ///
+    /// Only requests a redraw when [`Self::next_animation_wake`] has
+    /// actually come due; an `about_to_wait` this deadline hasn't reached
+    /// yet (woken early by an unrelated event, since `WaitUntil` is a
+    /// lower bound, not a guarantee) just re-affirms the same deadline
+    /// unchanged rather than requesting work or recomputing it — see
+    /// [`Self::refresh_animation_schedule`]'s own doc for why recomputing
+    /// here would be wrong. The actual timeline update happens in
+    /// [`Self::redraw_for_frame`] (`WindowEvent::RedrawRequested`), not
+    /// here, matching `winit`'s own guidance to do render work there.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        match self.next_animation_wake {
+            Some(deadline) if std::time::Instant::now() >= deadline => {
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            Some(deadline) => {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+            }
+            None => {
+                event_loop.set_control_flow(ControlFlow::Wait);
+            }
+        }
     }
 
     fn window_event(
@@ -754,7 +839,7 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
             // the already-computed layout, avoids paying for a full
             // re-render on every step of a drag.
             WindowEvent::Moved(_) => self.resync_input_regions(),
-            WindowEvent::RedrawRequested => self.redraw(),
+            WindowEvent::RedrawRequested => self.redraw_for_frame(),
             WindowEvent::CursorMoved { position, .. } => {
                 self.handle_cursor_moved(position.x, position.y);
             }

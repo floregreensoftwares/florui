@@ -29,6 +29,7 @@ fn main() {
         &rules,
         &InteractionState::new(),
         florui_style::Viewport::default(),
+        &mut florui_style::AnimationTimeline::default(),
     );
     let mut font = florui_text::Font::load_embedded();
     let layouts = florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT)

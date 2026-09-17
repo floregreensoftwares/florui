@@ -4,5 +4,6 @@ pub mod counter;
 pub mod dpi_ruler;
 pub mod filter_test;
 pub mod media_query_height_test;
+pub mod motion_test;
 pub mod stepper;
 pub mod transform_test;
