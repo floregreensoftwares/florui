@@ -26,6 +26,7 @@ fn arena_and_styles(tree: &Element, css: &str) -> (Arena, HashMap<NodeId, Comput
         &rules,
         &InteractionState::new(),
         florui_style::Viewport::default(),
+        &mut florui_style::AnimationTimeline::default(),
     );
     (arena, styles)
 }

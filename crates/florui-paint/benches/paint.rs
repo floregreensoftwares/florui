@@ -34,6 +34,7 @@ fn arena_styles_layouts(
         &rules,
         &InteractionState::new(),
         florui_style::Viewport::default(),
+        &mut florui_style::AnimationTimeline::default(),
     );
     let mut font = Font::load_embedded();
     let layouts = compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT)

@@ -117,6 +117,7 @@ impl App {
             &self.rules,
             &self.interaction,
             florui_style::Viewport::default(),
+            &mut florui_style::AnimationTimeline::default(),
         );
         let layouts =
             florui_layout::compute_layout(&mut self.font, &self.arena, &styles, Size::MAX_CONTENT)

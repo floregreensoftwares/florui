@@ -145,6 +145,7 @@ mod tests {
             &rules,
             &InteractionState::new(),
             Viewport::default(),
+            &mut crate::AnimationTimeline::default(),
         );
         assert_eq!(
             computed[&arena.roots()[0]].background_color,
@@ -162,12 +163,14 @@ mod tests {
             &rules,
             &InteractionState::new(),
             Viewport::default(),
+            &mut crate::AnimationTimeline::default(),
         );
         let second = compute(
             &arena,
             &rules,
             &InteractionState::new(),
             Viewport::default(),
+            &mut crate::AnimationTimeline::default(),
         );
         assert_eq!(
             first[&arena.roots()[0]].background_color,

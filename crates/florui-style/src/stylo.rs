@@ -22,9 +22,10 @@ use selectors::attr::{AttrSelectorOperation, NamespaceConstraint};
 use selectors::matching::{ElementSelectorFlags, MatchingContext, VisitedHandlingMode};
 use selectors::{Element as SelectorsElement, OpaqueElement};
 use servo_arc::{Arc, ArcBorrow};
+use style::animation::{AnimationSetKey, AnimationState};
 use style::context::{
-    QuirksMode, RegisteredSpeculativePainter, RegisteredSpeculativePainters, SharedStyleContext,
-    StyleContext, ThreadLocalStyleContext,
+    CascadeInputs, QuirksMode, RegisteredSpeculativePainter, RegisteredSpeculativePainters,
+    SharedStyleContext, StyleContext, ThreadLocalStyleContext,
 };
 use style::data::ElementData;
 use style::dom::{LayoutIterator, NodeInfo, OpaqueNode, TDocument, TElement, TNode, TShadowRoot};
@@ -34,10 +35,13 @@ use style::media_queries::{Device, MediaType};
 use style::properties::style_structs::Font as FontStruct;
 use style::properties::{ComputedValues, PropertyDeclarationBlock};
 use style::queries::values::PrefersColorScheme;
+use style::rule_tree::CascadeLevel;
 use style::selector_parser::{AttrValue, Lang, PseudoElement, SelectorImpl};
 use style::servo::media_queries::FontMetricsProvider;
 use style::shared_lock::{Locked, SharedRwLock, StylesheetGuards};
+use style::style_resolver::{PseudoElementResolution, StyleResolverForElement};
 use style::stylesheets::DocumentStyleSheet;
+use style::stylesheets::layer_rule::LayerOrder;
 use style::stylist::{CascadeData, RuleInclusion, Stylist};
 use style::traversal::{UndisplayedStyleCache, resolve_style};
 use style::traversal_flags::TraversalFlags;
@@ -48,6 +52,7 @@ use style::{Atom, LocalName};
 use stylo_atoms::Atom as WeakAtom;
 use stylo_dom::ElementState;
 
+use crate::animation::AnimationTimeline;
 use crate::cascade::{
     BorderSide as FlorBorderSide, BoxShadow as FlorBoxShadow, ComputedStyle, ContentAlignment,
     Display as FlorDisplay, Edges, FilterFunction as FlorFilterFunction, FlexDirection, FlexWrap,
@@ -70,6 +75,10 @@ struct NodeSlot {
     children: Vec<*const NodeSlot>,
     tag: &'static str,
     classes: Vec<String>,
+    /// This element's identity for animation purposes, stable across
+    /// separate [`compute`] calls unlike this ephemeral slot's own address
+    /// — see [`crate::animation`]'s module doc.
+    stable_id: usize,
     id_attr: Option<String>,
     /// Same value as `id_attr`, pre-interned — `TElement::id` needs this
     /// exact type back, and it's also what Stylo's selector map uses to
@@ -78,7 +87,6 @@ struct NodeSlot {
     /// `#id` rules silently never even considered a candidate.
     id_atom: Option<WeakAtom>,
     state: ElementState,
-    guard: SharedRwLock,
     data: AtomicRefCell<ElementData>,
     dirty_descendants: Cell<bool>,
     local_name: BorrowedLocalName,
@@ -105,7 +113,11 @@ impl StyloTree {
     /// roots, synthesizing a single container root when there is more
     /// than one (a `view!` `Fragment` can produce several) so Stylo
     /// always has exactly one document element to resolve from.
-    fn new(arena: &Arena, state: &InteractionState) -> (Self, NodeId) {
+    fn new(
+        arena: &Arena,
+        state: &InteractionState,
+        timeline: &mut AnimationTimeline,
+    ) -> (Self, NodeId) {
         let mut order = Vec::new();
         for &root in arena.roots() {
             Self::collect_order(arena, root, &mut order);
@@ -113,6 +125,7 @@ impl StyloTree {
 
         let mut index_of = HashMap::new();
         let mut slots = Vec::with_capacity(order.len());
+        let mut stable_ids: Vec<usize> = Vec::with_capacity(order.len());
         for (index, &id) in order.iter().enumerate() {
             index_of.insert(id, index);
             let mut node_state = ElementState::empty();
@@ -125,15 +138,24 @@ impl StyloTree {
             if state.is_active(id) {
                 node_state |= ElementState::ACTIVE;
             }
+            let parent_stable = arena
+                .parent(id)
+                .map(|parent_id| stable_ids[index_of[&parent_id]]);
+            let stable_id = timeline.stable_id(
+                parent_stable,
+                arena.tag(id),
+                Self::sibling_ordinal(arena, id),
+            );
+            stable_ids.push(stable_id);
             slots.push(NodeSlot {
                 parent: None,
                 children: Vec::new(),
                 tag: arena.tag(id),
                 classes: arena.classes(id).to_vec(),
+                stable_id,
                 id_attr: arena.id_attr(id).map(str::to_owned),
                 id_atom: arena.id_attr(id).map(WeakAtom::from),
                 state: node_state,
-                guard: SharedRwLock::new(),
                 data: AtomicRefCell::new(ElementData::default()),
                 dirty_descendants: Cell::new(false),
                 local_name: arena.tag(id).into(),
@@ -178,6 +200,24 @@ impl StyloTree {
             order.push(id);
             stack.extend(arena.children(id).iter().rev());
         }
+    }
+
+    /// How many earlier same-`tag` siblings `id` has — the tie breaker
+    /// [`AnimationTimeline::stable_id`] needs when a parent has several
+    /// same-tag children. Deliberately ignores class, so a class toggle
+    /// alone (the usual way a real transition even triggers) doesn't
+    /// reassign identity — see [`crate::animation`]'s own module doc.
+    fn sibling_ordinal(arena: &Arena, id: NodeId) -> usize {
+        let siblings: &[NodeId] = match arena.parent(id) {
+            Some(parent_id) => arena.children(parent_id),
+            None => arena.roots(),
+        };
+        let tag = arena.tag(id);
+        siblings
+            .iter()
+            .take_while(|&&sibling| sibling != id)
+            .filter(|&&sibling| arena.tag(sibling) == tag)
+            .count()
     }
 
     fn node(&self, id: NodeId) -> StyloNode<'_> {
@@ -244,7 +284,15 @@ impl<'a> TDocument for StyloNode<'a> {
     }
 
     fn shared_lock(&self) -> &SharedRwLock {
-        &self.0.guard
+        // Every stylesheet this crate parses is wrapped under the one
+        // process-wide lock `shared_lock()` returns (see its own doc) —
+        // Stylo's own real animation code (`servo/animation.rs`'s
+        // `IntermediateComputedKeyframe::resolve_style`) wraps a
+        // synthesized per-keyframe declaration block under whatever this
+        // returns and then reads it back through `context.guards`, which
+        // is built from that same singleton, so this has to agree with it
+        // rather than minting its own lock per node.
+        shared_lock()
     }
 }
 
@@ -325,7 +373,7 @@ impl<'a> TNode for StyloNode<'a> {
     }
 
     fn opaque(&self) -> OpaqueNode {
-        OpaqueNode(self.0 as *const NodeSlot as usize)
+        OpaqueNode(self.0.stable_id)
     }
 
     fn debug_id(self) -> usize {
@@ -630,27 +678,45 @@ impl<'a> TElement for StyloNode<'a> {
     }
 
     fn may_have_animations(&self) -> bool {
-        false
+        // No per-element context available here to check for real; see
+        // has_animations/has_css_animations/has_css_transitions for the
+        // real check. Only consulted as a cheap early-out elsewhere in
+        // Stylo (style sharing, an animation-declarations short circuit)
+        // that this bridge doesn't use, so a conservative `true` costs
+        // nothing but a skipped optimization.
+        true
     }
 
-    fn has_animations(&self, _context: &SharedStyleContext) -> bool {
-        false
+    fn has_animations(&self, context: &SharedStyleContext) -> bool {
+        let key = AnimationSetKey::new_for_non_pseudo(TNode::opaque(self));
+        context
+            .animations
+            .sets
+            .read()
+            .get(&key)
+            .is_some_and(|set| !set.animations.is_empty())
     }
 
     fn has_css_animations(
         &self,
-        _context: &SharedStyleContext,
+        context: &SharedStyleContext,
         _pseudo_element: Option<PseudoElement>,
     ) -> bool {
-        false
+        self.has_animations(context)
     }
 
     fn has_css_transitions(
         &self,
-        _context: &SharedStyleContext,
+        context: &SharedStyleContext,
         _pseudo_element: Option<PseudoElement>,
     ) -> bool {
-        false
+        let key = AnimationSetKey::new_for_non_pseudo(TNode::opaque(self));
+        context
+            .animations
+            .sets
+            .read()
+            .get(&key)
+            .is_some_and(|set| !set.transitions.is_empty())
     }
 
     fn shadow_root(&self) -> Option<<Self::ConcreteNode as TNode>::ConcreteShadowRoot> {
@@ -764,15 +830,18 @@ fn device(viewport: FlorViewport) -> Device {
 /// Computes real Stylo styles for every node in `arena`, driving Stylo's
 /// own selector matching, cascade, and inheritance via [`resolve_style`]
 /// — this crate reimplements none of them. `viewport` is what `@media`'s
-/// own size features resolve against.
+/// own size features resolve against. `timeline` carries `transition`/
+/// `@keyframes` state across calls — see [`crate::animation`]'s module
+/// doc.
 pub(crate) fn compute(
     arena: &Arena,
     rules: &[Rule],
     state: &InteractionState,
     viewport: FlorViewport,
+    timeline: &mut AnimationTimeline,
 ) -> HashMap<NodeId, ComputedStyle> {
     style::thread_state::enter(style::thread_state::ThreadState::LAYOUT);
-    let result = compute_in_layout_state(arena, rules, state, viewport);
+    let result = compute_in_layout_state(arena, rules, state, viewport, timeline);
     style::thread_state::exit(style::thread_state::ThreadState::LAYOUT);
     result
 }
@@ -782,13 +851,14 @@ fn compute_in_layout_state(
     rules: &[Rule],
     state: &InteractionState,
     viewport: FlorViewport,
+    timeline: &mut AnimationTimeline,
 ) -> HashMap<NodeId, ComputedStyle> {
     let mut result = HashMap::new();
     if arena.roots().is_empty() {
         return result;
     }
 
-    let (tree, _primary_root) = StyloTree::new(arena, state);
+    let (tree, _primary_root) = StyloTree::new(arena, state, timeline);
 
     let mut stylist = Stylist::new(device(viewport), QuirksMode::NoQuirks);
     let lock = shared_lock();
@@ -816,7 +886,12 @@ fn compute_in_layout_state(
     stylist.flush::<StyloNode<'_>>(&guards, None, None);
 
     let snapshot_map = style::servo::selector_parser::SnapshotMap::new();
-    let animations = Default::default();
+    // Cloning a `DocumentAnimationSet` clones the `Arc<RwLock<_>>` handle,
+    // not the map it wraps — `timeline` and `shared.animations` back onto
+    // the exact same state for this call, and whatever this call leaves in
+    // it (a started/updated/finished transition) is what `timeline` still
+    // holds once this function returns.
+    let animations = timeline.sets.clone();
     let shared = SharedStyleContext {
         traversal_flags: TraversalFlags::empty(),
         stylist: &stylist,
@@ -824,7 +899,7 @@ fn compute_in_layout_state(
         guards,
         visited_styles_enabled: false,
         animations,
-        current_time_for_animations: 0.0,
+        current_time_for_animations: timeline.now,
         snapshot_map: &snapshot_map,
         registered_speculative_painters: &NoPainters,
     };
@@ -852,10 +927,271 @@ fn compute_in_layout_state(
             None,
             Some(&mut undisplayed_style_cache),
         );
-        result.insert(id, to_computed_style(styles.primary()));
+
+        // `resolve_style` (Stylo's point-query API this bridge drives
+        // instead of the normal parallel traversal) never itself starts or
+        // samples a transition/animation — real Servo does that in a
+        // separate step the traversal driver runs after cascading
+        // (`servo/matching.rs`'s own `process_animations`, private to
+        // Stylo), so this replicates that step by hand for the one node
+        // `resolve_style` just cascaded.
+        let stable_id = target.0.stable_id;
+        let primary = styles.primary().clone();
+        // Resolving one `@keyframes` step's own declarations needs to
+        // cascade them against this element's real parent style for
+        // inheritance (`StyleResolverForElement`'s `with_default_parent_styles`),
+        // which reads it from here rather than from `undisplayed_style_cache`
+        // (this bridge's own point-query cache `resolve_style` already
+        // populated, invisible to Stylo's own internals) — unpopulated,
+        // that lookup panics rather than returning `None`, since real
+        // Servo's traversal always commits a style here before any
+        // per-element animation processing runs.
+        if let Some(mut data) = target.mutate_data() {
+            data.styles.primary = Some(primary.clone());
+        }
+        let old_values = timeline.previous_style(stable_id);
+        let has_active_animation =
+            process_animations_for_style(target, &mut context, &old_values, &primary);
+        let final_values = if has_active_animation {
+            splice_animation_declarations(target, &mut context, &primary, timeline.now)
+        } else {
+            primary.clone()
+        };
+
+        result.insert(id, to_computed_style(&final_values));
+        // `primary` (the raw cascade result), not `final_values` (already
+        // spliced with any in-progress transition/animation) -- Stylo's own
+        // `update_transitions_for_new_style` compares next frame's `primary`
+        // against *this* value to decide whether a transitionable property
+        // actually changed. Feeding it back the already-animated midpoint
+        // instead makes every still-converging frame look like a fresh
+        // change, since the animated value never quite equals the settled
+        // target -- restarting the transition from scratch every frame
+        // forever instead of continuing the one already running, and
+        // leaving `animation_set.transitions` growing without bound (each
+        // fresh start is `AnimationState::Running`, never `Finished`, so
+        // `process_animations_for_style`'s own `retain` never prunes it).
+        timeline.set_current_style(stable_id, primary);
     }
+    timeline.sweep();
 
     result
+}
+
+/// Starts, updates, and samples `target`'s transitions/`@keyframes`
+/// animations against its previous and new cascaded style — a by-hand
+/// reimplementation of `servo/matching.rs`'s own
+/// `process_animations_for_style` (private to Stylo, part of a
+/// crate-private trait `resolve_style`'s point-query API doesn't drive).
+/// Returns whether `target` has anything active to sample at all —
+/// unrelated to whether this particular call started, changed, or ended
+/// one: an already-running transition/animation needs its value re-spliced
+/// (see [`splice_animation_declarations`]) on every call it's still
+/// active for, not only the call it started or last changed on.
+fn process_animations_for_style<'n>(
+    target: StyloNode<'n>,
+    context: &mut StyleContext<'_, StyloNode<'n>>,
+    old_values: &Option<Arc<ComputedValues>>,
+    new_values: &Arc<ComputedValues>,
+) -> bool {
+    let needs_animations_update =
+        needs_animations_update(context, target, old_values.as_deref(), new_values);
+    let might_need_transitions_update =
+        might_need_transitions_update(context, target, old_values.as_deref(), new_values);
+
+    let after_change_style = if might_need_transitions_update {
+        StyleResolverForElement::new(
+            target,
+            context,
+            RuleInclusion::All,
+            PseudoElementResolution::IfApplicable,
+        )
+        .after_change_style(new_values)
+    } else {
+        None
+    };
+
+    let key = AnimationSetKey::new_for_non_pseudo(TNode::opaque(&target));
+    let shared = context.shared;
+    let mut animation_set = shared
+        .animations
+        .sets
+        .write()
+        .remove(&key)
+        .unwrap_or_default();
+
+    if needs_animations_update {
+        let mut resolver = StyleResolverForElement::new(
+            target,
+            context,
+            RuleInclusion::All,
+            PseudoElementResolution::IfApplicable,
+        );
+        animation_set.update_animations_for_new_style::<StyloNode<'_>>(
+            target,
+            shared,
+            new_values,
+            &mut resolver,
+        );
+    }
+
+    animation_set.update_transitions_for_new_style(
+        might_need_transitions_update,
+        shared,
+        old_values.as_ref(),
+        after_change_style.as_ref().unwrap_or(new_values),
+    );
+
+    animation_set
+        .transitions
+        .retain(|transition| transition.state != AnimationState::Finished);
+    animation_set
+        .animations
+        .retain(|animation| animation.state != AnimationState::Finished);
+    // `update_transitions_for_new_style`/`update_animations_for_new_style`
+    // above cancel plenty of entries (a reversed transition, a property
+    // dropped from `transition-property`, a `@keyframes` no longer
+    // referenced) by setting `AnimationState::Canceled`, not by removing
+    // them -- real Servo's own traversal driver sweeps those in a
+    // separate `update_animations` task this bridge has no equivalent of,
+    // so without this the two `retain`s above (which only ever look for
+    // `Finished`) never see a `Canceled` entry leave, and it stays in
+    // `animation_set` forever, one more former transition every frame it
+    // keeps getting re-canceled.
+    animation_set.clear_canceled_animations();
+
+    // `dirty` only means "the active set itself changed shape this call"
+    // (one started, finished, or got canceled) — real per-frame sampling
+    // of an already-running transition/animation needs to happen on
+    // every call it's still active for, not just the call it started or
+    // changed on, so the splice is driven by non-emptiness here, not
+    // `dirty`.
+    let needs_splice = !animation_set.is_empty();
+    if needs_splice {
+        animation_set.dirty = false;
+        shared.animations.sets.write().insert(key, animation_set);
+    }
+    needs_splice
+}
+
+/// Reimplementation of `servo/matching.rs`'s own (crate-private)
+/// `needs_animations_update` — whether `@keyframes` animations need
+/// starting, canceling, or restarting for this style change. Drops its
+/// real counterpart's `TraversalFlags::ForCSSRuleChanges`/pseudo-element/
+/// `writing-mode` branches: this bridge never sets that flag, never
+/// resolves a pseudo-element, and this crate has no `writing-mode`
+/// support to begin with, so each always takes its simplest real case.
+fn needs_animations_update<'n>(
+    context: &StyleContext<'_, StyloNode<'n>>,
+    target: StyloNode<'n>,
+    old_style: Option<&ComputedValues>,
+    new_style: &ComputedValues,
+) -> bool {
+    let new_specifies_animations = new_style.get_ui().specifies_animations();
+    let has_animations = target.has_animations(context.shared);
+    if !new_specifies_animations && !has_animations {
+        return false;
+    }
+    let Some(old_style) = old_style else {
+        return new_specifies_animations;
+    };
+    if !old_style.get_ui().animations_equals(new_style.get_ui()) {
+        return true;
+    }
+    let old_display = old_style.get_box().display;
+    let new_display = new_style.get_box().display;
+    if old_display == Display::None && new_display != Display::None {
+        return new_specifies_animations;
+    }
+    if old_display != Display::None && new_display == Display::None {
+        return has_animations;
+    }
+    false
+}
+
+/// Reimplementation of `servo/matching.rs`'s own (crate-private)
+/// `might_need_transitions_update` — see [`needs_animations_update`]'s own
+/// doc for why this bridge's version can drop its real counterpart's
+/// pseudo-element handling.
+fn might_need_transitions_update<'n>(
+    context: &StyleContext<'_, StyloNode<'n>>,
+    target: StyloNode<'n>,
+    old_style: Option<&ComputedValues>,
+    new_style: &ComputedValues,
+) -> bool {
+    let Some(old_style) = old_style else {
+        return false;
+    };
+    if !target.has_css_transitions(context.shared, None)
+        && !new_style.get_ui().specifies_transitions()
+    {
+        return false;
+    }
+    old_style.get_box().display != Display::None
+}
+
+/// Bakes whatever `transition`/`@keyframes` declarations are active right
+/// now for `target` into its computed style, by re-cascading with them
+/// spliced into the real CSS cascade at their own real cascade level
+/// (above author styles, below `!important` — the same
+/// `CascadeLevel::Transitions`/`::Animations` real CSS itself uses). This
+/// is what Servo's own traversal driver does after
+/// `process_animations_for_style` reports a change (`servo/matching.rs`'s
+/// own `process_animations`); that method isn't reachable from here either
+/// (it wants a full traversal's intermediate `ResolvedElementStyles`, not
+/// `resolve_style`'s already-finished `ElementStyles`), so this
+/// reimplements just the splice-and-recascade half by hand too.
+fn splice_animation_declarations<'n>(
+    target: StyloNode<'n>,
+    context: &mut StyleContext<'_, StyloNode<'n>>,
+    primary: &Arc<ComputedValues>,
+    now: f64,
+) -> Arc<ComputedValues> {
+    let key = AnimationSetKey::new_for_non_pseudo(TNode::opaque(&target));
+    let declarations = context
+        .shared
+        .animations
+        .get_all_declarations(&key, now, shared_lock());
+
+    let mut rule_node = primary.rules().clone();
+    let mut important_rules_changed = false;
+    if let Some(new_node) = context.shared.stylist.rule_tree().update_rule_at_level(
+        CascadeLevel::Transitions,
+        LayerOrder::root(),
+        declarations.transitions.as_ref().map(|d| d.borrow_arc()),
+        &rule_node,
+        &context.shared.guards,
+        &mut important_rules_changed,
+    ) {
+        rule_node = new_node;
+    }
+    if let Some(new_node) = context.shared.stylist.rule_tree().update_rule_at_level(
+        CascadeLevel::Animations,
+        LayerOrder::root(),
+        declarations.animations.as_ref().map(|d| d.borrow_arc()),
+        &rule_node,
+        &context.shared.guards,
+        &mut important_rules_changed,
+    ) {
+        rule_node = new_node;
+    }
+
+    if rule_node == *primary.rules() {
+        return primary.clone();
+    }
+
+    let inputs = CascadeInputs {
+        rules: Some(rule_node),
+        ..CascadeInputs::new_from_style(primary)
+    };
+    StyleResolverForElement::new(
+        target,
+        context,
+        RuleInclusion::All,
+        PseudoElementResolution::IfApplicable,
+    )
+    .cascade_style_and_visited_with_default_parents(inputs)
+    .0
 }
 
 fn to_computed_style(values: &ComputedValues) -> ComputedStyle {

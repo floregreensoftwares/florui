@@ -157,6 +157,7 @@ pub fn render_fixture(
             width: width_css_px as f32,
             height: height_css_px as f32,
         },
+        &mut florui_style::AnimationTimeline::default(),
     );
 
     let available = Size {

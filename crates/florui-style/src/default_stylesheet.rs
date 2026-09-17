@@ -111,6 +111,7 @@ mod tests {
             &rules,
             &InteractionState::new(),
             Viewport::default(),
+            &mut crate::AnimationTimeline::default(),
         );
         computed[&arena.roots()[0]].clone()
     }
@@ -155,6 +156,7 @@ mod tests {
             &rules,
             &InteractionState::new(),
             Viewport::default(),
+            &mut crate::AnimationTimeline::default(),
         );
 
         assert_eq!(computed[&span].display, Display::Inline);
@@ -177,6 +179,7 @@ mod tests {
             &rules,
             &InteractionState::new(),
             Viewport::default(),
+            &mut crate::AnimationTimeline::default(),
         );
 
         let border = computed[&button].border;
@@ -248,6 +251,7 @@ mod tests {
             &rules,
             &InteractionState::new(),
             Viewport::default(),
+            &mut crate::AnimationTimeline::default(),
         );
         let style = &computed[&arena.roots()[0]];
         assert_close(style.font_size, 40.0, "author-overridden font-size");

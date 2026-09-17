@@ -11,7 +11,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use florui::Element;
-use florui_style::{InteractionState, Viewport, compute, parse_stylesheet};
+use florui_style::{AnimationTimeline, InteractionState, Viewport, compute, parse_stylesheet};
 
 fn deep_tree(depth: usize) -> Element {
     let mut node = Element::node("div", vec![("class".into(), "leaf".into())], Vec::new());
@@ -65,6 +65,7 @@ fn bench_deep_tree(c: &mut Criterion) {
                     &rules,
                     &InteractionState::new(),
                     Viewport::default(),
+                    &mut AnimationTimeline::default(),
                 )
             });
         });
@@ -94,6 +95,7 @@ fn bench_deep_tree_with_matching(c: &mut Criterion) {
                     &rules,
                     &InteractionState::new(),
                     Viewport::default(),
+                    &mut AnimationTimeline::default(),
                 )
             });
         });
@@ -116,6 +118,7 @@ fn bench_wide_tree(c: &mut Criterion) {
                     &rules,
                     &InteractionState::new(),
                     Viewport::default(),
+                    &mut AnimationTimeline::default(),
                 )
             });
         });
