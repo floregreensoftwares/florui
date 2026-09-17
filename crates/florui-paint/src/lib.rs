@@ -4613,6 +4613,7 @@ mod tests {
             &rules,
             &InteractionState::new(),
             florui_style::Viewport::default(),
+            &mut florui_style::AnimationTimeline::default(),
         );
         let layouts = HashMap::new();
         let mut font = Font::load_embedded();
@@ -4714,6 +4715,7 @@ mod tests {
             &rules,
             &InteractionState::new(),
             florui_style::Viewport::default(),
+            &mut florui_style::AnimationTimeline::default(),
         );
         let node = arena.roots()[0];
         let mut layouts = HashMap::new();
@@ -4764,6 +4766,7 @@ mod tests {
             &rules,
             &InteractionState::new(),
             florui_style::Viewport::default(),
+            &mut florui_style::AnimationTimeline::default(),
         );
         let outer = arena.roots()[0];
         let inner = arena.children(outer)[0];
@@ -4836,6 +4839,7 @@ mod tests {
             &rules,
             &InteractionState::new(),
             florui_style::Viewport::default(),
+            &mut florui_style::AnimationTimeline::default(),
         );
         let frame = arena.roots()[0];
         let content = arena.children(frame)[0];
@@ -4904,6 +4908,7 @@ mod tests {
             &rules,
             &InteractionState::new(),
             florui_style::Viewport::default(),
+            &mut florui_style::AnimationTimeline::default(),
         );
         let group = arena.roots()[0];
         let back = arena.children(group)[0];
