@@ -1325,7 +1325,9 @@ version = "0.1.0"
 dependencies = [
  "florui",
  "florui-build",
+ "florui-config",
  "florui-devtools",
+ "florui-icon",
  "florui-layout",
  "florui-paint",
  "florui-platform",

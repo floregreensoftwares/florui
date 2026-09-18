@@ -1,6 +1,10 @@
 //! Discovers this crate's `stylesheet!` declarations at build time and
 //! writes them, in deterministic cascade order, to a generated module the
 //! binary includes — see `florui_build`'s own docs for the general recipe.
+//! Also embeds the `two_windows` example's second-window icon (a literal
+//! asset, independent of `florui.config.toml`) the same way, so the
+//! shipped binary needs neither `resvg` nor the source SVG at runtime —
+//! see `florui_icon::embed`'s own doc.
 
 fn main() {
     let package_root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -28,4 +32,17 @@ fn main() {
     let manifest = florui_build::generate_manifest(&result.stylesheets);
     std::fs::write(out_dir.join("florui_stylesheets.rs"), manifest)
         .expect("writing the generated manifest should not fail");
+
+    let second_window_icon_svg = package_root.join("assets/icons/second-window.svg");
+    println!(
+        "cargo:rerun-if-changed={}",
+        second_window_icon_svg.display()
+    );
+    florui_icon::embed::embed_icon_from_file(
+        &out_dir,
+        "second_window_icon",
+        &second_window_icon_svg,
+        florui_icon::DEFAULT_ICON_SIZE,
+    )
+    .expect("embedding the two_windows example's second-window icon should not fail");
 }

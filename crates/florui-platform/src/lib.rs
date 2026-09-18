@@ -20,8 +20,8 @@ mod desktop;
 
 #[cfg(feature = "desktop")]
 pub use desktop::{
-    RunError, WindowOptions, run, run_with_css_reload, run_with_css_reload_and_options,
-    run_with_options,
+    RunError, WindowOptions, WindowSpec, run, run_windows, run_with_css_reload,
+    run_with_css_reload_and_options, run_with_options,
 };
 
 #[cfg(feature = "desktop")]
