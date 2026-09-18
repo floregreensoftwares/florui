@@ -27,7 +27,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use florui_reactive::use_context;
-use winit::window::Window;
+use winit::window::{BadIcon, Icon, Window};
 
 /// See this module's own doc, "Marking a draggable region."
 pub const WINDOW_DRAG_REGION_ID: &str = "florui-window-drag-region";
@@ -73,6 +73,17 @@ impl ScreenRect {
     pub(crate) fn contains(&self, x: i32, y: i32) -> bool {
         x >= self.left && x < self.right && y >= self.top && y < self.bottom
     }
+}
+
+/// Converts an already-decoded [`florui_icon::RawIcon`] into a real
+/// `winit` icon -- shared by [`WindowControls::set_icon`] and
+/// [`crate::desktop`]'s own creation-time icon application, so the
+/// straight-RGBA-to-`Icon` conversion exists in exactly one place. Errors
+/// straight through, unwrapped, matching [`crate::desktop::RunError`]'s
+/// own existing convention of exposing raw `winit`/`softbuffer`/`notify`
+/// errors rather than wrapping them in a florui-local type.
+pub(crate) fn to_winit_icon(icon: &florui_icon::RawIcon) -> Result<Icon, BadIcon> {
+    Icon::from_rgba(icon.rgba.clone(), icon.width, icon.height)
 }
 
 /// Split out of [`WindowControls`] so it's testable without a real
@@ -182,6 +193,20 @@ impl WindowControls {
         }
     }
 
+    /// Sets this already-open window's icon at runtime -- the "update"
+    /// half of florui-config's own "window creation/update APIs" for
+    /// per-window icon overrides (creation-time icon application lives in
+    /// [`crate::desktop`], via the same [`to_winit_icon`]). No-op on
+    /// macOS ("macOS doesn't have window icons", per `winit`'s own
+    /// `Window::set_window_icon` doc) -- not gated here, since a silent
+    /// platform no-op is exactly what the underlying `winit` call itself
+    /// already does.
+    pub fn set_icon(&self, icon: &florui_icon::RawIcon) -> Result<(), BadIcon> {
+        let winit_icon = to_winit_icon(icon)?;
+        self.window.set_window_icon(Some(winit_icon));
+        Ok(())
+    }
+
     /// Same shutdown path as the OS's own close button, including
     /// whatever [`Self::set_close_guard`] currently allows or vetoes.
     pub fn close(&self) {
@@ -228,6 +253,35 @@ pub fn use_window_controls() -> Option<Rc<WindowControls>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn raw_icon(rgba: Vec<u8>, width: u32, height: u32) -> florui_icon::RawIcon {
+        florui_icon::RawIcon {
+            rgba,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn to_winit_icon_converts_a_well_formed_raw_icon() {
+        let icon = raw_icon(vec![0; (2 * 2 * 4) as usize], 2, 2);
+        assert!(to_winit_icon(&icon).is_ok());
+    }
+
+    #[test]
+    fn to_winit_icon_reports_a_byte_count_not_divisible_by_4() {
+        let icon = raw_icon(vec![0; 5], 1, 1);
+        let err = to_winit_icon(&icon).unwrap_err();
+        assert!(matches!(err, BadIcon::ByteCountNotDivisibleBy4 { .. }));
+    }
+
+    #[test]
+    fn to_winit_icon_reports_a_dimension_pixel_count_mismatch() {
+        // 4 pixels' worth of bytes, but dimensions claim only 1 pixel.
+        let icon = raw_icon(vec![0; 4 * 4], 1, 1);
+        let err = to_winit_icon(&icon).unwrap_err();
+        assert!(matches!(err, BadIcon::DimensionsVsPixelCount { .. }));
+    }
 
     #[test]
     fn confirms_by_default_with_no_guard_registered() {
