@@ -90,15 +90,26 @@ enum UserEvent {
 }
 
 /// What [`run_with_options`]/[`run_with_css_reload_and_options`] ask for
-/// about the real window's own chrome — currently just `decorations`, but
-/// its own struct (not a bare [`DecorationMode`] parameter) so a later
-/// addition doesn't need a new `run_with_*_and_*` function of its own.
-/// [`run`]/[`run_with_css_reload`] are thin wrappers over these two with
-/// [`WindowOptions::default`] (system decorations), so every existing
-/// caller keeps working unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// about the real window's own chrome — its own struct (not bare
+/// parameters) so a later addition doesn't need a new `run_with_*_and_*`
+/// function of its own. [`run`]/[`run_with_css_reload`] are thin wrappers
+/// over these two with [`WindowOptions::default`] (system decorations, no
+/// explicit size, opaque), so every existing caller keeps working
+/// unchanged.
+///
+/// `size`/`min_size` are logical units (see this module's own HiDPI note),
+/// `None` meaning "let the platform choose" exactly as today's behavior
+/// with no explicit size request. `transparent` is carried here for
+/// fidelity with `florui-config`'s own `window.transparent` field, but has
+/// no effect on real window creation yet — see [`gpu::transparent_capable_attributes`]'s
+/// own doc: a transparent-capable surface is already requested
+/// unconditionally for every window, regardless of this option.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct WindowOptions {
     pub decorations: DecorationMode,
+    pub size: Option<(f64, f64)>,
+    pub min_size: Option<(f64, f64)>,
+    pub transparent: bool,
 }
 
 /// Opens a window titled `title` and keeps it live over `root` — called
@@ -695,11 +706,16 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
         // doc), and `crate::gpu::GpuPresenter::try_new` needs the window
         // to have already been created with these attributes to have any
         // chance at real `TransparentSurface` compositing.
-        let attrs = gpu::transparent_capable_attributes(
-            Window::default_attributes()
-                .with_title(self.title.clone())
-                .with_decorations(matches!(self.options.decorations, DecorationMode::System)),
-        );
+        let mut attrs = Window::default_attributes()
+            .with_title(self.title.clone())
+            .with_decorations(matches!(self.options.decorations, DecorationMode::System));
+        if let Some((width, height)) = self.options.size {
+            attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(width, height));
+        }
+        if let Some((width, height)) = self.options.min_size {
+            attrs = attrs.with_min_inner_size(winit::dpi::LogicalSize::new(width, height));
+        }
+        let attrs = gpu::transparent_capable_attributes(attrs);
         let window = match event_loop.create_window(attrs) {
             Ok(window) => Arc::new(window),
             Err(error) => return self.fail(event_loop, RunError::WindowCreation(error)),

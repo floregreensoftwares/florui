@@ -24,6 +24,7 @@ fn main() {
         Rgba::opaque(0x1e, 0x1e, 0x22),
         WindowOptions {
             decorations: DecorationMode::Custom,
+            ..WindowOptions::default()
         },
         title_bar_demo,
     )
