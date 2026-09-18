@@ -1244,6 +1244,7 @@ name = "florui-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "florui-config",
  "florui-conformance",
  "florui-devtools",
  "florui-fmt",
