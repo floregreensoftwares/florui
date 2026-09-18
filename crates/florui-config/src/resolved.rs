@@ -1,0 +1,101 @@
+//! The public, fully-resolved shape `resolve()` produces: every field
+//! populated (no `Option` where a default exists), plus where each value
+//! actually came from.
+
+use crate::location::SourceLocation;
+use std::path::PathBuf;
+
+/// Which native/build target `resolve()` should check assets against —
+/// asset-existence checks are target-scoped ("resolve assets... for the
+/// selected target"), unlike schema validation, which always runs in full
+/// regardless of target. `None` (schema-only mode) skips asset checks
+/// entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    Native,
+    Web,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedConfig {
+    pub app: AppConfig,
+    pub window: WindowConfig,
+    pub bundle: BundleConfig,
+    pub dev: DevConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct AppConfig {
+    pub identifier: Option<String>,
+    /// The Cargo package name when `app.name` is unset.
+    pub name: String,
+    pub description: Option<String>,
+    /// The Cargo-resolved concrete version when `app.version` is unset or
+    /// requests `{ workspace = true }`.
+    pub version: String,
+    pub icons: IconsConfig,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct IconsConfig {
+    /// Resolved relative to `florui.config.toml`'s own directory, never
+    /// the process's current directory.
+    pub source: Option<PathBuf>,
+    pub windows: Option<PathBuf>,
+    pub macos: Option<PathBuf>,
+    pub linux: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WindowConfig {
+    /// `app.name` when `window.title` is unset.
+    pub title: String,
+    /// `None` means "no opinion" -- this crate does not invent a
+    /// framework-wide default window size.
+    pub width: Option<f64>,
+    pub height: Option<f64>,
+    pub min_width: Option<f64>,
+    pub min_height: Option<f64>,
+    pub decorations: DecorationsSetting,
+    pub transparent: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecorationsSetting {
+    System,
+    Custom,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BundleConfig {
+    pub publisher: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DevConfig {
+    /// The merged legacy-or-new dev example -- see `resolve.rs` for the
+    /// duplicate-definition check that runs before this is populated.
+    pub example: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Provenance {
+    /// From `florui.config.toml` itself; carries an exact location for the
+    /// subset of fields that get post-parse semantic validation (window
+    /// sizes, decorations, app.version, icon paths, dev.example) and `None`
+    /// for plain fields that are validated for free by `toml`'s own type
+    /// checking.
+    ConfigFile(Option<SourceLocation>),
+    /// Resolved from `cargo metadata` (e.g. `app.version` defaulting to the
+    /// package's own Cargo-resolved version).
+    CargoManifest,
+    /// From `[package.metadata.florui.dev]`.
+    LegacyMetadata,
+    BuiltinDefault,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldProvenance {
+    pub field: &'static str,
+    pub provenance: Provenance,
+}
