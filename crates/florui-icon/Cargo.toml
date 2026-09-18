@@ -1,0 +1,24 @@
+[package]
+license.workspace = true
+name = "florui-icon"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+default = ["decode"]
+# Decoding pulls in resvg/image; a consumer that only needs the plain
+# RawIcon type (e.g. a build-time-embedded icon's runtime side) shouldn't
+# have to link either.
+decode = ["dep:resvg", "dep:image"]
+
+[dependencies]
+resvg = { version = "0.48.1", default-features = false, optional = true }
+image = { version = "0.25.10", default-features = false, features = [
+    "png",
+], optional = true }
+
+[dev-dependencies]
+syn = { version = "2", features = ["full"] }
+tempfile = "3"
