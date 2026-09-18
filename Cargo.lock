@@ -1402,6 +1402,7 @@ name = "florui-platform"
 version = "0.1.0"
 dependencies = [
  "florui",
+ "florui-icon",
  "florui-layout",
  "florui-paint",
  "florui-reactive",

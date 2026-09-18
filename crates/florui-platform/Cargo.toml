@@ -15,7 +15,7 @@ default = ["desktop"]
 # driving UiRuntime on its own shouldn't have to pull them in.
 # `dep:windows-sys` is a no-op outside the Windows-only dependency table
 # below — every other target simply never has it in its resolved graph.
-desktop = ["dep:notify", "dep:softbuffer", "dep:winit", "dep:wgpu", "dep:pollster", "dep:windows-sys"]
+desktop = ["dep:notify", "dep:softbuffer", "dep:winit", "dep:wgpu", "dep:pollster", "dep:windows-sys", "dep:florui-icon"]
 
 [dependencies]
 florui = { path = "../florui" }
@@ -24,6 +24,10 @@ florui-paint = { path = "../florui-paint" }
 florui-reactive = { path = "../florui-reactive" }
 florui-style = { path = "../florui-style" }
 florui-text = { path = "../florui-text" }
+# Only the plain `RawIcon` type -- decoding an actual SVG/PNG is the
+# caller's own concern (see `florui_icon`'s own `decode` feature), so its
+# `resvg`/`image` dependencies never enter this crate's graph.
+florui-icon = { path = "../florui-icon", optional = true, default-features = false }
 notify = { version = "8.2.0", optional = true }
 softbuffer = { version = "0.4.8", optional = true }
 taffy = "0.14"
