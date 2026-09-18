@@ -5,9 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
-# Read by `florui dev` (see florui-cli's ResolvedProject) to know which
-# example to build and run when invoked from anywhere inside this package
-# with no --example override.
+# Read by `florui dev` (see florui-config's CargoProjectFacts) to know
+# which example to build and run when invoked from anywhere inside this
+# package with no --example override.
 [package.metadata.florui.dev]
 example = "counter"
 
@@ -29,6 +29,8 @@ florui-layout = { path = "../../crates/florui-layout" }
 florui-paint = { path = "../../crates/florui-paint" }
 florui-platform = { path = "../../crates/florui-platform" }
 florui-devtools = { path = "../../crates/florui-devtools" }
+florui-config = { path = "../../crates/florui-config" }
+florui-icon = { path = "../../crates/florui-icon" }
 taffy = "0.14"
 winit = "0.30.13"
 softbuffer = "0.4.8"
@@ -36,3 +38,4 @@ notify = "8.2.0"
 
 [build-dependencies]
 florui-build = { path = "../../crates/florui-build" }
+florui-icon = { path = "../../crates/florui-icon" }

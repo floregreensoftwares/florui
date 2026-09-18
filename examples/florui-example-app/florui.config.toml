@@ -1,0 +1,7 @@
+schema_version = 1
+
+[app]
+name = "florui-example-app"
+
+[app.icons]
+source = "assets/icons/app-icon.svg"
