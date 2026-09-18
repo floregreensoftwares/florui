@@ -111,13 +111,17 @@ enum UserEvent {
 /// fidelity with `florui-config`'s own `window.transparent` field, but has
 /// no effect on real window creation yet — see [`gpu::transparent_capable_attributes`]'s
 /// own doc: a transparent-capable surface is already requested
-/// unconditionally for every window, regardless of this option.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+/// unconditionally for every window, regardless of this option. `icon` is
+/// the creation-time half of per-window icons — see
+/// [`crate::WindowControls::set_icon`] for updating an already-open
+/// window's icon instead.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct WindowOptions {
     pub decorations: DecorationMode,
     pub size: Option<(f64, f64)>,
     pub min_size: Option<(f64, f64)>,
     pub transparent: bool,
+    pub icon: Option<florui_icon::RawIcon>,
 }
 
 /// Opens a window titled `title` and keeps it live over `root` — called
@@ -723,6 +727,18 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
             }
             if let Some((width, height)) = spec.options.min_size {
                 attrs = attrs.with_min_inner_size(winit::dpi::LogicalSize::new(width, height));
+            }
+            // A malformed icon doesn't take the window down with it --
+            // logged and skipped, matching the CSS-reload-failure
+            // precedent ("report it, keep what already works") rather
+            // than window/surface-creation's own fatal-batch precedent.
+            if let Some(icon) = &spec.options.icon {
+                match crate::window_controls::to_winit_icon(icon) {
+                    Ok(winit_icon) => attrs = attrs.with_window_icon(Some(winit_icon)),
+                    Err(error) => {
+                        eprintln!("florui-platform: window icon could not be applied: {error}");
+                    }
+                }
             }
             let attrs = gpu::transparent_capable_attributes(attrs);
             let window = match event_loop.create_window(attrs) {
