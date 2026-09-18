@@ -20,7 +20,7 @@
 
 use std::env;
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command as ChildCommand, ExitCode, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -67,6 +67,7 @@ impl Status {
     }
 }
 
+#[derive(Debug)]
 struct Check {
     id: &'static str,
     category: &'static str,
@@ -97,6 +98,7 @@ impl Check {
 
 pub struct Options {
     pub target: String,
+    pub package: Option<String>,
     pub graphics: bool,
     pub presentation: bool,
     pub distribution: bool,
@@ -110,7 +112,7 @@ pub fn run(options: Options) -> ExitCode {
     let mut checks = Vec::new();
 
     checks.extend(environment_checks());
-    checks.extend(project_checks());
+    checks.extend(project_checks(options.package.as_deref(), &options.target));
 
     match options.target.as_str() {
         "native" => {
@@ -274,103 +276,67 @@ fn tool_version_check(id: &'static str, program: &str, required: bool) -> Check 
     }
 }
 
-/// Real `cargo metadata`-backed project facts — deliberately separate
-/// from `main.rs`'s own `resolve_project`, which hard-errors outside a
-/// resolvable project; a doctor run outside one should still report
-/// environment checks and mark project checks not applicable, not fail
-/// outright.
-#[derive(Debug, PartialEq)]
-struct ProjectFacts {
-    workspace_root: PathBuf,
-    manifest_path: PathBuf,
-    declared_example: Option<String>,
-    example_targets: Vec<String>,
-}
-
-fn resolve_project_facts() -> Option<ProjectFacts> {
-    // No `--no-deps`: that flag leaves `resolve` (and so `resolve.root`,
-    // the field this function actually needs) entirely null. Reading an
-    // existing `Cargo.lock` this way is still offline and never writes
-    // anything -- `cargo metadata` alone never modifies the lockfile.
-    let output = ChildCommand::new("cargo")
-        .args(["metadata", "--format-version", "1"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+/// Resolves the current project via `florui_config` (the one resolver
+/// shared with `florui dev`, replacing what used to be two independent
+/// `cargo metadata` parsers here and in `main.rs`) and turns both the
+/// Cargo-level facts and the `florui.config.toml` resolution into doctor
+/// checks. Outside a resolvable project, returns a single
+/// `NotApplicable` check rather than failing outright -- a doctor run
+/// should still report environment checks in that case.
+fn project_checks(package: Option<&str>, target: &str) -> Vec<Check> {
+    match env::current_dir() {
+        Ok(cwd) => project_checks_at(&cwd, package, target),
+        Err(error) => vec![check_unknown(
+            "project.resolved",
+            format!("could not determine the current directory: {error}"),
+        )],
     }
-    let metadata: Value = serde_json::from_slice(&output.stdout).ok()?;
-    parse_project_facts(&metadata)
 }
 
-/// The pure, JSON-in half of [`resolve_project_facts`] — separated out so
-/// it can be tested against a hand-built payload without actually
-/// shelling out to cargo, mirroring `main.rs`'s own
-/// `resolve_project`/`parse_resolved_project` split.
-fn parse_project_facts(metadata: &Value) -> Option<ProjectFacts> {
-    let workspace_root: PathBuf = metadata.get("workspace_root")?.as_str()?.into();
-    // A `null` root (outside any specific package's own directory, the
-    // same case `main.rs`'s own `resolve_project` treats as
-    // unresolvable) must bail the whole function via `?`, not fall
-    // through to default/empty facts about a project that was never
-    // actually resolved.
-    let root_id = metadata.get("resolve")?.get("root")?.as_str()?;
-    let package = metadata
-        .get("packages")?
-        .as_array()?
-        .iter()
-        .find(|package| package.get("id").and_then(Value::as_str) == Some(root_id))?;
-
-    let manifest_path = package
-        .get("manifest_path")
-        .and_then(Value::as_str)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace_root.join("Cargo.toml"));
-
-    let declared_example = package
-        .get("metadata")
-        .and_then(|metadata| metadata.get("florui"))
-        .and_then(|florui| florui.get("dev"))
-        .and_then(|dev| dev.get("example"))
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-
-    let example_targets = package
-        .get("targets")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|target| {
-            target
-                .get("kind")
-                .and_then(Value::as_array)
-                .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("example")))
-        })
-        .filter_map(|target| target.get("name").and_then(Value::as_str))
-        .map(str::to_owned)
-        .collect();
-
-    Some(ProjectFacts {
-        workspace_root,
-        manifest_path,
-        declared_example,
-        example_targets,
-    })
-}
-
-fn project_checks() -> Vec<Check> {
-    let Some(facts) = resolve_project_facts() else {
-        return vec![Check {
-            id: "project.resolved",
-            category: "project",
-            status: Status::NotApplicable,
-            required: false,
-            observed: None,
-            expected: None,
-            evidence: "not invoked inside a resolvable Cargo project".to_string(),
-            reason: None,
-            remediation: None,
-        }];
+/// The actual logic behind [`project_checks`], with `cwd` explicit rather
+/// than inherited from the process -- so it's testable against a real
+/// temporary Cargo workspace without mutating global process state, the
+/// same reasoning `florui_config::resolve_cargo_project` itself already
+/// applies.
+fn project_checks_at(cwd: &Path, package: Option<&str>, target: &str) -> Vec<Check> {
+    let facts = match florui_config::resolve_cargo_project(cwd, package) {
+        Ok(facts) => facts,
+        // An explicit --package that doesn't exist is a real user mistake,
+        // worth surfacing as a failure rather than folded into "outside a
+        // project".
+        Err(error @ florui_config::ProjectResolutionError::UnknownPackage { .. }) => {
+            return vec![Check {
+                id: "project.resolved",
+                category: "project",
+                status: Status::Fail,
+                required: false,
+                observed: None,
+                expected: None,
+                evidence: error.to_string(),
+                reason: None,
+                remediation: Some(
+                    "check --package against the workspace's real package names".to_string(),
+                ),
+            }];
+        }
+        // Everything else -- an ambiguous/unresolvable root, or `cargo
+        // metadata` itself failing because no Cargo.toml exists anywhere
+        // above `cwd` -- is the same "not inside a resolvable Cargo
+        // project" case doctor.md documents: report environment checks and
+        // mark project checks not applicable, not a failure.
+        Err(_) => {
+            return vec![Check {
+                id: "project.resolved",
+                category: "project",
+                status: Status::NotApplicable,
+                required: false,
+                observed: None,
+                expected: None,
+                evidence: "not invoked inside a resolvable Cargo project".to_string(),
+                reason: None,
+                remediation: None,
+            }];
+        }
     };
 
     let mut checks = vec![Check {
@@ -414,29 +380,116 @@ fn project_checks() -> Vec<Check> {
         }
     });
 
-    checks.push(match &facts.declared_example {
-        None => Check {
-            id: "project.dev_example_target_exists",
-            category: "project",
-            status: Status::NotApplicable,
-            required: false,
-            observed: None,
-            expected: None,
-            evidence: "no [package.metadata.florui.dev] example declared".to_string(),
-            reason: None,
-            remediation: None,
-        },
-        Some(example) if facts.example_targets.iter().any(|name| name == example) => Check {
-            id: "project.dev_example_target_exists",
-            category: "project",
-            status: Status::Pass,
-            required: false,
-            observed: Some(example.clone()),
-            expected: None,
-            evidence: format!("cargo example target `{example}` exists"),
-            reason: None,
-            remediation: None,
-        },
+    let config_target = match target {
+        "native" => Some(florui_config::Target::Native),
+        "web" => Some(florui_config::Target::Web),
+        _ => None,
+    };
+    let config_exists = florui_config::config_file_path(&facts.package_root).exists();
+    let resolution = florui_config::resolve(&facts, config_target);
+
+    checks.push(dev_example_target_check(&facts, &resolution));
+    checks.push(config_discovered_check(config_exists));
+    checks.push(config_schema_valid_check(config_exists, &resolution));
+    checks.push(config_schema_version_check(config_exists, &resolution));
+    checks.push(config_legacy_migration_check(config_exists, &resolution));
+    checks.push(config_identity_check(config_exists, &resolution));
+    checks.push(config_window_size_check(config_exists, &resolution));
+    checks.extend(config_icon_asset_checks(
+        config_exists,
+        config_target,
+        &resolution,
+    ));
+
+    checks
+}
+
+fn check_unknown(id: &'static str, evidence: String) -> Check {
+    Check {
+        id,
+        category: "config",
+        status: Status::Unknown,
+        required: false,
+        observed: None,
+        expected: None,
+        evidence,
+        reason: None,
+        remediation: None,
+    }
+}
+
+fn check_not_applicable(id: &'static str, evidence: &str) -> Check {
+    Check {
+        id,
+        category: "config",
+        status: Status::NotApplicable,
+        required: false,
+        observed: None,
+        expected: None,
+        evidence: evidence.to_string(),
+        reason: None,
+        remediation: None,
+    }
+}
+
+fn check_pass(id: &'static str, evidence: String) -> Check {
+    Check {
+        id,
+        category: "config",
+        status: Status::Pass,
+        required: false,
+        observed: None,
+        expected: None,
+        evidence,
+        reason: None,
+        remediation: None,
+    }
+}
+
+/// Whether `florui.config.toml` failed to even parse -- everything that
+/// depends on its content downstream is `Unknown`, not `Fail`, in that
+/// case (see this module's own doc for why: a schema-shape problem and an
+/// independent semantic one, like an invalid window size, must not be
+/// conflated into the same failure).
+fn parse_failed(
+    resolution: &Result<florui_config::Resolution, florui_config::ConfigError>,
+) -> bool {
+    matches!(resolution, Err(florui_config::ConfigError::Toml { .. }))
+}
+
+fn semantic_errors(
+    resolution: &Result<florui_config::Resolution, florui_config::ConfigError>,
+) -> &[florui_config::SemanticConfigError] {
+    match resolution {
+        Err(florui_config::ConfigError::Semantic(errors)) => errors,
+        _ => &[],
+    }
+}
+
+fn dev_example_target_check(
+    facts: &florui_config::CargoProjectFacts,
+    resolution: &Result<florui_config::Resolution, florui_config::ConfigError>,
+) -> Check {
+    // Independent of the rest of config validity -- a broken
+    // florui.config.toml elsewhere must not hide an otherwise-checkable
+    // legacy dev example, so this falls back to the raw legacy value
+    // when resolution as a whole failed.
+    let example = match resolution {
+        Ok(resolution) => resolution.config.dev.example.clone(),
+        Err(_) => facts
+            .legacy_dev_example
+            .as_ref()
+            .map(|located| located.value.clone()),
+    };
+    match example {
+        None => check_not_applicable(
+            "project.dev_example_target_exists",
+            "no dev example declared in [package.metadata.florui.dev] or florui.config.toml [dev]",
+        ),
+        Some(example) if facts.example_targets.contains(&example) => check_pass(
+            "project.dev_example_target_exists",
+            format!("cargo example target `{example}` exists"),
+        ),
         Some(example) => Check {
             id: "project.dev_example_target_exists",
             category: "project",
@@ -445,17 +498,290 @@ fn project_checks() -> Vec<Check> {
             observed: Some(example.clone()),
             expected: Some("a matching [[example]] target".to_string()),
             evidence: format!(
-                "[package.metadata.florui.dev] declares example \"{example}\", but no \
-                 matching [[example]] target exists"
+                "the declared dev example \"{example}\" has no matching [[example]] target"
             ),
             reason: None,
             remediation: Some(format!(
                 "add an examples/{example}.rs (or fix the declared name)"
             )),
         },
-    });
+    }
+}
 
-    checks
+fn config_discovered_check(config_exists: bool) -> Check {
+    check_pass(
+        "config.discovered",
+        if config_exists {
+            "florui.config.toml found at the resolved package root".to_string()
+        } else {
+            "no florui.config.toml at the resolved package root -- using Cargo/legacy/built-in \
+             defaults"
+                .to_string()
+        },
+    )
+}
+
+fn config_schema_valid_check(
+    config_exists: bool,
+    resolution: &Result<florui_config::Resolution, florui_config::ConfigError>,
+) -> Check {
+    if !config_exists {
+        return check_not_applicable("config.schema_valid", "no florui.config.toml to validate");
+    }
+    match resolution {
+        Err(florui_config::ConfigError::Toml { .. }) => {
+            let error = resolution.as_ref().unwrap_err();
+            Check {
+                id: "config.schema_valid",
+                category: "config",
+                status: Status::Fail,
+                required: false,
+                observed: None,
+                expected: None,
+                evidence: error.to_string(),
+                reason: None,
+                remediation: Some("fix the reported location in florui.config.toml".to_string()),
+            }
+        }
+        _ => check_pass(
+            "config.schema_valid",
+            "florui.config.toml parses as valid TOML matching the schema shape".to_string(),
+        ),
+    }
+}
+
+fn config_schema_version_check(
+    config_exists: bool,
+    resolution: &Result<florui_config::Resolution, florui_config::ConfigError>,
+) -> Check {
+    if !config_exists {
+        return check_not_applicable(
+            "config.schema_version_supported",
+            "no florui.config.toml to check",
+        );
+    }
+    if parse_failed(resolution) {
+        return check_unknown(
+            "config.schema_version_supported",
+            "not evaluated: florui.config.toml failed to parse".to_string(),
+        );
+    }
+    match semantic_errors(resolution).iter().find(|error| {
+        matches!(
+            error,
+            florui_config::SemanticConfigError::UnsupportedSchemaVersion { .. }
+        )
+    }) {
+        Some(error) => Check {
+            id: "config.schema_version_supported",
+            category: "config",
+            status: Status::Fail,
+            required: false,
+            observed: None,
+            expected: None,
+            evidence: error.to_string(),
+            reason: None,
+            remediation: None,
+        },
+        None => check_pass(
+            "config.schema_version_supported",
+            "schema_version is supported by this build".to_string(),
+        ),
+    }
+}
+
+fn config_legacy_migration_check(
+    config_exists: bool,
+    resolution: &Result<florui_config::Resolution, florui_config::ConfigError>,
+) -> Check {
+    if parse_failed(resolution) {
+        return check_unknown(
+            "config.legacy_migration_conflict",
+            "not evaluated: florui.config.toml failed to parse".to_string(),
+        );
+    }
+    match semantic_errors(resolution).iter().find(|error| {
+        matches!(
+            error,
+            florui_config::SemanticConfigError::LegacyNewDuplicate { .. }
+        )
+    }) {
+        Some(error) => Check {
+            id: "config.legacy_migration_conflict",
+            category: "config",
+            status: Status::Fail,
+            required: false,
+            observed: None,
+            expected: None,
+            evidence: error.to_string(),
+            reason: None,
+            remediation: Some(
+                "remove the legacy [package.metadata.florui.dev] key once migrated".to_string(),
+            ),
+        },
+        None if !config_exists => check_not_applicable(
+            "config.legacy_migration_conflict",
+            "no florui.config.toml to conflict with the legacy key",
+        ),
+        None => check_pass(
+            "config.legacy_migration_conflict",
+            "no conflicting legacy and new definitions".to_string(),
+        ),
+    }
+}
+
+fn config_identity_check(
+    config_exists: bool,
+    resolution: &Result<florui_config::Resolution, florui_config::ConfigError>,
+) -> Check {
+    if !config_exists {
+        return check_not_applicable("config.identity_resolved", "no florui.config.toml to check");
+    }
+    if parse_failed(resolution) {
+        return check_unknown(
+            "config.identity_resolved",
+            "not evaluated: florui.config.toml failed to parse".to_string(),
+        );
+    }
+    let identity_errors: Vec<&florui_config::SemanticConfigError> = semantic_errors(resolution)
+        .iter()
+        .filter(|error| {
+            matches!(
+                error,
+                florui_config::SemanticConfigError::InvalidAppVersion { .. }
+                    | florui_config::SemanticConfigError::WorkspaceVersionNotInherited { .. }
+            )
+        })
+        .collect();
+    match identity_errors.first() {
+        Some(error) => Check {
+            id: "config.identity_resolved",
+            category: "config",
+            status: Status::Fail,
+            required: false,
+            observed: None,
+            expected: None,
+            evidence: error.to_string(),
+            reason: None,
+            remediation: None,
+        },
+        None => check_pass(
+            "config.identity_resolved",
+            "app identity (name/version) resolved".to_string(),
+        ),
+    }
+}
+
+fn config_window_size_check(
+    config_exists: bool,
+    resolution: &Result<florui_config::Resolution, florui_config::ConfigError>,
+) -> Check {
+    if !config_exists {
+        return check_not_applicable("config.window_size_valid", "no florui.config.toml to check");
+    }
+    if parse_failed(resolution) {
+        return check_unknown(
+            "config.window_size_valid",
+            "not evaluated: florui.config.toml failed to parse".to_string(),
+        );
+    }
+    match semantic_errors(resolution).iter().find(|error| {
+        matches!(
+            error,
+            florui_config::SemanticConfigError::InvalidWindowSize { .. }
+        )
+    }) {
+        Some(error) => Check {
+            id: "config.window_size_valid",
+            category: "config",
+            status: Status::Fail,
+            required: false,
+            observed: None,
+            expected: None,
+            evidence: error.to_string(),
+            reason: None,
+            remediation: None,
+        },
+        None => check_pass(
+            "config.window_size_valid",
+            "window sizes (if declared) are finite, positive, and min/max-consistent".to_string(),
+        ),
+    }
+}
+
+/// One check per icon field, scoped to the selected target -- `resolve()`
+/// itself already skips the filesystem check entirely outside
+/// `Target::Native` (see `florui_config`'s own doc), so this only ever
+/// reports something other than not-applicable/unknown under `--target
+/// native`.
+fn config_icon_asset_checks(
+    config_exists: bool,
+    target: Option<florui_config::Target>,
+    resolution: &Result<florui_config::Resolution, florui_config::ConfigError>,
+) -> Vec<Check> {
+    const FIELDS: [(&str, &str); 4] = [
+        ("source", "config.icon_asset_present.source"),
+        ("windows", "config.icon_asset_present.windows"),
+        ("macos", "config.icon_asset_present.macos"),
+        ("linux", "config.icon_asset_present.linux"),
+    ];
+
+    FIELDS
+        .into_iter()
+        .map(|(field_name, id)| {
+            if !config_exists {
+                return check_not_applicable(id, "no florui.config.toml to check");
+            }
+            if parse_failed(resolution) {
+                return check_unknown(
+                    id,
+                    "not evaluated: florui.config.toml failed to parse".to_string(),
+                );
+            }
+            if !semantic_errors(resolution).is_empty() {
+                return check_unknown(
+                    id,
+                    "not evaluated: florui.config.toml has unrelated semantic errors".to_string(),
+                );
+            }
+            let Ok(resolution) = resolution else {
+                return check_unknown(id, "not evaluated".to_string());
+            };
+            if !matches!(target, Some(florui_config::Target::Native)) {
+                return check_not_applicable(
+                    id,
+                    "asset presence is only checked for --target native",
+                );
+            }
+            let path = match field_name {
+                "source" => &resolution.config.app.icons.source,
+                "windows" => &resolution.config.app.icons.windows,
+                "macos" => &resolution.config.app.icons.macos,
+                _ => &resolution.config.app.icons.linux,
+            };
+            let Some(path) = path else {
+                return check_not_applicable(id, "not declared in [app.icons]");
+            };
+            match resolution
+                .diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.code == id)
+            {
+                Some(diagnostic) => Check {
+                    id,
+                    category: "config",
+                    status: Status::Warning,
+                    required: false,
+                    observed: Some(display_redacted(path)),
+                    expected: None,
+                    evidence: diagnostic.message.clone(),
+                    reason: None,
+                    remediation: Some(format!("add the missing asset at {}", path.display())),
+                },
+                None => check_pass(id, format!("{} exists", display_redacted(path))),
+            }
+        })
+        .collect()
 }
 
 /// Replaces the user's home directory prefix with `~` — this crate's own
@@ -938,64 +1264,118 @@ mod tests {
         assert!(!should_fail(&checks, true));
     }
 
-    fn metadata_with(root_id: &str, dev_example: Option<&str>, example_targets: &[&str]) -> Value {
-        let metadata = match dev_example {
-            Some(example) => json!({"florui": {"dev": {"example": example}}}),
-            None => json!({}),
-        };
-        let targets: Vec<Value> = example_targets
+    /// A minimal real Cargo package `florui_config::resolve_cargo_project`
+    /// can actually resolve -- these tests exercise `project_checks_at`
+    /// against a real temporary workspace and a real `cargo metadata`
+    /// shell-out, the same reasoning `florui-config`'s own integration
+    /// tests use: faking this would misrepresent what's being verified.
+    fn scaffold_project(root: &std::path::Path) {
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "").unwrap();
+    }
+
+    fn find<'a>(checks: &'a [Check], id: &str) -> &'a Check {
+        checks
             .iter()
-            .map(|name| json!({"name": name, "kind": ["example"]}))
-            .chain(std::iter::once(json!({"name": "main", "kind": ["bin"]})))
-            .collect();
-        json!({
-            "workspace_root": "/workspace",
-            "resolve": {"root": root_id},
-            "packages": [
-                {
-                    "id": root_id,
-                    "manifest_path": "/workspace/app/Cargo.toml",
-                    "metadata": metadata,
-                    "targets": targets,
-                },
-            ],
-        })
+            .find(|check| check.id == id)
+            .unwrap_or_else(|| panic!("no check with id {id} in {checks:#?}"))
     }
 
     #[test]
-    fn parse_project_facts_reads_the_declared_example_and_confirms_it_exists() {
-        let metadata = metadata_with("app#0.1.0", Some("counter"), &["counter"]);
-        let facts = parse_project_facts(&metadata).expect("this payload should resolve");
-        assert_eq!(facts.workspace_root, Path::new("/workspace"));
-        assert_eq!(facts.manifest_path, Path::new("/workspace/app/Cargo.toml"));
-        assert_eq!(facts.declared_example.as_deref(), Some("counter"));
-        assert!(facts.example_targets.iter().any(|name| name == "counter"));
-    }
-
-    #[test]
-    fn parse_project_facts_leaves_declared_example_none_when_undeclared() {
-        let metadata = metadata_with("app#0.1.0", None, &[]);
-        let facts = parse_project_facts(&metadata).expect("this payload should resolve");
-        assert_eq!(facts.declared_example, None);
-    }
-
-    #[test]
-    fn parse_project_facts_excludes_non_example_targets() {
-        let metadata = metadata_with("app#0.1.0", None, &["counter"]);
-        let facts = parse_project_facts(&metadata).expect("this payload should resolve");
-        assert!(
-            !facts.example_targets.iter().any(|name| name == "main"),
-            "a [[bin]] target must not be reported as a real [[example]] target"
+    fn project_checks_at_reports_not_applicable_outside_a_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let checks = project_checks_at(dir.path(), None, "native");
+        assert_eq!(
+            find(&checks, "project.resolved").status,
+            Status::NotApplicable
         );
     }
 
     #[test]
-    fn parse_project_facts_returns_none_without_a_resolved_root() {
-        let metadata = json!({
-            "workspace_root": "/workspace",
-            "resolve": {"root": null},
-            "packages": [],
-        });
-        assert!(parse_project_facts(&metadata).is_none());
+    fn project_checks_at_reports_config_discovered_and_defaults_without_a_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_project(dir.path());
+        let checks = project_checks_at(dir.path(), None, "native");
+        assert_eq!(find(&checks, "config.discovered").status, Status::Pass);
+        assert_eq!(
+            find(&checks, "config.schema_valid").status,
+            Status::NotApplicable
+        );
+    }
+
+    #[test]
+    fn project_checks_at_flags_an_unsupported_schema_version() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_project(dir.path());
+        std::fs::write(
+            dir.path().join("florui.config.toml"),
+            "schema_version = 2\n",
+        )
+        .unwrap();
+        let checks = project_checks_at(dir.path(), None, "native");
+        assert_eq!(
+            find(&checks, "config.schema_version_supported").status,
+            Status::Fail
+        );
+    }
+
+    #[test]
+    fn project_checks_at_flags_a_legacy_and_new_dev_example_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [package.metadata.florui.dev]\nexample = \"counter\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "").unwrap();
+        std::fs::write(
+            dir.path().join("florui.config.toml"),
+            "schema_version = 1\n[dev]\nexample = \"counter\"\n",
+        )
+        .unwrap();
+        let checks = project_checks_at(dir.path(), None, "native");
+        assert_eq!(
+            find(&checks, "config.legacy_migration_conflict").status,
+            Status::Fail
+        );
+    }
+
+    #[test]
+    fn project_checks_at_flags_a_missing_icon_asset_under_native_target() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_project(dir.path());
+        std::fs::write(
+            dir.path().join("florui.config.toml"),
+            "schema_version = 1\n[app.icons]\nsource = \"missing.svg\"\n",
+        )
+        .unwrap();
+        let checks = project_checks_at(dir.path(), None, "native");
+        assert_eq!(
+            find(&checks, "config.icon_asset_present.source").status,
+            Status::Warning
+        );
+    }
+
+    #[test]
+    fn project_checks_at_skips_icon_asset_checks_outside_native_target() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_project(dir.path());
+        std::fs::write(
+            dir.path().join("florui.config.toml"),
+            "schema_version = 1\n[app.icons]\nsource = \"missing.svg\"\n",
+        )
+        .unwrap();
+        let checks = project_checks_at(dir.path(), None, "web");
+        assert_eq!(
+            find(&checks, "config.icon_asset_present.source").status,
+            Status::NotApplicable
+        );
     }
 }

@@ -11,6 +11,7 @@ name = "florui"
 path = "src/main.rs"
 
 [dependencies]
+florui-config = { path = "../florui-config" }
 florui-devtools = { path = "../florui-devtools" }
 florui-conformance = { path = "../florui-conformance" }
 florui-platform = { path = "../florui-platform" }
