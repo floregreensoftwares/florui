@@ -1,6 +1,10 @@
 //! [`run`]: pairs [`UiRuntime`] with a real `winit` window, a `softbuffer`
 //! surface, and an event loop, so a caller doesn't have to write its own
-//! desktop event loop just to see a component tree running.
+//! desktop event loop just to see a component tree running. [`run_windows`]
+//! is the same thing generalized to any number of windows at once, each
+//! independently titled/styled/iconed — [`run`]/[`run_with_options`]/
+//! [`run_with_css_reload`]/[`run_with_css_reload_and_options`] are thin
+//! wrappers over it for the common one-window case.
 //!
 //! HiDPI-aware: layout runs against the window's *logical* size (via
 //! [`crate::dpi`]), matching `florui_style`'s CSS-style `width`/`height`;
@@ -23,6 +27,7 @@ use florui_style::{NodeId, Rgba, StyleError};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use taffy::prelude::*;
 use winit::application::ApplicationHandler;
+#[cfg(test)]
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
@@ -72,21 +77,24 @@ impl std::error::Error for RunError {
     }
 }
 
+/// Every variant now carries the `WindowId` it's about -- with more than
+/// one window live, each of these needs to say which one, whereas a
+/// single-window host had nothing to disambiguate.
 enum UserEvent {
-    /// Either a [`florui_reactive::Signal`] changed somewhere under the
-    /// root, or a [`florui_reactive::use_resource`] fetch became newly
-    /// pollable — see [`UiRuntime::on_needs_update`]. Both call for the
-    /// same reaction: re-render and repaint.
-    Dirty,
+    /// Either a [`florui_reactive::Signal`] changed somewhere under this
+    /// window's root, or a [`florui_reactive::use_resource`] fetch became
+    /// newly pollable — see [`UiRuntime::on_needs_update`]. Both call for
+    /// the same reaction: re-render and repaint.
+    Dirty(WindowId),
     /// The watched CSS file (see [`run_with_css_reload`]) changed on disk.
-    CssChanged,
+    CssChanged(WindowId),
     /// A [`crate::WindowControls::close`] call from inside the component
     /// tree, routed back through the event loop so it takes the exact
-    /// same [`ActiveEventLoop::exit`] path a real
-    /// `WindowEvent::CloseRequested` (the OS's own close button, still
-    /// live even under [`DecorationMode::Custom`] via, e.g., Alt+F4) —
-    /// one real shutdown path, not two that could drift apart.
-    RequestClose,
+    /// same close path a real `WindowEvent::CloseRequested` (the OS's own
+    /// close button, still live even under [`DecorationMode::Custom`] via,
+    /// e.g., Alt+F4) — one real shutdown path, not two that could drift
+    /// apart.
+    RequestClose(WindowId),
 }
 
 /// What [`run_with_options`]/[`run_with_css_reload_and_options`] ask for
@@ -143,25 +151,8 @@ pub fn run_with_options(
     options: WindowOptions,
     root: impl Fn() -> Element + 'static,
 ) -> Result<(), RunError> {
-    let rules = florui_style::parse_stylesheet(css).map_err(RunError::Stylesheet)?;
-    let event_loop = EventLoop::<UserEvent>::with_user_event()
-        .build()
-        .map_err(RunError::EventLoop)?;
-    event_loop.set_control_flow(ControlFlow::Wait);
-
-    let mut host = DesktopHost::new(
-        title.to_string(),
-        canvas_color,
-        rules,
-        Box::new(root),
-        event_loop.create_proxy(),
-        options,
-    );
-    event_loop.run_app(&mut host).map_err(RunError::EventLoop)?;
-    match host.fatal_error {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
+    let spec = WindowSpec::new(title, css, canvas_color, options, root)?;
+    run_windows(vec![spec])
 }
 
 /// Same as [`run`], but reads `css_path` from disk and watches it for
@@ -202,29 +193,27 @@ pub fn run_with_css_reload_and_options(
     options: WindowOptions,
     root: impl Fn() -> Element + 'static,
 ) -> Result<(), RunError> {
-    let css_path = css_path.as_ref().to_owned();
-    let css = std::fs::read_to_string(&css_path).map_err(RunError::CssFile)?;
-    let rules = florui_style::parse_stylesheet(&css).map_err(RunError::Stylesheet)?;
+    let spec = WindowSpec::with_css_reload(title, css_path, canvas_color, options, root)?;
+    run_windows(vec![spec])
+}
 
+/// Opens every window in `initial` on one shared event loop and blocks the
+/// calling thread until the last one closes. If any window in `initial`
+/// fails to create, the whole batch is treated as fatal (matching
+/// [`run_with_options`]'s own single-window failure behavior) — this is
+/// only reachable at startup, not once windows are already running.
+pub fn run_windows(initial: Vec<WindowSpec>) -> Result<(), RunError> {
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .map_err(RunError::EventLoop)?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let proxy = event_loop.create_proxy();
-    let watcher = watch_css_file(&css_path, proxy.clone()).map_err(RunError::CssWatch)?;
-
-    let mut host = DesktopHost::new(
-        title.to_string(),
-        canvas_color,
-        rules,
-        Box::new(root),
-        proxy,
-        options,
-    );
-    host.css_path = Some(css_path);
-    host._css_watcher = Some(watcher);
-
+    let mut host = DesktopHost {
+        windows: HashMap::new(),
+        pending: initial,
+        proxy: event_loop.create_proxy(),
+        fatal_error: None,
+    };
     event_loop.run_app(&mut host).map_err(RunError::EventLoop)?;
     match host.fatal_error {
         Some(error) => Err(error),
@@ -232,13 +221,76 @@ pub fn run_with_css_reload_and_options(
     }
 }
 
+/// Everything needed to open one window, not yet created — consumed
+/// exactly once by [`DesktopHost::resumed`], which drains a `Vec` of
+/// these. Build one with [`WindowSpec::new`] or
+/// [`WindowSpec::with_css_reload`].
+pub struct WindowSpec {
+    title: String,
+    canvas_color: Rgba,
+    rules: Vec<florui_style::Rule>,
+    options: WindowOptions,
+    root: Box<dyn Fn() -> Element>,
+    /// `Some` => this window watches and live-reloads this file's CSS
+    /// (see [`run_with_css_reload`]'s own doc); `None` => static CSS,
+    /// parsed once.
+    css_path: Option<PathBuf>,
+}
+
+impl WindowSpec {
+    /// `css` is parsed immediately, so a syntax error is reported before
+    /// any window opens rather than after.
+    pub fn new(
+        title: impl Into<String>,
+        css: &str,
+        canvas_color: Rgba,
+        options: WindowOptions,
+        root: impl Fn() -> Element + 'static,
+    ) -> Result<Self, RunError> {
+        let rules = florui_style::parse_stylesheet(css).map_err(RunError::Stylesheet)?;
+        Ok(Self {
+            title: title.into(),
+            canvas_color,
+            rules,
+            options,
+            root: Box::new(root),
+            css_path: None,
+        })
+    }
+
+    /// Same as [`Self::new`], but reads `css_path` from disk and watches
+    /// it for changes once this window is live — see
+    /// [`run_with_css_reload`]'s own doc for the reload contract.
+    pub fn with_css_reload(
+        title: impl Into<String>,
+        css_path: impl AsRef<Path>,
+        canvas_color: Rgba,
+        options: WindowOptions,
+        root: impl Fn() -> Element + 'static,
+    ) -> Result<Self, RunError> {
+        let css_path = css_path.as_ref().to_owned();
+        let css = std::fs::read_to_string(&css_path).map_err(RunError::CssFile)?;
+        let rules = florui_style::parse_stylesheet(&css).map_err(RunError::Stylesheet)?;
+        Ok(Self {
+            title: title.into(),
+            canvas_color,
+            rules,
+            options,
+            root: Box::new(root),
+            css_path: Some(css_path),
+        })
+    }
+}
+
 /// Watches `css_path`'s parent directory (not the file itself, so editors
 /// that save via rename/replace are still observed) and wakes the event
-/// loop only on a change to `css_path` exactly — mirrors
+/// loop only on a change to `css_path` exactly, tagged with `window_id` so
+/// the right [`WindowState`] reloads — mirrors
 /// `florui-devtools::preview::watch_fixture`.
 fn watch_css_file(
     css_path: &Path,
     proxy: EventLoopProxy<UserEvent>,
+    window_id: WindowId,
 ) -> notify::Result<RecommendedWatcher> {
     let target = css_path
         .canonicalize()
@@ -256,7 +308,7 @@ fn watch_css_file(
             .any(|p| p.canonicalize().map(|c| c == target).unwrap_or(false));
         if touches_target {
             // The event loop may already be gone; nothing to do if so.
-            let _ = proxy.send_event(UserEvent::CssChanged);
+            let _ = proxy.send_event(UserEvent::CssChanged(window_id));
         }
     })?;
     watcher.watch(parent, RecursiveMode::NonRecursive)?;
@@ -332,29 +384,28 @@ enum Presenter {
     },
 }
 
-/// Owns the window, the real presenter (GPU-preferred, `softbuffer`
-/// fallback — see [`Presenter`]), and the event loop; delegates every
-/// rendering, hit-testing, and dispatch decision to a [`UiRuntime`].
-struct DesktopHost {
-    title: String,
+/// One real, live window: its actual `winit::window::Window`, real
+/// presenter (GPU-preferred, `softbuffer` fallback — see [`Presenter`]),
+/// and the [`UiRuntime`] rendering it — every rendering, hit-testing, and
+/// dispatch decision for this one window delegates to that runtime. Only
+/// ever exists post-creation (built once in [`DesktopHost::resumed`] from
+/// a drained [`WindowSpec`]), so nothing here needs `Option` wrapping the
+/// way [`WindowSpec`]'s own fields don't need it either.
+struct WindowState {
     canvas_color: Rgba,
-    rules: Vec<florui_style::Rule>,
-    root: Option<Box<dyn Fn() -> Element>>,
-    options: WindowOptions,
-    proxy: EventLoopProxy<UserEvent>,
-    runtime: Option<UiRuntime>,
+    runtime: UiRuntime,
     /// The node hit-tested at the last left-button press, if any — a
     /// click only dispatches on release over this same node.
     pressed: Option<NodeId>,
     last_cursor: (f64, f64),
-    window: Option<Arc<Window>>,
+    window: Arc<Window>,
     /// Also reachable from the component tree via
     /// [`crate::use_window_controls`] — kept here too so
     /// [`Self::handle_press`] can recognize a press on
     /// [`crate::WINDOW_DRAG_REGION_ID`] and start a real window drag
     /// itself, without a component needing to wire that up by hand.
-    controls: Option<Rc<WindowControls>>,
-    presenter: Option<Presenter>,
+    controls: Rc<WindowControls>,
+    presenter: Presenter,
     /// When a `transition`/`@keyframes` animation still needs sampling —
     /// `None` once nothing is animating. Read and rescheduled only in
     /// [`ApplicationHandler::about_to_wait`], which runs after every loop
@@ -363,50 +414,16 @@ struct DesktopHost {
     /// recent [`Self::redraw`] left here — no separate cross-thread
     /// signal needed to drive continuous repaints.
     next_animation_wake: Option<std::time::Instant>,
-    fatal_error: Option<RunError>,
-    /// Only set by [`run_with_css_reload`] — [`run`] leaves this `None`,
-    /// and [`Self::reload_css`] is a no-op without it.
+    /// Only set for a window built via [`WindowSpec::with_css_reload`] —
+    /// [`Self::reload_css`] is a no-op without it.
     css_path: Option<PathBuf>,
     /// Kept alive only to keep watching; dropping it stops delivery.
     _css_watcher: Option<RecommendedWatcher>,
 }
 
-impl DesktopHost {
-    fn new(
-        title: String,
-        canvas_color: Rgba,
-        rules: Vec<florui_style::Rule>,
-        root: Box<dyn Fn() -> Element>,
-        proxy: EventLoopProxy<UserEvent>,
-        options: WindowOptions,
-    ) -> Self {
-        Self {
-            title,
-            canvas_color,
-            rules,
-            root: Some(root),
-            options,
-            proxy,
-            runtime: None,
-            pressed: None,
-            last_cursor: (0.0, 0.0),
-            window: None,
-            controls: None,
-            presenter: None,
-            next_animation_wake: None,
-            fatal_error: None,
-            css_path: None,
-            _css_watcher: None,
-        }
-    }
-
+impl WindowState {
     fn viewport_scale(&self) -> ViewportScale {
-        let (size, factor) = self
-            .window
-            .as_ref()
-            .map(|window| (window.inner_size(), window.scale_factor()))
-            .unwrap_or((PhysicalSize::default(), 1.0));
-        dpi::viewport_scale(size, factor)
+        dpi::viewport_scale(self.window.inner_size(), self.window.scale_factor())
     }
 
     /// Converts a physical-pixel cursor position (as `winit` reports it)
@@ -416,23 +433,9 @@ impl DesktopHost {
         ((x / factor) as f32, (y / factor) as f32)
     }
 
-    /// Stops the event loop after logging `error`, and keeps it so [`run`]
-    /// can return it once `run_app` unwinds — an `ApplicationHandler`
-    /// method has no return value of its own to report failure through.
-    fn fail(&mut self, event_loop: &ActiveEventLoop, error: RunError) {
-        eprintln!("florui-platform: {error}");
-        self.fatal_error = Some(error);
-        event_loop.exit();
-    }
-
     fn redraw(&mut self) {
-        // Read before borrowing `self.runtime` mutably below — `viewport_scale`
-        // needs `&self` as a whole (it reads `self.window`), which a live
-        // `&mut self.runtime` borrow would conflict with.
         let scale_factor = self.viewport_scale().scale_factor;
-        let (Some(window), Some(runtime)) = (self.window.clone(), self.runtime.as_mut()) else {
-            return;
-        };
+        let window = self.window.clone();
         let size = window.inner_size();
         let (Some(width), Some(height)) =
             (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
@@ -440,12 +443,10 @@ impl DesktopHost {
             return;
         };
 
-        let (arena, styles, layouts, font) = runtime.geometry_and_font_mut();
+        let (arena, styles, layouts, font) = self.runtime.geometry_and_font_mut();
         let physical_layouts = scale_layouts(layouts, scale_factor as f32);
-        if let Some(controls) = &self.controls
-            && controls.input_mode() == InputMode::Selective
-        {
-            sync_input_regions(controls, &window, arena, &physical_layouts);
+        if self.controls.input_mode() == InputMode::Selective {
+            sync_input_regions(&self.controls, &window, arena, &physical_layouts);
         }
         let canvas = florui_paint::paint_to_buffer(
             font,
@@ -459,7 +460,7 @@ impl DesktopHost {
         );
 
         match &mut self.presenter {
-            Some(Presenter::Gpu(presenter)) => {
+            Presenter::Gpu(presenter) => {
                 // tiny-skia's own pixel format is RGBA byte order,
                 // premultiplied — matches `GpuPresenter`'s own upload
                 // texture format exactly, so the painted bytes go straight
@@ -467,7 +468,7 @@ impl DesktopHost {
                 presenter.resize(width.get(), height.get());
                 presenter.present(canvas.data());
             }
-            Some(Presenter::Cpu { surface, .. }) => {
+            Presenter::Cpu { surface, .. } => {
                 if let Err(error) = surface.resize(width, height) {
                     eprintln!("florui-platform: could not resize the render surface: {error}");
                     return;
@@ -493,7 +494,6 @@ impl DesktopHost {
                     eprintln!("florui-platform: could not present the frame: {error}");
                 }
             }
-            None => {}
         }
     }
 
@@ -510,9 +510,7 @@ impl DesktopHost {
             .is_some_and(|deadline| std::time::Instant::now() >= deadline);
         if deadline_due {
             let viewport = layout_viewport(self.viewport_scale());
-            if let Some(runtime) = &mut self.runtime {
-                runtime.update(viewport);
-            }
+            self.runtime.update(viewport);
             self.refresh_animation_schedule();
         }
         self.redraw();
@@ -524,13 +522,9 @@ impl DesktopHost {
     /// the host having to know which specific interaction caused it.
     fn update_and_request_redraw(&mut self) {
         let viewport = layout_viewport(self.viewport_scale());
-        if let Some(runtime) = &mut self.runtime {
-            runtime.clear_dirty();
-            runtime.update(viewport);
-        }
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
+        self.runtime.clear_dirty();
+        self.runtime.update(viewport);
+        self.window.request_redraw();
         self.refresh_animation_schedule();
     }
 
@@ -546,27 +540,21 @@ impl DesktopHost {
     fn refresh_animation_schedule(&mut self) {
         self.next_animation_wake = self
             .runtime
-            .as_ref()
-            .filter(|runtime| runtime.is_animating())
-            .map(|_| std::time::Instant::now() + std::time::Duration::from_millis(16));
+            .is_animating()
+            .then(|| std::time::Instant::now() + std::time::Duration::from_millis(16));
     }
 
     /// Re-derives `InputMode::Selective`'s screen-space regions from the
     /// runtime's already-computed layout — no re-render, just the new
     /// window offset applied to geometry that hasn't otherwise changed.
     fn resync_input_regions(&self) {
-        let (Some(window), Some(controls), Some(runtime)) =
-            (&self.window, &self.controls, &self.runtime)
-        else {
-            return;
-        };
-        if controls.input_mode() != InputMode::Selective {
+        if self.controls.input_mode() != InputMode::Selective {
             return;
         }
         let scale_factor = self.viewport_scale().scale_factor;
-        let (arena, _, layouts) = runtime.geometry();
+        let (arena, _, layouts) = self.runtime.geometry();
         let physical_layouts = scale_layouts(layouts, scale_factor as f32);
-        sync_input_regions(controls, window, arena, &physical_layouts);
+        sync_input_regions(&self.controls, &self.window, arena, &physical_layouts);
     }
 
     /// Updates `:hover` against the runtime's cached geometry — no
@@ -574,10 +562,7 @@ impl DesktopHost {
     fn handle_cursor_moved(&mut self, x: f64, y: f64) {
         self.last_cursor = (x, y);
         let (x, y) = self.to_logical_cursor(x, y);
-        let hit = self
-            .runtime
-            .as_ref()
-            .and_then(|runtime| runtime.hit_test(x, y));
+        let hit = self.runtime.hit_test(x, y);
         self.set_hovered_and_redraw(hit);
     }
 
@@ -595,16 +580,11 @@ impl DesktopHost {
     /// repaint to pick that up.
     fn set_hovered_and_redraw(&mut self, hit: Option<NodeId>) {
         let viewport = layout_viewport(self.viewport_scale());
-        let Some(runtime) = &mut self.runtime else {
-            return;
-        };
-        if !runtime.set_hovered(hit) {
+        if !self.runtime.set_hovered(hit) {
             return;
         }
-        runtime.update(viewport);
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
+        self.runtime.update(viewport);
+        self.window.request_redraw();
         self.refresh_animation_schedule();
     }
 
@@ -619,42 +599,31 @@ impl DesktopHost {
     /// so there is no matching press to remember here.
     fn handle_press(&mut self) {
         let (x, y) = self.to_logical_cursor(self.last_cursor.0, self.last_cursor.1);
-        let hit = self
-            .runtime
-            .as_ref()
-            .and_then(|runtime| runtime.hit_test(x, y));
+        let hit = self.runtime.hit_test(x, y);
 
         if hit.is_some_and(|node| self.is_drag_region(node)) {
-            if let Some(controls) = &self.controls {
-                controls.drag();
-            }
+            self.controls.drag();
             return;
         }
         self.pressed = hit;
     }
 
     fn is_drag_region(&self, node: NodeId) -> bool {
-        self.runtime.as_ref().is_some_and(|runtime| {
-            let (arena, ..) = runtime.geometry();
-            arena.id_attr(node) == Some(crate::WINDOW_DRAG_REGION_ID)
-        })
+        let (arena, ..) = self.runtime.geometry();
+        arena.id_attr(node) == Some(crate::WINDOW_DRAG_REGION_ID)
     }
 
-    /// Shared by the OS's own `CloseRequested` and `WindowControls::close()`
-    /// — one real close path, both askable to veto.
     fn should_close(&self) -> bool {
-        self.controls
-            .as_ref()
-            .is_none_or(|controls| controls.confirm_close())
+        self.controls.confirm_close()
     }
 
     /// Re-reads and re-parses the watched CSS file (see
-    /// [`run_with_css_reload`]), swaps it into the running [`UiRuntime`]
-    /// via [`UiRuntime::set_rules`] — never rebuilding the tree, so every
-    /// `Signal` keeps its value — and repaints. A failure (bad syntax, a
-    /// save-in-progress truncated read) is reported and the last good
-    /// stylesheet keeps rendering, the same recovery contract the
-    /// native inspector's own fixture preview already established.
+    /// [`WindowSpec::with_css_reload`]), swaps it into the running
+    /// [`UiRuntime`] via [`UiRuntime::set_rules`] — never rebuilding the
+    /// tree, so every `Signal` keeps its value — and repaints. A failure
+    /// (bad syntax, a save-in-progress truncated read) is reported and the
+    /// last good stylesheet keeps rendering, the same recovery contract
+    /// the native inspector's own fixture preview already established.
     fn reload_css(&mut self) {
         let Some(path) = self.css_path.clone() else {
             return;
@@ -664,9 +633,7 @@ impl DesktopHost {
             .and_then(|css| florui_style::parse_stylesheet(&css).map_err(RunError::Stylesheet));
         match loaded {
             Ok(rules) => {
-                if let Some(runtime) = &mut self.runtime {
-                    runtime.set_rules(rules);
-                }
+                self.runtime.set_rules(rules);
                 println!(
                     "florui-platform: stylesheet reloaded from {}",
                     path.display()
@@ -684,146 +651,204 @@ impl DesktopHost {
     fn handle_release(&mut self) {
         let (x, y) = self.to_logical_cursor(self.last_cursor.0, self.last_cursor.1);
         let pressed = self.pressed.take();
-        let Some(runtime) = &self.runtime else {
-            return;
-        };
-        let released_over = runtime.hit_test(x, y);
+        let released_over = self.runtime.hit_test(x, y);
         if let (Some(pressed), Some(released_over)) = (pressed, released_over)
             && pressed == released_over
         {
-            runtime.dispatch_click(pressed);
+            self.runtime.dispatch_click(pressed);
+        }
+    }
+}
+
+/// Owns every currently-open window and whichever [`WindowSpec`]s haven't
+/// been created yet. `windows` is the single source of truth for "is a
+/// window still open" — closing one removes its entry, and the process
+/// exits once the map is empty (the simplest correct "last window closes
+/// the app" default; a fully customizable close/focus/last-window
+/// contract across many windows is separate, larger work this does not
+/// attempt).
+struct DesktopHost {
+    windows: HashMap<WindowId, WindowState>,
+    pending: Vec<WindowSpec>,
+    proxy: EventLoopProxy<UserEvent>,
+    fatal_error: Option<RunError>,
+}
+
+impl DesktopHost {
+    /// Stops the event loop after logging `error`, and keeps it so
+    /// [`run_windows`] can return it once `run_app` unwinds — an
+    /// `ApplicationHandler` method has no return value of its own to
+    /// report failure through.
+    fn fail(&mut self, event_loop: &ActiveEventLoop, error: RunError) {
+        eprintln!("florui-platform: {error}");
+        self.fatal_error = Some(error);
+        event_loop.exit();
+    }
+
+    /// Shared by the OS's own `CloseRequested` and
+    /// [`UserEvent::RequestClose`] — one real close path for `id`, both
+    /// askable to veto via that window's own
+    /// [`WindowState::should_close`]. Removes just that window's entry;
+    /// only exits the whole process once none are left.
+    fn close_if_confirmed(&mut self, event_loop: &ActiveEventLoop, id: WindowId) {
+        if self.windows.get(&id).is_some_and(WindowState::should_close) {
+            self.windows.remove(&id);
+            if self.windows.is_empty() {
+                event_loop.exit();
+            }
         }
     }
 }
 
 impl ApplicationHandler<UserEvent> for DesktopHost {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
-        }
-        // Always requested — harmless for whichever presenter actually
-        // ends up used (see `gpu::transparent_capable_attributes`'s own
-        // doc), and `crate::gpu::GpuPresenter::try_new` needs the window
-        // to have already been created with these attributes to have any
-        // chance at real `TransparentSurface` compositing.
-        let mut attrs = Window::default_attributes()
-            .with_title(self.title.clone())
-            .with_decorations(matches!(self.options.decorations, DecorationMode::System));
-        if let Some((width, height)) = self.options.size {
-            attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(width, height));
-        }
-        if let Some((width, height)) = self.options.min_size {
-            attrs = attrs.with_min_inner_size(winit::dpi::LogicalSize::new(width, height));
-        }
-        let attrs = gpu::transparent_capable_attributes(attrs);
-        let window = match event_loop.create_window(attrs) {
-            Ok(window) => Arc::new(window),
-            Err(error) => return self.fail(event_loop, RunError::WindowCreation(error)),
-        };
-
-        // GPU-preferred, `softbuffer` fallback — see `crate::gpu`'s own
-        // doc for the two-tier (three-way, counting this CPU path)
-        // capability contract this implements.
-        let presenter = match GpuPresenter::try_new(window.clone()) {
-            Some(gpu_presenter) => Presenter::Gpu(Box::new(gpu_presenter)),
-            None => {
-                let context = match softbuffer::Context::new(window.clone()) {
-                    Ok(context) => context,
-                    Err(error) => return self.fail(event_loop, RunError::SurfaceCreation(error)),
-                };
-                let surface = match softbuffer::Surface::new(&context, window.clone()) {
-                    Ok(surface) => surface,
-                    Err(error) => return self.fail(event_loop, RunError::SurfaceCreation(error)),
-                };
-                Presenter::Cpu {
-                    surface,
-                    _context: context,
-                }
+        // `mem::take` (not `self.pending.drain(..)`) so the loop owns its
+        // own `Vec` independently of `self` -- `self.fail` below needs a
+        // fresh `&mut self`, which a live borrow from `drain` would
+        // conflict with. A `spec` not yet reached when the function
+        // returns early (a failure partway through the batch) is dropped
+        // along with the rest of this now-local `Vec`'s `IntoIter`,
+        // matching "the whole batch fails together."
+        for spec in std::mem::take(&mut self.pending) {
+            // Always requested — harmless for whichever presenter actually
+            // ends up used (see `gpu::transparent_capable_attributes`'s own
+            // doc), and `crate::gpu::GpuPresenter::try_new` needs the window
+            // to have already been created with these attributes to have any
+            // chance at real `TransparentSurface` compositing.
+            let mut attrs = Window::default_attributes()
+                .with_title(spec.title.clone())
+                .with_decorations(matches!(spec.options.decorations, DecorationMode::System));
+            if let Some((width, height)) = spec.options.size {
+                attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(width, height));
             }
-        };
+            if let Some((width, height)) = spec.options.min_size {
+                attrs = attrs.with_min_inner_size(winit::dpi::LogicalSize::new(width, height));
+            }
+            let attrs = gpu::transparent_capable_attributes(attrs);
+            let window = match event_loop.create_window(attrs) {
+                Ok(window) => Arc::new(window),
+                Err(error) => return self.fail(event_loop, RunError::WindowCreation(error)),
+            };
+            let window_id = window.id();
 
-        let viewport = layout_viewport(dpi::viewport_scale(
-            window.inner_size(),
-            window.scale_factor(),
-        ));
-        let root = self
-            .root
-            .take()
-            .expect("resumed only builds the runtime once, guarded by self.window");
+            // GPU-preferred, `softbuffer` fallback — see `crate::gpu`'s own
+            // doc for the two-tier (three-way, counting this CPU path)
+            // capability contract this implements.
+            let presenter = match GpuPresenter::try_new(window.clone()) {
+                Some(gpu_presenter) => Presenter::Gpu(Box::new(gpu_presenter)),
+                None => {
+                    let context = match softbuffer::Context::new(window.clone()) {
+                        Ok(context) => context,
+                        Err(error) => {
+                            return self.fail(event_loop, RunError::SurfaceCreation(error));
+                        }
+                    };
+                    let surface = match softbuffer::Surface::new(&context, window.clone()) {
+                        Ok(surface) => surface,
+                        Err(error) => {
+                            return self.fail(event_loop, RunError::SurfaceCreation(error));
+                        }
+                    };
+                    Presenter::Cpu {
+                        surface,
+                        _context: context,
+                    }
+                }
+            };
 
-        // Reachable from the component tree via `crate::use_window_controls`
-        // from this runtime's very first render onward — see
-        // `UiRuntime::with_rules_and_context`'s own doc for why that needs
-        // to be a constructor argument rather than registered afterward.
-        let controls_window = window.clone();
-        let close_proxy = self.proxy.clone();
-        let controls = Rc::new(WindowControls::new(controls_window, move || {
-            let _ = close_proxy.send_event(UserEvent::RequestClose);
-        }));
-        self.controls = Some(Rc::clone(&controls));
-        let context_providers: Vec<Box<dyn Fn()>> = vec![Box::new(move || {
-            provide_context(Rc::clone(&controls));
-        })];
+            let viewport = layout_viewport(dpi::viewport_scale(
+                window.inner_size(),
+                window.scale_factor(),
+            ));
 
-        let mut runtime = UiRuntime::with_rules_and_context(
-            self.rules.clone(),
-            root,
-            viewport,
-            context_providers,
-        );
-        let proxy = self.proxy.clone();
-        runtime.on_needs_update(move || {
-            let _ = proxy.send_event(UserEvent::Dirty);
-        });
-        // The listener above can only be registered after the runtime (and
-        // the first render its constructor already ran) exists — so an
-        // initial mount effect that itself calls `Signal::set` marks the
-        // flag with nothing listening yet, and that mark would otherwise
-        // be lost: nothing else re-checks it before the first paint.
-        if runtime.is_dirty() {
-            runtime.clear_dirty();
-            runtime.update(viewport);
+            // Reachable from the component tree via `crate::use_window_controls`
+            // from this runtime's very first render onward — see
+            // `UiRuntime::with_rules_and_context`'s own doc for why that needs
+            // to be a constructor argument rather than registered afterward.
+            let controls_window = window.clone();
+            let close_proxy = self.proxy.clone();
+            let controls = Rc::new(WindowControls::new(controls_window, move || {
+                let _ = close_proxy.send_event(UserEvent::RequestClose(window_id));
+            }));
+            let context_providers: Vec<Box<dyn Fn()>> = {
+                let controls = Rc::clone(&controls);
+                vec![Box::new(move || {
+                    provide_context(Rc::clone(&controls));
+                })]
+            };
+
+            let mut runtime = UiRuntime::with_rules_and_context(
+                spec.rules,
+                spec.root,
+                viewport,
+                context_providers,
+            );
+            let proxy = self.proxy.clone();
+            runtime.on_needs_update(move || {
+                let _ = proxy.send_event(UserEvent::Dirty(window_id));
+            });
+            // The listener above can only be registered after the runtime (and
+            // the first render its constructor already ran) exists — so an
+            // initial mount effect that itself calls `Signal::set` marks the
+            // flag with nothing listening yet, and that mark would otherwise
+            // be lost: nothing else re-checks it before the first paint.
+            if runtime.is_dirty() {
+                runtime.clear_dirty();
+                runtime.update(viewport);
+            }
+
+            let css_watcher = match &spec.css_path {
+                Some(path) => match watch_css_file(path, self.proxy.clone(), window_id) {
+                    Ok(watcher) => Some(watcher),
+                    Err(error) => return self.fail(event_loop, RunError::CssWatch(error)),
+                },
+                None => None,
+            };
+
+            let mut state = WindowState {
+                canvas_color: spec.canvas_color,
+                runtime,
+                pressed: None,
+                last_cursor: (0.0, 0.0),
+                window,
+                controls,
+                presenter,
+                next_animation_wake: None,
+                css_path: spec.css_path,
+                _css_watcher: css_watcher,
+            };
+            state.redraw();
+            // A `@keyframes` animation already running on mount (no `:hover`
+            // or other interaction needed to start it) needs a deadline set
+            // here — every other call site only does this after an `update()`
+            // this constructor's own first render already ran.
+            state.refresh_animation_schedule();
+            self.windows.insert(window_id, state);
         }
-
-        self.runtime = Some(runtime);
-        self.window = Some(window);
-        self.presenter = Some(presenter);
-        self.redraw();
-        // A `@keyframes` animation already running on mount (no `:hover`
-        // or other interaction needed to start it) needs a deadline set
-        // here — every other call site only does this after an `update()`
-        // this constructor's own first render already ran.
-        self.refresh_animation_schedule();
     }
 
     /// Runs after every loop iteration, whatever triggered it (input, a
     /// `UserEvent`, a previous animation wake) — the one place this host
-    /// decides the control flow for the *next* iteration, so an animation
-    /// deadline set by any of those triggers is always picked up here
-    /// rather than needing its own dedicated wake path.
-    ///
-    /// Only requests a redraw when [`Self::next_animation_wake`] has
-    /// actually come due; an `about_to_wait` this deadline hasn't reached
-    /// yet (woken early by an unrelated event, since `WaitUntil` is a
-    /// lower bound, not a guarantee) just re-affirms the same deadline
-    /// unchanged rather than requesting work or recomputing it — see
-    /// [`Self::refresh_animation_schedule`]'s own doc for why recomputing
-    /// here would be wrong. The actual timeline update happens in
-    /// [`Self::redraw_for_frame`] (`WindowEvent::RedrawRequested`), not
-    /// here, matching `winit`'s own guidance to do render work there.
+    /// decides the control flow for the *next* iteration. Redraws are
+    /// requested per window independently (each may be animating on its
+    /// own schedule); the next `WaitUntil` deadline is the *minimum* across
+    /// every window still waiting on one, so no window's animation lags
+    /// behind another's.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        match self.next_animation_wake {
-            Some(deadline) if std::time::Instant::now() >= deadline => {
-                if let Some(window) = &self.window {
-                    window.request_redraw();
+        let now = std::time::Instant::now();
+        let mut next_wake: Option<std::time::Instant> = None;
+        for state in self.windows.values_mut() {
+            match state.next_animation_wake {
+                Some(deadline) if now >= deadline => state.window.request_redraw(),
+                Some(deadline) => {
+                    next_wake = Some(next_wake.map_or(deadline, |current| current.min(deadline)));
                 }
+                None => {}
             }
-            Some(deadline) => {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
-            }
-            None => {
-                event_loop.set_control_flow(ControlFlow::Wait);
-            }
+        }
+        match next_wake {
+            Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
+            None => event_loop.set_control_flow(ControlFlow::Wait),
         }
     }
 
@@ -833,56 +858,62 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        if self.window.as_ref().map(|w| w.id()) != Some(window_id) {
+        // Handled before looking up `windows` mutably -- closing calls
+        // `self.close_if_confirmed`, a `&mut self` method, which a live
+        // `&mut WindowState` borrow (below) would conflict with.
+        if matches!(event, WindowEvent::CloseRequested) {
+            self.close_if_confirmed(event_loop, window_id);
             return;
         }
+        let Some(state) = self.windows.get_mut(&window_id) else {
+            return;
+        };
         match event {
-            WindowEvent::CloseRequested => {
-                if self.should_close() {
-                    event_loop.exit();
-                }
-            }
-            WindowEvent::Resized(_) => self.update_and_request_redraw(),
+            WindowEvent::Resized(_) => state.update_and_request_redraw(),
             // Fires on its own — not bundled into `Resized` — when the
             // window moves to a display with a different scale factor, or
             // the OS scale setting changes live; `viewport_scale` re-reads
             // `window.scale_factor()` fresh every call, so re-rendering is
             // all this needs.
-            WindowEvent::ScaleFactorChanged { .. } => self.update_and_request_redraw(),
+            WindowEvent::ScaleFactorChanged { .. } => state.update_and_request_redraw(),
             // A pure move (dragging the window, snapping it) changes
             // nothing about its content, only where `InputMode::Selective`'s
             // own screen-space regions sit -- resyncing them here, from
             // the already-computed layout, avoids paying for a full
             // re-render on every step of a drag.
-            WindowEvent::Moved(_) => self.resync_input_regions(),
-            WindowEvent::RedrawRequested => self.redraw_for_frame(),
+            WindowEvent::Moved(_) => state.resync_input_regions(),
+            WindowEvent::RedrawRequested => state.redraw_for_frame(),
             WindowEvent::CursorMoved { position, .. } => {
-                self.handle_cursor_moved(position.x, position.y);
+                state.handle_cursor_moved(position.x, position.y);
             }
-            WindowEvent::CursorLeft { .. } => self.handle_cursor_left(),
+            WindowEvent::CursorLeft { .. } => state.handle_cursor_left(),
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } => self.handle_press(),
+            } => state.handle_press(),
             WindowEvent::MouseInput {
                 state: ElementState::Released,
                 button: MouseButton::Left,
                 ..
-            } => self.handle_release(),
+            } => state.handle_release(),
             _ => {}
         }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::Dirty => self.update_and_request_redraw(),
-            UserEvent::CssChanged => self.reload_css(),
-            UserEvent::RequestClose => {
-                if self.should_close() {
-                    event_loop.exit();
+            UserEvent::Dirty(id) => {
+                if let Some(state) = self.windows.get_mut(&id) {
+                    state.update_and_request_redraw();
                 }
             }
+            UserEvent::CssChanged(id) => {
+                if let Some(state) = self.windows.get_mut(&id) {
+                    state.reload_css();
+                }
+            }
+            UserEvent::RequestClose(id) => self.close_if_confirmed(event_loop, id),
         }
     }
 }
