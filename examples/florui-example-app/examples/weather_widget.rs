@@ -60,6 +60,7 @@ fn main() {
         Rgba::TRANSPARENT,
         WindowOptions {
             decorations: DecorationMode::Custom,
+            ..WindowOptions::default()
         },
         widget,
     )
