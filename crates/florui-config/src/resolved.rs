@@ -155,6 +155,11 @@ pub enum Provenance {
     CargoManifest,
     /// From `[package.metadata.florui.dev]`.
     LegacyMetadata,
+    /// From the named `[environments.<name>]` overlay's own `app` table --
+    /// outranks `ConfigFile` for the same field, per the documented
+    /// resolution order (defaults/presets, base configuration, selected
+    /// environment, then supported CLI flags).
+    Environment(String),
     BuiltinDefault,
 }
 

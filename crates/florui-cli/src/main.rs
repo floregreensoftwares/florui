@@ -310,7 +310,7 @@ fn run_dev_example(package: Option<String>, example_override: Option<String>) ->
         Ok(facts) => facts,
         Err(err) => return fail(err.to_string()),
     };
-    let resolved_config = match florui_config::resolve(&facts, None) {
+    let resolved_config = match florui_config::resolve(&facts, None, None) {
         Ok(resolution) => resolution,
         Err(err) => return fail(err.to_string()),
     };

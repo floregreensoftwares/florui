@@ -32,7 +32,7 @@ fn load_config_resolved_icon() -> Option<RawIcon> {
     let facts = florui_config::resolve_cargo_project(&manifest_dir, None)
         .inspect_err(|error| eprintln!("two_windows: could not resolve the project: {error}"))
         .ok()?;
-    let resolution = florui_config::resolve(&facts, Some(florui_config::Target::Native))
+    let resolution = florui_config::resolve(&facts, Some(florui_config::Target::Native), None)
         .inspect_err(|error| {
             eprintln!("two_windows: could not resolve florui.config.toml: {error}")
         })

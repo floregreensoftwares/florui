@@ -386,7 +386,7 @@ fn project_checks_at(cwd: &Path, package: Option<&str>, target: &str) -> Vec<Che
         _ => None,
     };
     let config_exists = florui_config::config_file_path(&facts.package_root).exists();
-    let resolution = florui_config::resolve(&facts, config_target);
+    let resolution = florui_config::resolve(&facts, config_target, None);
 
     checks.push(dev_example_target_check(&facts, &resolution));
     checks.push(config_discovered_check(config_exists));
