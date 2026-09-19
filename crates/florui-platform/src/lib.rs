@@ -55,6 +55,12 @@ pub mod tray;
 mod window_controls;
 
 #[cfg(feature = "desktop")]
+mod window_state;
+
+#[cfg(feature = "desktop")]
+pub use window_state::{WindowPersistence, reset_window_state};
+
+#[cfg(feature = "desktop")]
 pub use window_controls::{
     InputMode, WINDOW_DRAG_REGION_ID, WINDOW_INPUT_REGION_CLASS, WindowControls,
     use_window_controls,
