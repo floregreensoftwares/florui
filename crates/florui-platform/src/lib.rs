@@ -20,9 +20,18 @@ mod desktop;
 
 #[cfg(feature = "desktop")]
 pub use desktop::{
-    RunError, WindowOptions, WindowSpec, run, run_windows, run_with_css_reload,
-    run_with_css_reload_and_options, run_with_options,
+    RunError, RunOutcome, WindowOptions, WindowSpec, run, run_single_instance, run_windows,
+    run_with_css_reload, run_with_css_reload_and_options, run_with_options,
 };
+
+#[cfg(feature = "desktop")]
+mod activation;
+
+#[cfg(feature = "desktop")]
+pub use activation::{ActivationEvent, ActivationEvents, SingleInstance, use_activation_events};
+
+#[cfg(feature = "desktop")]
+mod single_instance;
 
 #[cfg(feature = "desktop")]
 pub mod accessibility;

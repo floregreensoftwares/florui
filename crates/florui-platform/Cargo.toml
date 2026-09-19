@@ -58,4 +58,17 @@ windows-sys = { version = "0.60", optional = true, features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
     "Win32_System_LibraryLoader",
+    # `os::windows::single_instance`'s own dependency -- named mutex,
+    # named pipe, and the security descriptor restricting it to the
+    # current user session. `Win32_System_IO` is required transitively:
+    # `ReadFile`/`WriteFile`/`ConnectNamedPipe` are feature-gated on it
+    # in windows-sys because their signatures reference `OVERLAPPED`,
+    # even though the functions themselves live under
+    # `Storage::FileSystem`/`System::Pipes`.
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
 ] }
