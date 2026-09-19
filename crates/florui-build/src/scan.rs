@@ -7,6 +7,9 @@ use syn::{Item, LitStr};
 
 pub struct StylesheetInvocation {
     pub literal_path: String,
+    /// Whether this came from `stylesheet_scoped!` rather than plain
+    /// `stylesheet!`.
+    pub scoped: bool,
 }
 
 #[derive(Debug)]
@@ -28,23 +31,31 @@ pub fn find_stylesheet_invocations(items: &[Item]) -> Result<Vec<StylesheetInvoc
         let Item::Macro(item_macro) = item else {
             continue;
         };
-        if !is_stylesheet_macro(&item_macro.mac.path) {
+        let Some(scoped) = stylesheet_macro_kind(&item_macro.mac.path) else {
             continue;
-        }
+        };
         let path: LitStr = syn::parse2(item_macro.mac.tokens.clone()).map_err(|err| ScanError {
             message: format!("could not parse stylesheet!(...) arguments: {err}"),
         })?;
         found.push(StylesheetInvocation {
             literal_path: path.value(),
+            scoped,
         });
     }
     Ok(found)
 }
 
-fn is_stylesheet_macro(path: &syn::Path) -> bool {
-    path.segments
-        .last()
-        .is_some_and(|segment| segment.ident == "stylesheet")
+/// `Some(false)` for `stylesheet!`, `Some(true)` for `stylesheet_scoped!`,
+/// `None` for anything else.
+fn stylesheet_macro_kind(path: &syn::Path) -> Option<bool> {
+    let last = path.segments.last()?;
+    if last.ident == "stylesheet" {
+        Some(false)
+    } else if last.ident == "stylesheet_scoped" {
+        Some(true)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -60,6 +71,25 @@ mod tests {
         let found = find_stylesheet_invocations(&items(r#"stylesheet!("./button.css");"#)).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].literal_path, "./button.css");
+        assert!(!found[0].scoped);
+    }
+
+    #[test]
+    fn finds_a_scoped_invocation() {
+        let found =
+            find_stylesheet_invocations(&items(r#"stylesheet_scoped!("./card.css");"#)).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].literal_path, "./card.css");
+        assert!(found[0].scoped);
+    }
+
+    #[test]
+    fn finds_a_qualified_scoped_invocation() {
+        let found =
+            find_stylesheet_invocations(&items(r#"florui::stylesheet_scoped!("./card.css");"#))
+                .unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].scoped);
     }
 
     #[test]

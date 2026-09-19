@@ -32,7 +32,7 @@ pub fn expand(nodes: Vec<Node>) -> TokenStream {
         };
     }
 
-    let values = nodes.iter().map(child_value);
+    let values = nodes.iter().map(|node| child_value(node, None));
     quote! {
         {
             let mut __roots: ::std::vec::Vec<::florui::Element> = ::std::vec::Vec::new();
@@ -46,7 +46,13 @@ pub fn expand(nodes: Vec<Node>) -> TokenStream {
     }
 }
 
-fn child_value(node: &Node) -> TokenStream {
+/// `scope` is the enclosing `scope={expr}` value, if any element
+/// higher in this same `view!` tree declared one — inherited into every
+/// literal-tag descendant here, but never into a `component_call`, whose
+/// own body is a separate `view!` expansion this one has no visibility
+/// into (that boundary is what keeps scoping from leaking into a child
+/// component's own internals for free).
+fn child_value(node: &Node, scope: Option<&TokenStream>) -> TokenStream {
     match node {
         Node::Expr(expr) => quote! { (#expr) },
         Node::Text(text) => quote! { #text },
@@ -57,16 +63,16 @@ fn child_value(node: &Node) -> TokenStream {
             self_closing,
         } => {
             if Node::is_component(tag) {
-                component_call(tag, attrs, children, *self_closing)
+                component_call(tag, attrs, children, *self_closing, scope)
             } else {
-                primitive_element(tag, attrs, children)
+                primitive_element(tag, attrs, children, scope)
             }
         }
     }
 }
 
-fn children_vec(children: &[Node]) -> TokenStream {
-    let values = children.iter().map(child_value);
+fn children_vec(children: &[Node], scope: Option<&TokenStream>) -> TokenStream {
+    let values = children.iter().map(|node| child_value(node, scope));
     quote! {
         {
             let mut __children: ::std::vec::Vec<::florui::Element> = ::std::vec::Vec::new();
@@ -76,12 +82,37 @@ fn children_vec(children: &[Node]) -> TokenStream {
     }
 }
 
-fn primitive_element(tag: &Ident, attrs: &[(Ident, AttrValue)], children: &[Node]) -> TokenStream {
+/// `scope={...}` on a primitive element, like `key=` on a component
+/// call, is a `view!`-level directive, not an attribute of the element
+/// itself — it never reaches `Element::node`'s own attrs.
+fn is_scope_attr(name: &Ident) -> bool {
+    name == "scope"
+}
+
+fn primitive_element(
+    tag: &Ident,
+    attrs: &[(Ident, AttrValue)],
+    children: &[Node],
+    inherited_scope: Option<&TokenStream>,
+) -> TokenStream {
     let tag_str = tag.to_string();
+    let own_scope =
+        attrs
+            .iter()
+            .find(|(name, _)| is_scope_attr(name))
+            .map(|(_, value)| match value {
+                AttrValue::Lit(lit) => quote! { #lit },
+                AttrValue::Expr(expr) => quote! { #expr },
+            });
+    let effective_scope = own_scope.as_ref().or(inherited_scope);
+
     let mut attr_pairs = Vec::new();
     let mut handler_pairs = Vec::new();
 
     for (name, value) in attrs {
+        if is_scope_attr(name) {
+            continue;
+        }
         let name_str = name.to_string();
         if let Some(event) = event_name(&name_str) {
             handler_pairs.push(match value {
@@ -101,10 +132,20 @@ fn primitive_element(tag: &Ident, attrs: &[(Ident, AttrValue)], children: &[Node
                 AttrValue::Lit(lit) => quote! { (#lit).to_string() },
                 AttrValue::Expr(expr) => quote! { (#expr).to_string() },
             };
+            let value_expr = if name_str == "class" {
+                match effective_scope {
+                    Some(scope) => {
+                        quote! { ::florui::apply_scope_to_class_attr(&(#value_expr), #scope) }
+                    }
+                    None => value_expr,
+                }
+            } else {
+                value_expr
+            };
             attr_pairs.push(quote! { (#name_str.to_string(), #value_expr) });
         }
     }
-    let children = children_vec(children);
+    let children = children_vec(children, effective_scope);
 
     if handler_pairs.is_empty() {
         quote! {
@@ -129,11 +170,17 @@ fn is_key_attr(name: &Ident) -> bool {
     name == "key"
 }
 
+/// `scope` here is the enclosing `scope`, applied only to `children`:
+/// markup slotted into a component call is authored in the *caller's*
+/// `view!` block, so it keeps the caller's scope, exactly like any other
+/// literal element there — it never affects the component's own props or
+/// reaches inside the component's own separately-expanded body.
 fn component_call(
     tag: &Ident,
     attrs: &[(Ident, AttrValue)],
     children: &[Node],
     self_closing: bool,
+    scope: Option<&TokenStream>,
 ) -> TokenStream {
     let props_ident = format_ident!("{tag}Props");
     let key_attr = attrs.iter().find(|(name, _)| is_key_attr(name));
@@ -151,7 +198,7 @@ fn component_call(
     let children_field = if self_closing {
         TokenStream::new()
     } else {
-        let children = children_vec(children);
+        let children = children_vec(children, scope);
         quote! { children: ::florui::Children::from(#children), }
     };
 

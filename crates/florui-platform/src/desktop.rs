@@ -284,6 +284,33 @@ impl WindowSpec {
             css_path: Some(css_path),
         })
     }
+
+    /// Like [`Self::new`], but for already-parsed rules instead of one raw
+    /// CSS string — infallible, since parsing already happened. The route
+    /// for multiple `StylesheetSource`s (e.g. one or more
+    /// `stylesheet_scoped!` declarations plus any plain `stylesheet!`
+    /// ones): compile each through `florui_style::compile_sources` first,
+    /// which applies each scoped source's own class-selector rewrite
+    /// before parsing, something a single concatenated CSS string
+    /// couldn't represent (a scope boundary needs to be a property of one
+    /// particular source, not the whole merged text). No CSS hot reload —
+    /// same tradeoff as [`Self::new`].
+    pub fn with_rules(
+        title: impl Into<String>,
+        rules: Vec<florui_style::Rule>,
+        canvas_color: Rgba,
+        options: WindowOptions,
+        root: impl Fn() -> Element + 'static,
+    ) -> Self {
+        Self {
+            title: title.into(),
+            canvas_color,
+            rules,
+            options,
+            root: Box::new(root),
+            css_path: None,
+        }
+    }
 }
 
 /// Watches `css_path`'s parent directory (not the file itself, so editors

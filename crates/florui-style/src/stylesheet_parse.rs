@@ -8,6 +8,7 @@
 
 use std::sync::{Arc, LazyLock, Mutex};
 
+use florui::StylesheetSource;
 use style::media_queries::MediaList;
 use style::servo_arc::Arc as StyloArc;
 use style::stylesheets::{AllowImportRules, Origin, Stylesheet};
@@ -15,6 +16,7 @@ use style::stylesheets::{AllowImportRules, Origin, Stylesheet};
 use crate::container_query_adapter::{self, ContainerQueryBlock};
 use crate::error::StyleError;
 use crate::height_media_adapter::substitute_height_features;
+use crate::scope_adapter::scope_class_selectors;
 use crate::stylo::shared_lock;
 
 /// Stylo gates `display: grid`/`inline-grid` and the `grid-*` longhands
@@ -145,6 +147,30 @@ pub fn parse_stylesheet(css: &str) -> Result<Vec<Rule>, StyleError> {
     parse_stylesheet_with_origin(css, Origin::Author).map(|rule| vec![rule])
 }
 
+/// Compiles a whole application's collected `StylesheetSource`s (typically
+/// `FLORUI_STYLESHEETS`, in their already-cascade-ordered sequence) into
+/// one `Rule` per source. A source with `scope: Some(_)` (from
+/// `stylesheet_scoped!`) has [`scope_class_selectors`] applied to its CSS
+/// text *before* parsing — a one-time, compile-time-fixed rewrite, unlike
+/// `RuleKind::Dynamic`'s own per-viewport/per-container re-substitution —
+/// so its class selectors carry the same scope suffix `view!`'s
+/// `scope={...}` directive already applied to the matching elements.
+/// A source with `scope: None` is parsed exactly as [`parse_stylesheet`]
+/// always has. One `Rule` per source (not a concatenated single string)
+/// keeps every source's own scope boundary intact for this rewrite.
+pub fn compile_sources(sources: &[StylesheetSource]) -> Result<Vec<Rule>, StyleError> {
+    sources
+        .iter()
+        .map(|source| {
+            let css = match source.scope {
+                Some(scope) => scope_class_selectors(source.css, scope),
+                None => std::borrow::Cow::Borrowed(source.css),
+            };
+            parse_stylesheet_with_origin(&css, Origin::Author)
+        })
+        .collect()
+}
+
 pub(crate) fn parse_stylesheet_with_origin(css: &str, origin: Origin) -> Result<Rule, StyleError> {
     LazyLock::force(&GRID_ENABLED);
     LazyLock::force(&BACKDROP_FILTER_ENABLED);
@@ -242,5 +268,61 @@ mod tests {
         // Real CSS's own error-recovery model: an unclosed block or a
         // stray declaration is dropped, not rejected outright.
         assert!(parse_stylesheet(".a { color: #fff;").is_ok());
+    }
+
+    /// The spec's literal acceptance test for explicit style scoping: two
+    /// components using the same local class name (`.box`) must not
+    /// collide — proven end to end here through the real Stylo cascade,
+    /// not just the text-rewrite unit tests in `scope_adapter`.
+    #[test]
+    fn two_scoped_stylesheets_with_the_same_local_class_resolve_independently() {
+        use florui::StyleScope;
+
+        let card_scope = StyleScope::new("pkg:card.rs:./card.css");
+        let widget_scope = StyleScope::new("pkg:widget.rs:./widget.css");
+        let sources = [
+            StylesheetSource {
+                id: "pkg:card.rs:./card.css",
+                source_path: "./card.css",
+                css: ".box { background-color: #ff0000; }",
+                scope: Some(card_scope),
+            },
+            StylesheetSource {
+                id: "pkg:widget.rs:./widget.css",
+                source_path: "./widget.css",
+                css: ".box { background-color: #0000ff; }",
+                scope: Some(widget_scope),
+            },
+        ];
+        let rules = compile_sources(&sources).unwrap();
+
+        let card_class = format!("box{}", card_scope.suffix());
+        let widget_class = format!("box{}", widget_scope.suffix());
+        let tree: florui::Element = florui::prelude::view! {
+            <div>
+                <div class={card_class}></div>
+                <div class={widget_class}></div>
+            </div>
+        };
+        let arena = crate::tree::Arena::build(&tree);
+        let computed = crate::cascade::compute(
+            &arena,
+            &rules,
+            &crate::interaction::InteractionState::new(),
+            crate::cascade::Viewport::default(),
+            &mut crate::AnimationTimeline::default(),
+        );
+
+        let roots = arena.roots();
+        let container = roots[0];
+        let children = arena.children(container);
+        assert_eq!(
+            computed[&children[0]].background_color,
+            crate::color::Rgba::opaque(0xff, 0x00, 0x00)
+        );
+        assert_eq!(
+            computed[&children[1]].background_color,
+            crate::color::Rgba::opaque(0x00, 0x00, 0xff)
+        );
     }
 }

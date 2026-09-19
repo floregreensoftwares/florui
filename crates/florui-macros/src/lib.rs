@@ -2,6 +2,7 @@
 
 mod component;
 mod stylesheet;
+mod stylesheet_scoped;
 mod view;
 
 use proc_macro::TokenStream;
@@ -77,6 +78,37 @@ pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn stylesheet(input: TokenStream) -> TokenStream {
     match stylesheet::expand(input.into()) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+/// Like [`stylesheet!`], but opts the declared CSS into local scoping: its
+/// class selectors and any `view!` element under a matching
+/// `scope={SCOPE}` directive in the same module are both suffixed
+/// with the same deterministic scope, so a local class name never collides
+/// with the same name declared by another `stylesheet_scoped!` elsewhere.
+/// Global declarations via [`stylesheet!`] are unaffected — scoping is
+/// strictly opt-in, per-declaration.
+///
+/// Not runnable as a doctest, for the same reason as [`stylesheet!`]; see
+/// the integration tests in the `florui` and `florui-style` crates.
+///
+/// ```rust,ignore
+/// use florui::prelude::*;
+///
+/// stylesheet_scoped!("./button.css");
+///
+/// #[component]
+/// fn Button(label: String) -> Element {
+///     view! {
+///         <button class="button" scope={SCOPE}>{label}</button>
+///     }
+/// }
+/// ```
+#[proc_macro]
+pub fn stylesheet_scoped(input: TokenStream) -> TokenStream {
+    match stylesheet_scoped::expand(input.into()) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }

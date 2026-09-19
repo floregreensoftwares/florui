@@ -18,6 +18,14 @@ pub fn generate_manifest(stylesheets: &[CollectedStylesheet]) -> String {
         out.push_str(&format!("        id: {:?},\n", sheet.id));
         out.push_str(&format!("        source_path: {:?},\n", sheet.literal_path));
         out.push_str(&format!("        css: {:?},\n", sheet.css));
+        if sheet.scoped {
+            out.push_str(&format!(
+                "        scope: ::std::option::Option::Some(::florui::StyleScope::new({:?})),\n",
+                sheet.id
+            ));
+        } else {
+            out.push_str("        scope: ::std::option::Option::None,\n");
+        }
         out.push_str("    },\n");
     }
     out.push_str("];\n");
@@ -31,12 +39,17 @@ mod tests {
     use super::*;
 
     fn sheet(id: &str, literal_path: &str, css: &str) -> CollectedStylesheet {
+        scoped_sheet(id, literal_path, css, false)
+    }
+
+    fn scoped_sheet(id: &str, literal_path: &str, css: &str, scoped: bool) -> CollectedStylesheet {
         CollectedStylesheet {
             id: id.to_string(),
             declared_at: PathBuf::from("src/lib.rs"),
             literal_path: literal_path.to_string(),
             css_path: PathBuf::from(literal_path),
             css: css.to_string(),
+            scoped,
         }
     }
 
@@ -58,6 +71,27 @@ mod tests {
         assert_eq!(parsed.items.len(), 1);
         assert!(source.contains("pkg:src/lib.rs:./a.css"));
         assert!(source.contains(".a { color: red; }"));
+    }
+
+    #[test]
+    fn a_scoped_entry_generates_a_style_class_scope_construction() {
+        let stylesheets = vec![scoped_sheet(
+            "pkg:src/card.rs:./card.css",
+            "./card.css",
+            ".box {}",
+            true,
+        )];
+        let source = generate_manifest(&stylesheets);
+        let parsed: syn::File = syn::parse_str(&source).expect("generated source must parse");
+        assert_eq!(parsed.items.len(), 1);
+        assert!(source.contains("::florui::StyleScope::new(\"pkg:src/card.rs:./card.css\")"));
+    }
+
+    #[test]
+    fn an_unscoped_entry_generates_a_plain_none() {
+        let stylesheets = vec![sheet("pkg:src/lib.rs:./a.css", "./a.css", ".a {}")];
+        let source = generate_manifest(&stylesheets);
+        assert!(source.contains("scope: ::std::option::Option::None,"));
     }
 
     #[test]
