@@ -2,6 +2,10 @@ schema_version = 1
 
 [app]
 name = "florui-example-app"
+identifier = "com.floregreen.florui-example-app"
 
 [app.icons]
 source = "assets/icons/app-icon.svg"
+
+[window.persistence]
+enabled = true

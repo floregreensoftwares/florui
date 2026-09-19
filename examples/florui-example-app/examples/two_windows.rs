@@ -7,11 +7,19 @@
 //! `WindowControls::set_icon`, to window A's icon -- a visible,
 //! deterministic proof of the update path, not a timer.
 //!
+//! Both windows also opt into bounds persistence (`[window.persistence]`
+//! in this package's own `florui.config.toml`, `enabled = true`) under
+//! distinct keys (`"window-a"`/`"window-b"`) -- move or resize either one,
+//! relaunch, and each reopens where it was left, independently of the
+//! other.
+//!
 //! `cargo run --example two_windows -p florui-example-app`
 
 use florui::prelude::*;
 use florui_icon::RawIcon;
-use florui_platform::{WindowOptions, WindowSpec, run_windows, use_window_controls};
+use florui_platform::{
+    WindowOptions, WindowPersistence, WindowSpec, run_windows, use_window_controls,
+};
 use florui_reactive::use_signal;
 use florui_style::Rgba;
 
@@ -43,6 +51,39 @@ fn load_config_resolved_icon() -> Option<RawIcon> {
         .ok()
 }
 
+/// Resolves `florui.config.toml` again (a fresh, independent resolution --
+/// `florui-config` doesn't cache, and this crate never depends on it, so
+/// each app-side call site resolves what it needs on its own) and, if
+/// `[window.persistence]` is enabled and `app.identifier` is set, returns
+/// a `WindowPersistence` for `key` -- `None` (no persistence, logged
+/// nowhere further; a missing identifier is an ordinary, expected
+/// configuration choice, not a failure) otherwise. Both windows here share
+/// one `enabled` flag from config but get their own distinct `key`,
+/// exactly the "independent state for multiple windows" the config schema
+/// itself doesn't have a multi-window shape for -- that's this call site's
+/// own decision, not something `florui-config` resolves for it.
+fn resolve_window_persistence(key: &str) -> Option<WindowPersistence> {
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let facts = florui_config::resolve_cargo_project(&manifest_dir, None)
+        .inspect_err(|error| eprintln!("two_windows: could not resolve the project: {error}"))
+        .ok()?;
+    let resolution = florui_config::resolve(&facts, Some(florui_config::Target::Native), None)
+        .inspect_err(|error| {
+            eprintln!("two_windows: could not resolve florui.config.toml: {error}")
+        })
+        .ok()?;
+    let app_identifier = resolution.config.app.identifier?;
+    resolution
+        .config
+        .window
+        .persistence
+        .enabled
+        .then(|| WindowPersistence {
+            app_identifier,
+            key: key.to_owned(),
+        })
+}
+
 fn main() {
     let icon_a = load_config_resolved_icon();
 
@@ -58,6 +99,7 @@ fn main() {
         Rgba::opaque(0x1e, 0x1e, 0x22),
         WindowOptions {
             icon: icon_a.clone(),
+            persistence: resolve_window_persistence("window-a"),
             ..WindowOptions::default()
         },
         window_a,
@@ -70,6 +112,7 @@ fn main() {
         Rgba::opaque(0x22, 0x1a, 0x1e),
         WindowOptions {
             icon: Some(icon_b),
+            persistence: resolve_window_persistence("window-b"),
             ..WindowOptions::default()
         },
         move || window_b(icon_a.clone()),
