@@ -14,6 +14,7 @@
 //! Cursor positions (physical, from `winit`) are converted the other way
 //! before hit-testing against that same logical layout.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -34,9 +35,11 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::window::{Window, WindowId};
 
 use crate::UiRuntime;
+use crate::activation::{ActivationEvent, ActivationEvents, ActivationQueue, SingleInstance};
 use crate::appearance::DecorationMode;
 use crate::dpi::{self, ViewportScale};
 use crate::gpu::{self, GpuPresenter};
+use crate::single_instance::{self, HandoffOutcome, InstanceRole};
 use crate::window_controls::{InputMode, ScreenRect, WindowControls};
 use crate::window_state::{self, WindowPersistence};
 
@@ -48,6 +51,11 @@ pub enum RunError {
     SurfaceCreation(softbuffer::SoftBufferError),
     CssFile(std::io::Error),
     CssWatch(notify::Error),
+    /// The named mutex or named pipe itself could not be set up (e.g. the
+    /// security descriptor failed to build) — distinct from a normal
+    /// hand-off failure, which is reported through [`RunOutcome`] instead
+    /// since it isn't fatal to this process.
+    SingleInstance(std::io::Error),
 }
 
 impl std::fmt::Display for RunError {
@@ -61,6 +69,9 @@ impl std::fmt::Display for RunError {
             }
             RunError::CssFile(err) => write!(f, "could not read stylesheet file: {err}"),
             RunError::CssWatch(err) => write!(f, "could not watch stylesheet file: {err}"),
+            RunError::SingleInstance(err) => {
+                write!(f, "single-instance setup failed: {err}")
+            }
         }
     }
 }
@@ -74,6 +85,7 @@ impl std::error::Error for RunError {
             RunError::SurfaceCreation(err) => Some(err),
             RunError::CssFile(err) => Some(err),
             RunError::CssWatch(err) => Some(err),
+            RunError::SingleInstance(err) => Some(err),
         }
     }
 }
@@ -96,6 +108,10 @@ enum UserEvent {
     /// e.g., Alt+F4) — one real shutdown path, not two that could drift
     /// apart.
     RequestClose(WindowId),
+    /// An [`ActivationEvent`] arrived from another launch of this same
+    /// application — see [`run_single_instance`]. Not per-window, unlike
+    /// every other variant here: activation isn't scoped to one window.
+    Activation(ActivationEvent),
 }
 
 /// What [`run_with_options`]/[`run_with_css_reload_and_options`] ask for
@@ -259,11 +275,106 @@ pub fn run_windows(initial: Vec<WindowSpec>) -> Result<(), RunError> {
         pending: initial,
         proxy: event_loop.create_proxy(),
         fatal_error: None,
+        activation_queue: None,
+        primary_window_id: None,
     };
     event_loop.run_app(&mut host).map_err(RunError::EventLoop)?;
     match host.fatal_error {
         Some(error) => Err(error),
         None => Ok(()),
+    }
+}
+
+/// What [`run_single_instance`] actually did — distinct from [`RunError`],
+/// since a failed hand-off is not fatal to this process; it's a normal
+/// outcome the caller decides how to react to (e.g. become primary itself
+/// instead).
+#[derive(Debug)]
+pub enum RunOutcome {
+    /// This process was (or became) primary and its event loop ran to
+    /// completion — the same as a plain [`run_windows`] call returning
+    /// `Ok`.
+    Ran,
+    /// `launch_event` was delivered to, and acknowledged by, the
+    /// already-running primary instance. No window was ever created —
+    /// the caller should exit.
+    HandedOff,
+    /// Another instance owns the single-instance mutex, but the hand-off
+    /// itself did not complete (the owner was unreachable, died mid-transfer,
+    /// or never acknowledged within the configured timeout). The
+    /// activation data is handed back rather than silently discarded —
+    /// this must never be reported as [`RunOutcome::HandedOff`], and the
+    /// caller decides what to do next (e.g. call [`run_windows`] itself,
+    /// deliberately becoming a fresh primary).
+    HandoffFailed(ActivationEvent),
+}
+
+/// Same as [`run_windows`], but first enforces `config`'s opt-in
+/// single-instance behavior: exactly one process at a time owns
+/// `config.app_identifier`'s OS-backed mutex (see
+/// `crate::os::windows::single_instance`'s own doc — Windows-only for
+/// now; every other platform always becomes primary, see
+/// `crate::single_instance`'s stub). `launch_event` is this process's own
+/// activation payload — sent to the existing primary if this process
+/// turns out to be secondary, or the first event a fresh primary's own
+/// [`crate::use_activation_events`] sees, whichever applies.
+///
+/// A secondary instance never creates a window or touches an `EventLoop`
+/// at all — it performs the hand-off synchronously and returns.
+pub fn run_single_instance(
+    config: SingleInstance,
+    launch_event: ActivationEvent,
+    initial: Vec<WindowSpec>,
+) -> Result<RunOutcome, RunError> {
+    match single_instance::acquire(&config.app_identifier).map_err(RunError::SingleInstance)? {
+        InstanceRole::Secondary => {
+            match single_instance::handoff(
+                &config.app_identifier,
+                &launch_event,
+                config.handoff_timeout,
+            ) {
+                HandoffOutcome::Delivered => Ok(RunOutcome::HandedOff),
+                HandoffOutcome::Failed => Ok(RunOutcome::HandoffFailed(launch_event)),
+            }
+        }
+        InstanceRole::Primary(mutex_ownership) => {
+            let event_loop = EventLoop::<UserEvent>::with_user_event()
+                .build()
+                .map_err(RunError::EventLoop)?;
+            event_loop.set_control_flow(ControlFlow::Wait);
+
+            let activation_queue = Rc::new(RefCell::new(ActivationQueue::default()));
+            let proxy = event_loop.create_proxy();
+            single_instance::spawn_activation_listener(&config.app_identifier, move |event| {
+                let _ = proxy.send_event(UserEvent::Activation(event));
+            })
+            .map_err(RunError::SingleInstance)?;
+            // This process's own launch event goes straight into the same
+            // queue the primary window's first render will read — no pipe
+            // round trip needed for the process that already owns the
+            // mutex.
+            activation_queue.borrow_mut().push(launch_event);
+
+            // Keeps the mutex held for as long as this process is primary
+            // -- dropped (releasing it) only once `run_app` below returns,
+            // i.e. when every window has closed and this process is about
+            // to exit.
+            let _mutex_ownership = mutex_ownership;
+
+            let mut host = DesktopHost {
+                windows: HashMap::new(),
+                pending: initial,
+                proxy: event_loop.create_proxy(),
+                fatal_error: None,
+                activation_queue: Some(activation_queue),
+                primary_window_id: None,
+            };
+            event_loop.run_app(&mut host).map_err(RunError::EventLoop)?;
+            match host.fatal_error {
+                Some(error) => Err(error),
+                None => Ok(RunOutcome::Ran),
+            }
+        }
     }
 }
 
@@ -825,6 +936,17 @@ struct DesktopHost {
     pending: Vec<WindowSpec>,
     proxy: EventLoopProxy<UserEvent>,
     fatal_error: Option<RunError>,
+    /// `Some` only under [`run_single_instance`] — shared with the
+    /// pipe-listener thread's `UserEvent::Activation` sends and with the
+    /// primary window's own [`ActivationEvents`] context (see `resumed`).
+    activation_queue: Option<Rc<RefCell<ActivationQueue>>>,
+    /// The first window `resumed` ever creates — the sole window
+    /// [`ActivationEvents`] context is provided to and the sole target
+    /// `UserEvent::Activation` redraws. Multi-window fan-out is
+    /// deliberately out of scope: a queue shared by every window would
+    /// make `take_pending` a race over which window's render drains it
+    /// first.
+    primary_window_id: Option<WindowId>,
 }
 
 impl DesktopHost {
@@ -948,6 +1070,13 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 Err(error) => return self.fail(event_loop, RunError::WindowCreation(error)),
             };
             let window_id = window.id();
+            // The very first window this host ever creates, across its
+            // whole lifetime -- `pending` is only ever drained once (see
+            // this function's own doc), so this is unambiguous.
+            let is_primary_window = self.primary_window_id.is_none();
+            if is_primary_window {
+                self.primary_window_id = Some(window_id);
+            }
             if should_restore_maximized {
                 window.set_maximized(true);
             }
@@ -991,12 +1120,20 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
             let controls = Rc::new(WindowControls::new(controls_window, move || {
                 let _ = close_proxy.send_event(UserEvent::RequestClose(window_id));
             }));
-            let context_providers: Vec<Box<dyn Fn()>> = {
+            let mut context_providers: Vec<Box<dyn Fn()>> = {
                 let controls = Rc::clone(&controls);
                 vec![Box::new(move || {
                     provide_context(Rc::clone(&controls));
                 })]
             };
+            // Only the primary window ever gets this context -- see
+            // `DesktopHost::primary_window_id`'s own doc for why.
+            if is_primary_window && let Some(queue) = &self.activation_queue {
+                let events = ActivationEvents(Rc::clone(queue));
+                context_providers.push(Box::new(move || {
+                    provide_context(events.clone());
+                }));
+            }
 
             let respect_reduced_motion = spec.options.respect_reduced_motion;
             let theme_preference = spec.options.theme;
@@ -1158,6 +1295,22 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 }
             }
             UserEvent::RequestClose(id) => self.close_if_confirmed(event_loop, id),
+            UserEvent::Activation(activation_event) => {
+                let Some(queue) = &self.activation_queue else {
+                    return;
+                };
+                queue.borrow_mut().push(activation_event);
+                // If the primary window hasn't mounted yet, there's
+                // nothing to redraw -- its own first `update()` (already
+                // run inside `UiRuntime::with_rules_and_context`) will see
+                // this queue's contents, since the same `Rc` is what its
+                // context provider reads.
+                if let Some(id) = self.primary_window_id
+                    && let Some(state) = self.windows.get_mut(&id)
+                {
+                    state.update_and_request_redraw();
+                }
+            }
         }
     }
 }
