@@ -53,11 +53,59 @@ pub struct AnimationTimeline {
     pub(crate) sets: DocumentAnimationSet,
     previous_styles: HashMap<usize, StyloArc<ComputedValues>>,
     touched_this_call: Vec<usize>,
+    /// The real OS accessibility preference, as of the last time a host
+    /// pushed it in — `false` (the `Default` value) for every caller that
+    /// never does, which is every caller except a real desktop host (tests,
+    /// benches, `florui-conformance`'s deterministic snapshots). Read-only
+    /// truth for `@media (prefers-reduced-motion: ...)`; see
+    /// [`Self::should_suppress_animations`] for the separate, opt-out-able
+    /// mechanism this alone does not drive.
+    os_prefers_reduced_motion: bool,
+    /// Inverted so the derived `Default` (`false`) means "not disabled",
+    /// i.e. auto-suppression enabled — the required default — without
+    /// `new()` needing to diverge from `default()` (every non-desktop
+    /// caller, including `Default::default()` call sites this crate can't
+    /// see, must agree). Read via [`Self::should_suppress_animations`];
+    /// written via [`Self::set_auto_suppress_motion`], which keeps the
+    /// public API framed positively (`true` = suppress).
+    auto_suppress_motion_disabled: bool,
 }
 
 impl AnimationTimeline {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The real OS accessibility preference — used only for
+    /// `@media (prefers-reduced-motion: ...)`, independent of
+    /// [`Self::should_suppress_animations`]'s own opt-out: an author who
+    /// explicitly wrote that media query deserves the real answer
+    /// regardless of whether this host opted out of automatic suppression.
+    pub(crate) fn prefers_reduced_motion(&self) -> bool {
+        self.os_prefers_reduced_motion
+    }
+
+    /// Pushes a freshly-read OS accessibility preference in — a real host
+    /// calls this once per relevant update, since nothing here reads the
+    /// OS itself (this crate has no OS integration at all; see
+    /// `florui_platform::accessibility`).
+    pub fn set_os_prefers_reduced_motion(&mut self, value: bool) {
+        self.os_prefers_reduced_motion = value;
+    }
+
+    /// Opts into (`true`, the default) or out of (`false`) automatic
+    /// transition/`@keyframes` suppression when the OS prefers reduced
+    /// motion. Does not affect `@media (prefers-reduced-motion: ...)`
+    /// itself, which always reflects the real OS truth.
+    pub fn set_auto_suppress_motion(&mut self, value: bool) {
+        self.auto_suppress_motion_disabled = !value;
+    }
+
+    /// Whether `transition`/`@keyframes` animations should be suppressed
+    /// outright this call — both the OS preference and the opt-out must
+    /// agree.
+    pub(crate) fn should_suppress_animations(&self) -> bool {
+        !self.auto_suppress_motion_disabled && self.os_prefers_reduced_motion
     }
 
     /// Sets the instant `compute()` samples any in-progress animation or
@@ -71,8 +119,16 @@ impl AnimationTimeline {
 
     /// Whether anything this timeline is tracking still needs another
     /// frame to keep progressing — the caller's cue to keep scheduling
-    /// redraws instead of going idle.
+    /// redraws instead of going idle. `false` whenever
+    /// [`Self::should_suppress_animations`] is active: Stylo's own
+    /// bookkeeping (`sets`) still tracks a suppressed animation internally
+    /// (see [`crate::stylo`]'s own suppression point, which leaves this
+    /// untouched on purpose), but nothing suppressed is visibly changing
+    /// frame to frame, so scheduling more redraws for it would be pointless.
     pub fn is_animating(&self) -> bool {
+        if self.should_suppress_animations() {
+            return false;
+        }
         self.sets
             .sets
             .read()

@@ -85,13 +85,18 @@ impl UiRuntime {
 
     /// Same as [`Self::new`], but for a host that already parsed its
     /// stylesheet (typically to fail fast before opening a window) and
-    /// doesn't want to parse it again just to build the runtime.
+    /// doesn't want to parse it again just to build the runtime. No real
+    /// OS accessibility signal reaches this path (devtools, benches, and
+    /// most tests use it) — `respect_reduced_motion` stays at its
+    /// documented default (`true`) and the initial OS-preference read is
+    /// `false` (no preference), matching the deterministic behavior every
+    /// non-desktop caller already relies on.
     pub(crate) fn with_rules(
         rules: Vec<Rule>,
         root: impl Fn() -> Element + 'static,
         viewport: Size<AvailableSpace>,
     ) -> Self {
-        Self::with_rules_and_context(rules, root, viewport, Vec::new())
+        Self::with_rules_and_context(rules, root, viewport, Vec::new(), true, false)
     }
 
     /// Same as [`Self::with_rules`], but for a host (only
@@ -101,13 +106,30 @@ impl UiRuntime {
     /// render — see `extra_context_providers`'s own doc for why that
     /// matters and [`crate::use_committed_size`] for the established
     /// pattern a capability provided this way follows.
+    ///
+    /// `respect_reduced_motion`/`initial_os_prefers_reduced_motion` must be
+    /// constructor arguments, not set afterward via
+    /// [`Self::set_os_prefers_reduced_motion`] — this constructor already
+    /// runs its own first [`Self::update`] below, before a caller gets the
+    /// constructed runtime back, exactly the same trap
+    /// `extra_context_providers` already had to avoid (see its own doc).
+    /// Seeded here, a `@keyframes` animation already running at mount is
+    /// correctly suppressed (or not) on frame one; seeded only afterward,
+    /// it would render unsuppressed for exactly one frame regardless of
+    /// the real OS preference.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_rules_and_context(
         rules: Vec<Rule>,
         root: impl Fn() -> Element + 'static,
         viewport: Size<AvailableSpace>,
         extra_context_providers: Vec<Box<dyn Fn()>>,
+        respect_reduced_motion: bool,
+        initial_os_prefers_reduced_motion: bool,
     ) -> Self {
         let (scope, dirty) = ComponentScope::new();
+        let mut animation_timeline = AnimationTimeline::new();
+        animation_timeline.set_auto_suppress_motion(respect_reduced_motion);
+        animation_timeline.set_os_prefers_reduced_motion(initial_os_prefers_reduced_motion);
         let mut runtime = Self {
             scope,
             dirty,
@@ -118,7 +140,7 @@ impl UiRuntime {
             arena: Arena::build(&Element::Fragment(Vec::new())),
             styles: HashMap::new(),
             layouts: HashMap::new(),
-            animation_timeline: AnimationTimeline::new(),
+            animation_timeline,
             animation_epoch: std::time::Instant::now(),
             font: florui_text::Font::load_embedded(),
             executor: Rc::new(LocalExecutor::new()),
@@ -127,6 +149,15 @@ impl UiRuntime {
         };
         runtime.update(viewport);
         runtime
+    }
+
+    /// Pushes a freshly-read real OS reduced-motion preference in — a real
+    /// desktop host calls this fresh before every [`Self::update`] after
+    /// construction (the constructor itself already seeds the initial
+    /// value; see [`Self::with_rules_and_context`]'s own doc for why that
+    /// distinction matters). Does not itself trigger a render.
+    pub(crate) fn set_os_prefers_reduced_motion(&mut self, value: bool) {
+        self.animation_timeline.set_os_prefers_reduced_motion(value);
     }
 
     /// The flag that marks itself whenever a
@@ -491,12 +522,53 @@ mod tests {
         let providers: Vec<Box<dyn Fn()>> =
             vec![Box::new(|| florui_reactive::provide_context(42_i32))];
 
-        let _runtime = UiRuntime::with_rules_and_context(Vec::new(), root, viewport(), providers);
+        let _runtime =
+            UiRuntime::with_rules_and_context(Vec::new(), root, viewport(), providers, true, false);
 
         assert_eq!(
             *seen.borrow(),
             Some(42),
             "a provider passed to the constructor must run during the constructor's own first render"
+        );
+    }
+
+    /// Same shape as the `extra_context_providers` test above, for the
+    /// identical reason: `respect_reduced_motion`/
+    /// `initial_os_prefers_reduced_motion` must be constructor arguments,
+    /// not set afterward, because the constructor already runs its own
+    /// first `update` before a caller could ever call
+    /// `set_os_prefers_reduced_motion`. Uses a `@keyframes` animation, not
+    /// a transition: a transition needs a *previous* render to change away
+    /// from, which the constructor's own first render never has — a
+    /// `@keyframes` animation is active from the very first render an
+    /// element with `animation-name` appears in, exactly the case this
+    /// guards.
+    #[test]
+    fn reduced_motion_suppression_applies_starting_from_the_very_first_render() {
+        let css = "
+            .box {
+                opacity: 1;
+                animation-name: dim;
+                animation-duration: 10s;
+                animation-fill-mode: forwards;
+            }
+            @keyframes dim {
+                from { opacity: 0.3; }
+                to { opacity: 0.3; }
+            }
+        ";
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let root = || view! { <div class="box" /> };
+
+        let runtime =
+            UiRuntime::with_rules_and_context(rules, root, viewport(), Vec::new(), true, true);
+
+        let (arena, styles, _) = runtime.geometry();
+        let node = arena.roots()[0];
+        assert_eq!(
+            styles[&node].opacity, 1.0,
+            "suppression seeded at construction must already apply to the constructor's own \
+             first render (plain opacity: 1), not splice in the animation's 0.3 value"
         );
     }
 

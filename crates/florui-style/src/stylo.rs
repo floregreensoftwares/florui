@@ -885,7 +885,11 @@ fn compute_in_layout_state(
     // signature.
     let default_rule = crate::default_stylesheet::rule();
     stylist.append_stylesheet(
-        DocumentStyleSheet(default_rule.stylesheet(viewport.height, &[])),
+        DocumentStyleSheet(default_rule.stylesheet(
+            viewport.height,
+            &[],
+            timeline.prefers_reduced_motion(),
+        )),
         &lock.read(),
     );
     // `container_query_signature` is one flat, in-order slice spanning
@@ -904,7 +908,11 @@ fn compute_in_layout_state(
             .collect();
         signature_offset += block_count;
         stylist.append_stylesheet(
-            DocumentStyleSheet(rule.stylesheet(viewport.height, &rule_signature)),
+            DocumentStyleSheet(rule.stylesheet(
+                viewport.height,
+                &rule_signature,
+                timeline.prefers_reduced_motion(),
+            )),
             &lock.read(),
         );
     }
@@ -983,7 +991,14 @@ fn compute_in_layout_state(
         let old_values = timeline.previous_style(stable_id);
         let has_active_animation =
             process_animations_for_style(target, &mut context, &old_values, &primary);
-        let final_values = if has_active_animation {
+        // `process_animations_for_style` still runs unconditionally above —
+        // its own `animation_set` bookkeeping (registering, updating,
+        // pruning a transition/animation) stays fully consistent regardless
+        // of suppression, so nothing needs special handling for when
+        // suppression later turns back off. Only which value actually
+        // renders changes here: suppressed means the plain cascaded value,
+        // un-interpolated, every frame — not "duration forced near zero."
+        let final_values = if has_active_animation && !timeline.should_suppress_animations() {
             splice_animation_declarations(target, &mut context, &primary, timeline.now)
         } else {
             primary.clone()

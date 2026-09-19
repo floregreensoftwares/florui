@@ -225,7 +225,43 @@ fn environment_checks() -> Vec<Check> {
         tool_version_check("rust.cargo", "cargo", true),
         tool_version_check("rust.rustc", "rustc", true),
         tool_version_check("rust.rustfmt", "rustfmt", false),
+        reduced_motion_check(),
     ]
+}
+
+/// A benign, synchronous, side-effect-free global-state read (unlike
+/// `graphics_check`/`presentation_check`, which run a real GPU/window
+/// creation probe in a bounded subprocess because a bad driver can crash
+/// the whole process) -- reported in-process, no subprocess needed.
+fn reduced_motion_check() -> Check {
+    if !cfg!(target_os = "windows") {
+        return Check {
+            id: "environment.reduced_motion",
+            category: "environment",
+            status: Status::NotApplicable,
+            required: false,
+            observed: None,
+            expected: None,
+            evidence: "no OS reduced-motion integration exists for this platform yet".to_string(),
+            reason: None,
+            remediation: None,
+        };
+    }
+    let prefers_reduced = florui_platform::accessibility::prefers_reduced_motion();
+    Check {
+        id: "environment.reduced_motion",
+        category: "environment",
+        status: Status::Pass,
+        required: false,
+        observed: Some(prefers_reduced.to_string()),
+        expected: None,
+        evidence: format!(
+            "Windows' \"Show animations in Windows\" setting reports reduced motion: \
+             {prefers_reduced}"
+        ),
+        reason: None,
+        remediation: None,
+    }
 }
 
 fn tool_version_check(id: &'static str, program: &str, required: bool) -> Check {

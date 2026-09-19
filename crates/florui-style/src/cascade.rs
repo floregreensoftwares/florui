@@ -1914,6 +1914,35 @@ mod tests {
     }
 
     #[test]
+    fn a_prefers_reduced_motion_media_query_resolves_against_the_real_timeline_value() {
+        let tree: Element = view! { <div class="card" /> };
+        let rules = parse_stylesheet(
+            "@media (prefers-reduced-motion: reduce) { .card { background-color: #ff0000; } }",
+        )
+        .unwrap();
+
+        for prefers_reduced in [true, false, true] {
+            let arena = Arena::build(&tree);
+            let node = arena.roots()[0];
+            let mut timeline = crate::AnimationTimeline::new();
+            timeline.set_os_prefers_reduced_motion(prefers_reduced);
+            let computed = compute(
+                &arena,
+                &rules,
+                &InteractionState::new(),
+                Viewport::default(),
+                &mut timeline,
+            );
+            let expected = if prefers_reduced {
+                Rgba::opaque(0xff, 0, 0)
+            } else {
+                Rgba::TRANSPARENT
+            };
+            assert_eq!(computed[&node].background_color, expected);
+        }
+    }
+
+    #[test]
     fn a_height_sensitive_stylesheet_is_reused_correctly_across_computes_at_different_heights() {
         let tree: Element = view! { <div class="card" /> };
         let arena = Arena::build(&tree);
@@ -2015,6 +2044,115 @@ mod tests {
         assert_eq!(
             finished[&on_node].background_color,
             Rgba::opaque(0, 0, 0xff)
+        );
+    }
+
+    #[test]
+    fn suppressed_motion_snaps_a_transition_straight_to_its_target_with_no_interpolation() {
+        let css = "
+            .box {
+                background-color: #ff0000;
+                transition-property: background-color;
+                transition-duration: 1s;
+                transition-timing-function: linear;
+            }
+            .box.on { background-color: #0000ff; }
+        ";
+        let rules = parse_stylesheet(css).unwrap();
+        let mut timeline = crate::AnimationTimeline::new();
+        timeline.set_os_prefers_reduced_motion(true);
+
+        let off: Element = view! { <div class="box" /> };
+        let off_arena = Arena::build(&off);
+        compute(
+            &off_arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+            &mut timeline,
+        );
+
+        let on: Element = view! { <div class="box on" /> };
+        let on_arena = Arena::build(&on);
+        let on_node = on_arena.roots()[0];
+        compute(
+            &on_arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+            &mut timeline,
+        );
+
+        // Halfway through what would be a 1s linear transition — an
+        // unsuppressed run (see the test above) samples a color near the
+        // red/blue midpoint here. Suppressed, it must already be the plain
+        // target value, with no in-between state ever visible.
+        timeline.advance_to(0.5);
+        let midway = compute(
+            &on_arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+            &mut timeline,
+        );
+        assert_eq!(
+            midway[&on_node].background_color,
+            Rgba::opaque(0, 0, 0xff),
+            "a suppressed transition must never show an interpolated in-between value"
+        );
+    }
+
+    #[test]
+    fn opting_out_of_auto_suppress_lets_a_transition_animate_even_when_the_os_prefers_reduced_motion()
+     {
+        let css = "
+            .box {
+                background-color: #ff0000;
+                transition-property: background-color;
+                transition-duration: 1s;
+                transition-timing-function: linear;
+            }
+            .box.on { background-color: #0000ff; }
+        ";
+        let rules = parse_stylesheet(css).unwrap();
+        let mut timeline = crate::AnimationTimeline::new();
+        timeline.set_os_prefers_reduced_motion(true);
+        timeline.set_auto_suppress_motion(false);
+
+        let off: Element = view! { <div class="box" /> };
+        let off_arena = Arena::build(&off);
+        compute(
+            &off_arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+            &mut timeline,
+        );
+
+        let on: Element = view! { <div class="box on" /> };
+        let on_arena = Arena::build(&on);
+        let on_node = on_arena.roots()[0];
+        compute(
+            &on_arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+            &mut timeline,
+        );
+
+        timeline.advance_to(0.5);
+        let midway = compute(
+            &on_arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+            &mut timeline,
+        );
+        let sampled = midway[&on_node].background_color;
+        assert!(
+            (sampled.r as i32 - 128).abs() <= 5 && (sampled.b as i32 - 128).abs() <= 5,
+            "opting out of auto-suppress must restore real interpolation even when the OS \
+             prefers reduced motion, got {sampled:?}"
         );
     }
 
