@@ -93,6 +93,16 @@ pub enum SemanticConfigError {
         location: SourceLocation,
         reason: WorkspaceInheritanceError,
     },
+    InvalidWebBasePath {
+        config_path: PathBuf,
+        location: SourceLocation,
+    },
+    InvalidWebIconFormat {
+        config_path: PathBuf,
+        field: &'static str,
+        location: SourceLocation,
+        allowed: &'static [&'static str],
+    },
 }
 
 impl fmt::Display for SemanticConfigError {
@@ -147,6 +157,25 @@ impl fmt::Display for SemanticConfigError {
                 "{}:{location}: app.version requests {{ workspace = true }}, but {}",
                 manifest_path.display(),
                 reason
+            ),
+            SemanticConfigError::InvalidWebBasePath {
+                config_path,
+                location,
+            } => write!(
+                f,
+                "{}:{location}: web.base_path must start with \"/\"",
+                config_path.display()
+            ),
+            SemanticConfigError::InvalidWebIconFormat {
+                config_path,
+                field,
+                location,
+                allowed,
+            } => write!(
+                f,
+                "{}:{location}: web.icons.{field} must be one of: {}",
+                config_path.display(),
+                allowed.join(", ")
             ),
         }
     }
