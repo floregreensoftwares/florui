@@ -3,6 +3,7 @@
 //! actually came from.
 
 use crate::location::SourceLocation;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Which native/build target `resolve()` should check assets against —
@@ -36,6 +37,21 @@ pub struct AppConfig {
     pub version: String,
     pub icons: IconsConfig,
     pub activation: ActivationConfig,
+    pub locales: LocalesConfig,
+}
+
+/// `default_locale` is always populated, defaulting to `"en"` even with no
+/// `[app.locales]` declared at all.
+#[derive(Debug, Clone)]
+pub struct LocalesConfig {
+    pub default_locale: String,
+    pub locales: BTreeMap<String, LocaleConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocaleConfig {
+    pub name: Option<String>,
+    pub description: Option<String>,
 }
 
 /// Typed declaration only -- no OS registration, no single-instance IPC.
