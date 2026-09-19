@@ -120,6 +120,12 @@ enum UserEvent {
 /// plain, unsuppressed CSS animation regardless of that OS preference; the
 /// `@media (prefers-reduced-motion: ...)` query itself always reflects OS
 /// truth either way, see [`florui_style::AnimationTimeline`]'s own doc.
+/// `theme` (default [`ThemePreference::System`]) is the same "follow the
+/// OS, or force it" shape as `decorations` — see [`crate::theme`]'s own
+/// module doc for why, unlike reduced motion, an explicit override here
+/// *does* replace what `@media (prefers-color-scheme: ...)` itself
+/// reports, rather than leaving a separately-preserved OS truth: `winit`
+/// itself doesn't keep one once an override is set.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowOptions {
     pub decorations: DecorationMode,
@@ -128,6 +134,7 @@ pub struct WindowOptions {
     pub transparent: bool,
     pub icon: Option<florui_icon::RawIcon>,
     pub respect_reduced_motion: bool,
+    pub theme: crate::theme::ThemePreference,
 }
 
 /// Not `#[derive(Default)]`: every field but `respect_reduced_motion`
@@ -135,7 +142,10 @@ pub struct WindowOptions {
 /// but that one field's required default (`true`) is not the same as
 /// `bool`'s own derived default (`false`) — a derive here would silently
 /// invert it for every existing caller of [`WindowOptions::default`]
-/// ([`run`], [`run_with_css_reload`]).
+/// ([`run`], [`run_with_css_reload`]). `theme`'s own derived default
+/// ([`ThemePreference::System`]) would have been fine, but it stays here
+/// too, alongside the field it now can't be separated from without
+/// re-deriving `Default` and reintroducing exactly the risk above.
 impl Default for WindowOptions {
     fn default() -> Self {
         Self {
@@ -145,6 +155,7 @@ impl Default for WindowOptions {
             transparent: false,
             icon: None,
             respect_reduced_motion: true,
+            theme: crate::theme::ThemePreference::default(),
         }
     }
 }
@@ -475,6 +486,12 @@ struct WindowState {
     css_path: Option<PathBuf>,
     /// Kept alive only to keep watching; dropping it stops delivery.
     _css_watcher: Option<RecommendedWatcher>,
+    /// What this window asked for — an explicit `Light`/`Dark` override
+    /// makes it correctly immune to a live `WindowEvent::ThemeChanged`
+    /// (the window is already immune on the `winit` side too once an
+    /// override is set; see [`crate::theme`]'s own module doc), checked in
+    /// [`Self::handle_theme_changed`].
+    theme_preference: crate::theme::ThemePreference,
 }
 
 impl WindowState {
@@ -650,6 +667,26 @@ impl WindowState {
         self.refresh_animation_schedule();
     }
 
+    /// Reacts to a real, live OS theme change — only when this window
+    /// asked to follow it ([`crate::theme::ThemePreference::System`]); an
+    /// explicit override already ignores this on the `winit` side (see
+    /// [`crate::theme`]'s own module doc), so this check just keeps
+    /// florui's own signal consistent with what the window is actually
+    /// doing. Unlike reduced motion, no per-frame polling is needed
+    /// anywhere in this file: `WindowEvent::ThemeChanged` tells this host
+    /// exactly when the value actually changes.
+    fn handle_theme_changed(&mut self, theme: winit::window::Theme) {
+        if self.theme_preference != crate::theme::ThemePreference::System {
+            return;
+        }
+        let viewport = layout_viewport(self.viewport_scale());
+        self.runtime
+            .set_prefers_dark_color_scheme(crate::theme::ColorScheme::from(theme).is_dark());
+        self.runtime.update(viewport);
+        self.window.request_redraw();
+        self.refresh_animation_schedule();
+    }
+
     /// Remembers whichever node is under the cursor at press time — the
     /// click itself only fires on release, and only if that release lands
     /// back on this same node (so dragging off a button and releasing
@@ -779,7 +816,8 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
             // chance at real `TransparentSurface` compositing.
             let mut attrs = Window::default_attributes()
                 .with_title(spec.title.clone())
-                .with_decorations(matches!(spec.options.decorations, DecorationMode::System));
+                .with_decorations(matches!(spec.options.decorations, DecorationMode::System))
+                .with_theme(crate::theme::requested_winit_theme(spec.options.theme));
             if let Some((width, height)) = spec.options.size {
                 attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(width, height));
             }
@@ -852,6 +890,9 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
             };
 
             let respect_reduced_motion = spec.options.respect_reduced_motion;
+            let theme_preference = spec.options.theme;
+            let initial_color_scheme =
+                crate::theme::effective_color_scheme(theme_preference, &window);
             let mut runtime = UiRuntime::with_rules_and_context(
                 spec.rules,
                 spec.root,
@@ -859,6 +900,7 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 context_providers,
                 respect_reduced_motion,
                 crate::accessibility::prefers_reduced_motion(),
+                initial_color_scheme.is_dark(),
             );
             let proxy = self.proxy.clone();
             runtime.on_needs_update(move || {
@@ -893,6 +935,7 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 next_animation_wake: None,
                 css_path: spec.css_path,
                 _css_watcher: css_watcher,
+                theme_preference,
             };
             state.redraw();
             // A `@keyframes` animation already running on mount (no `:hover`
@@ -953,6 +996,7 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
             // `window.scale_factor()` fresh every call, so re-rendering is
             // all this needs.
             WindowEvent::ScaleFactorChanged { .. } => state.update_and_request_redraw(),
+            WindowEvent::ThemeChanged(theme) => state.handle_theme_changed(theme),
             // A pure move (dragging the window, snapping it) changes
             // nothing about its content, only where `InputMode::Selective`'s
             // own screen-space regions sit -- resyncing them here, from

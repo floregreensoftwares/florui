@@ -46,6 +46,9 @@ mod os;
 pub mod overlay;
 
 #[cfg(feature = "desktop")]
+pub mod theme;
+
+#[cfg(feature = "desktop")]
 pub mod tray;
 
 #[cfg(feature = "desktop")]
