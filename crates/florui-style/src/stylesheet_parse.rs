@@ -16,6 +16,7 @@ use style::stylesheets::{AllowImportRules, Origin, Stylesheet};
 use crate::container_query_adapter::{self, ContainerQueryBlock};
 use crate::error::StyleError;
 use crate::height_media_adapter::substitute_height_features;
+use crate::reduced_motion_adapter::substitute_reduced_motion_feature;
 use crate::scope_adapter::scope_class_selectors;
 use crate::stylo::shared_lock;
 
@@ -83,6 +84,7 @@ impl Rule {
         &self,
         viewport_height: f32,
         container_query_signature: &[bool],
+        prefers_reduced_motion: bool,
     ) -> StyloArc<Stylesheet> {
         match &*self.0 {
             RuleKind::Static(sheet) => sheet.clone(),
@@ -98,20 +100,22 @@ impl Rule {
                     container_blocks,
                     container_query_signature,
                 );
+                let after_motion =
+                    substitute_reduced_motion_feature(&after_containers, prefers_reduced_motion);
                 let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(pos) = cache
                     .iter()
-                    .position(|(key, _)| key == after_containers.as_ref())
+                    .position(|(key, _)| key == after_motion.as_ref())
                 {
                     let (key, sheet) = cache.remove(pos);
                     cache.push((key, sheet.clone()));
                     return sheet;
                 }
-                let sheet = parse_str(&after_containers, *origin);
+                let sheet = parse_str(&after_motion, *origin);
                 if cache.len() >= DYNAMIC_CACHE_CAPACITY {
                     cache.remove(0);
                 }
-                cache.push((after_containers.into_owned(), sheet.clone()));
+                cache.push((after_motion.into_owned(), sheet.clone()));
                 sheet
             }
         }
@@ -176,7 +180,11 @@ pub(crate) fn parse_stylesheet_with_origin(css: &str, origin: Origin) -> Result<
     LazyLock::force(&BACKDROP_FILTER_ENABLED);
     LazyLock::force(&CONTAINER_QUERIES_ENABLED);
     let container_blocks = container_query_adapter::extract_container_queries(css);
-    if !container_blocks.is_empty() || css.to_ascii_lowercase().contains("height") {
+    let lower_css = css.to_ascii_lowercase();
+    if !container_blocks.is_empty()
+        || lower_css.contains("height")
+        || lower_css.contains("prefers-reduced-motion")
+    {
         return Ok(Rule(Arc::new(RuleKind::Dynamic {
             css: css.to_string(),
             origin,

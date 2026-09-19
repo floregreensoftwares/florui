@@ -38,6 +38,7 @@ mod default_stylesheet;
 mod error;
 mod height_media_adapter;
 mod interaction;
+mod reduced_motion_adapter;
 mod scope_adapter;
 mod stylesheet_parse;
 mod stylo;

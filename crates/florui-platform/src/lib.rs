@@ -25,6 +25,9 @@ pub use desktop::{
 };
 
 #[cfg(feature = "desktop")]
+pub mod accessibility;
+
+#[cfg(feature = "desktop")]
 pub mod appearance;
 
 #[cfg(feature = "desktop")]

@@ -114,14 +114,39 @@ enum UserEvent {
 /// unconditionally for every window, regardless of this option. `icon` is
 /// the creation-time half of per-window icons — see
 /// [`crate::WindowControls::set_icon`] for updating an already-open
-/// window's icon instead.
-#[derive(Debug, Clone, PartialEq, Default)]
+/// window's icon instead. `respect_reduced_motion` (default `true`) is
+/// the opt-out for this crate's own automatic transition/`@keyframes`
+/// suppression when the real OS prefers reduced motion — `false` restores
+/// plain, unsuppressed CSS animation regardless of that OS preference; the
+/// `@media (prefers-reduced-motion: ...)` query itself always reflects OS
+/// truth either way, see [`florui_style::AnimationTimeline`]'s own doc.
+#[derive(Debug, Clone, PartialEq)]
 pub struct WindowOptions {
     pub decorations: DecorationMode,
     pub size: Option<(f64, f64)>,
     pub min_size: Option<(f64, f64)>,
     pub transparent: bool,
     pub icon: Option<florui_icon::RawIcon>,
+    pub respect_reduced_motion: bool,
+}
+
+/// Not `#[derive(Default)]`: every field but `respect_reduced_motion`
+/// matches what the derive would have given (unset/off/system-decorated),
+/// but that one field's required default (`true`) is not the same as
+/// `bool`'s own derived default (`false`) — a derive here would silently
+/// invert it for every existing caller of [`WindowOptions::default`]
+/// ([`run`], [`run_with_css_reload`]).
+impl Default for WindowOptions {
+    fn default() -> Self {
+        Self {
+            decorations: DecorationMode::default(),
+            size: None,
+            min_size: None,
+            transparent: false,
+            icon: None,
+            respect_reduced_motion: true,
+        }
+    }
 }
 
 /// Opens a window titled `title` and keeps it live over `root` — called
@@ -541,6 +566,8 @@ impl WindowState {
             .is_some_and(|deadline| std::time::Instant::now() >= deadline);
         if deadline_due {
             let viewport = layout_viewport(self.viewport_scale());
+            self.runtime
+                .set_os_prefers_reduced_motion(crate::accessibility::prefers_reduced_motion());
             self.runtime.update(viewport);
             self.refresh_animation_schedule();
         }
@@ -554,6 +581,8 @@ impl WindowState {
     fn update_and_request_redraw(&mut self) {
         let viewport = layout_viewport(self.viewport_scale());
         self.runtime.clear_dirty();
+        self.runtime
+            .set_os_prefers_reduced_motion(crate::accessibility::prefers_reduced_motion());
         self.runtime.update(viewport);
         self.window.request_redraw();
         self.refresh_animation_schedule();
@@ -614,6 +643,8 @@ impl WindowState {
         if !self.runtime.set_hovered(hit) {
             return;
         }
+        self.runtime
+            .set_os_prefers_reduced_motion(crate::accessibility::prefers_reduced_motion());
         self.runtime.update(viewport);
         self.window.request_redraw();
         self.refresh_animation_schedule();
@@ -820,11 +851,14 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 })]
             };
 
+            let respect_reduced_motion = spec.options.respect_reduced_motion;
             let mut runtime = UiRuntime::with_rules_and_context(
                 spec.rules,
                 spec.root,
                 viewport,
                 context_providers,
+                respect_reduced_motion,
+                crate::accessibility::prefers_reduced_motion(),
             );
             let proxy = self.proxy.clone();
             runtime.on_needs_update(move || {
@@ -964,6 +998,15 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_options_default_respects_reduced_motion() {
+        assert!(
+            WindowOptions::default().respect_reduced_motion,
+            "the manual Default impl must not silently invert this field's required default, \
+             the way adding it to a derive would have"
+        );
+    }
 
     #[test]
     fn layout_viewport_uses_the_logical_size_not_the_physical_one() {
