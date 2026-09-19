@@ -22,6 +22,7 @@ pub struct ResolvedConfig {
     pub window: WindowConfig,
     pub bundle: BundleConfig,
     pub dev: DevConfig,
+    pub web: WebConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +77,25 @@ pub struct DevConfig {
     /// The merged legacy-or-new dev example -- see `resolve.rs` for the
     /// duplicate-definition check that runs before this is populated.
     pub example: Option<String>,
+}
+
+/// Independent of native `[app]`/`[window]` -- `title`/`description` fall
+/// back to `app.name`/`app.description`, never to native `window.title`,
+/// and there is no implicit inheritance of `app.icons` into `icons`.
+#[derive(Debug, Clone)]
+pub struct WebConfig {
+    pub title: String,
+    pub description: Option<String>,
+    pub base_path: String,
+    pub icons: WebIconsConfig,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WebIconsConfig {
+    /// Resolved relative to `florui.config.toml`'s own directory, same as
+    /// `IconsConfig`'s fields.
+    pub favicon: Option<PathBuf>,
+    pub apple_touch_icon: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

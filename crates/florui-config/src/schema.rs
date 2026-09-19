@@ -30,6 +30,25 @@ pub(crate) struct RawConfig {
     pub(crate) window: Option<RawWindow>,
     pub(crate) bundle: Option<RawBundle>,
     pub(crate) dev: Option<RawDev>,
+    pub(crate) web: Option<RawWeb>,
+}
+
+/// `[web]` -- independent browser metadata/assets, never inheriting native
+/// `[window]`/`app.icons` (see `resolve.rs`'s `resolve_web`).
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawWeb {
+    pub(crate) title: Option<String>,
+    pub(crate) description: Option<String>,
+    pub(crate) base_path: Option<Spanned<String>>,
+    pub(crate) icons: Option<RawWebIcons>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawWebIcons {
+    pub(crate) favicon: Option<Spanned<String>>,
+    pub(crate) apple_touch_icon: Option<Spanned<String>>,
 }
 
 #[derive(Deserialize, Debug)]

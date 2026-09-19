@@ -11,12 +11,13 @@ use crate::location::LineIndex;
 use crate::project::{CargoProjectFacts, config_file_path, parse_package_version};
 use crate::resolved::{
     AppConfig, BundleConfig, DecorationsSetting, DevConfig, FieldProvenance, IconsConfig,
-    Provenance, ResolvedConfig, Target, WindowConfig,
+    Provenance, ResolvedConfig, Target, WebConfig, WebIconsConfig, WindowConfig,
 };
 use crate::schema::{
-    RawConfig, RawDecorations, RawVersion, SUPPORTED_SCHEMA_VERSION, SchemaVersionProbe,
+    RawConfig, RawDecorations, RawVersion, RawWeb, SUPPORTED_SCHEMA_VERSION, SchemaVersionProbe,
 };
 use std::path::Path;
+use toml::Spanned;
 
 #[derive(Debug)]
 pub struct Resolution {
@@ -160,6 +161,12 @@ pub fn resolve(
         }
     }
 
+    if let Some(web) = raw.as_ref().and_then(|c| c.web.as_ref()) {
+        let config_lines = lines.as_ref().unwrap();
+        validate_web_base_path(web, &config_path, config_lines, &mut errors);
+        validate_web_icon_formats(web, &config_path, config_lines, &mut errors);
+    }
+
     if !errors.is_empty() {
         return Err(ConfigError::Semantic(errors));
     }
@@ -234,6 +241,17 @@ pub fn resolve(
         version,
         icons,
     };
+
+    let web = resolve_web(
+        raw.as_ref().and_then(|c| c.web.as_ref()),
+        &app.name,
+        app.description.as_deref(),
+        icons_dir,
+        lines.as_ref(),
+        target,
+        &mut provenance,
+        &mut diagnostics,
+    );
 
     let title = match raw_window.and_then(|w| w.title.as_deref()) {
         Some(title) => {
@@ -340,6 +358,7 @@ pub fn resolve(
             window,
             bundle,
             dev,
+            web,
         },
         provenance,
         diagnostics,
@@ -472,6 +491,172 @@ fn resolve_icons(
             "app.icons.linux",
             "config.icon_asset_present.linux",
         ),
+    }
+}
+
+fn validate_web_base_path(
+    web: &RawWeb,
+    config_path: &Path,
+    lines: &LineIndex<'_>,
+    errors: &mut Vec<SemanticConfigError>,
+) {
+    let Some(base_path) = web.base_path.as_ref() else {
+        return;
+    };
+    if !base_path.get_ref().starts_with('/') {
+        errors.push(SemanticConfigError::InvalidWebBasePath {
+            config_path: config_path.to_owned(),
+            location: lines.locate_start(base_path.span()),
+        });
+    }
+}
+
+fn validate_web_icon_formats(
+    web: &RawWeb,
+    config_path: &Path,
+    lines: &LineIndex<'_>,
+    errors: &mut Vec<SemanticConfigError>,
+) {
+    let Some(icons) = web.icons.as_ref() else {
+        return;
+    };
+    check_web_icon_extension(
+        icons.favicon.as_ref(),
+        "favicon",
+        &["svg", "png", "ico"],
+        config_path,
+        lines,
+        errors,
+    );
+    check_web_icon_extension(
+        icons.apple_touch_icon.as_ref(),
+        "apple_touch_icon",
+        &["png"],
+        config_path,
+        lines,
+        errors,
+    );
+}
+
+fn check_web_icon_extension(
+    raw: Option<&Spanned<String>>,
+    field_name: &'static str,
+    allowed: &'static [&'static str],
+    config_path: &Path,
+    lines: &LineIndex<'_>,
+    errors: &mut Vec<SemanticConfigError>,
+) {
+    let Some(spanned) = raw else {
+        return;
+    };
+    let lower = spanned.get_ref().to_ascii_lowercase();
+    let ok = allowed
+        .iter()
+        .any(|ext| lower.ends_with(&format!(".{ext}")));
+    if !ok {
+        errors.push(SemanticConfigError::InvalidWebIconFormat {
+            config_path: config_path.to_owned(),
+            field: field_name,
+            location: lines.locate_start(spanned.span()),
+            allowed,
+        });
+    }
+}
+
+/// `web.title`/`web.description` fall back to `app.name`/`app.description`
+/// (never native `window.title`) with `Provenance::BuiltinDefault`, the same
+/// treatment `window.title`'s own fallback to `app.name` already gets above
+/// -- a field inheriting another resolved field's value isn't a distinct
+/// provenance category in this model. `web.icons` never inherits
+/// `app.icons`: an absent field simply resolves to `None`.
+#[allow(clippy::too_many_arguments)]
+fn resolve_web(
+    raw: Option<&RawWeb>,
+    app_name: &str,
+    app_description: Option<&str>,
+    icons_dir: &Path,
+    lines: Option<&LineIndex<'_>>,
+    target: Option<Target>,
+    provenance: &mut Vec<FieldProvenance>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> WebConfig {
+    let title = match raw.and_then(|w| w.title.as_deref()) {
+        Some(title) => {
+            provenance.push(field("web.title", Provenance::ConfigFile(None)));
+            title.to_owned()
+        }
+        None => {
+            provenance.push(field("web.title", Provenance::BuiltinDefault));
+            app_name.to_owned()
+        }
+    };
+    let description = match raw.and_then(|w| w.description.as_deref()) {
+        Some(description) => {
+            provenance.push(field("web.description", Provenance::ConfigFile(None)));
+            Some(description.to_owned())
+        }
+        None => {
+            provenance.push(field("web.description", Provenance::BuiltinDefault));
+            app_description.map(str::to_owned)
+        }
+    };
+    let base_path = match raw.and_then(|w| w.base_path.as_ref()) {
+        Some(spanned) => {
+            provenance.push(field(
+                "web.base_path",
+                Provenance::ConfigFile(Some(lines.unwrap().locate_start(spanned.span()))),
+            ));
+            spanned.get_ref().clone()
+        }
+        None => {
+            provenance.push(field("web.base_path", Provenance::BuiltinDefault));
+            "/".to_owned()
+        }
+    };
+
+    let checks_assets = matches!(target, Some(Target::Web));
+    let raw_icons = raw.and_then(|w| w.icons.as_ref());
+    let mut resolve_one = |raw: Option<&toml::Spanned<String>>,
+                           name: &'static str,
+                           code: &'static str| match raw {
+        Some(spanned) => {
+            let location = lines.unwrap().locate_start(spanned.span());
+            provenance.push(field(name, Provenance::ConfigFile(Some(location))));
+            let path = icons_dir.join(spanned.get_ref());
+            if checks_assets && !path.exists() {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Warning,
+                    code,
+                    message: format!("{name} points to {}, which does not exist", path.display()),
+                    location: Some(location),
+                    field: name,
+                });
+            }
+            Some(path)
+        }
+        None => {
+            provenance.push(field(name, Provenance::BuiltinDefault));
+            None
+        }
+    };
+    let icons = WebIconsConfig {
+        favicon: resolve_one(
+            raw_icons.and_then(|i| i.favicon.as_ref()),
+            "web.icons.favicon",
+            "config.web_icon_asset_present.favicon",
+        ),
+        apple_touch_icon: resolve_one(
+            raw_icons.and_then(|i| i.apple_touch_icon.as_ref()),
+            "web.icons.apple_touch_icon",
+            "config.web_icon_asset_present.apple_touch_icon",
+        ),
+    };
+
+    WebConfig {
+        title,
+        description,
+        base_path,
+        icons,
     }
 }
 
@@ -920,5 +1105,148 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn web_title_falls_back_to_app_name_not_window_title() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app]\nname = \"Garden\"\n[window]\ntitle = \"A Different Title\"\n",
+        );
+        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        assert_eq!(resolution.config.web.title, "Garden");
+        assert_eq!(resolution.config.window.title, "A Different Title");
+    }
+
+    #[test]
+    fn web_description_falls_back_to_app_description() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app]\ndescription = \"A workspace for your ideas\"\n",
+        );
+        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        assert_eq!(
+            resolution.config.web.description.as_deref(),
+            Some("A workspace for your ideas")
+        );
+    }
+
+    #[test]
+    fn web_base_path_defaults_to_root() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "florui.config.toml", "schema_version = 1\n");
+        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        assert_eq!(resolution.config.web.base_path, "/");
+    }
+
+    #[test]
+    fn web_base_path_missing_leading_slash_is_a_semantic_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[web]\nbase_path = \"garden/\"\n",
+        );
+        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        match err {
+            ConfigError::Semantic(errors) => {
+                assert!(matches!(
+                    errors[0],
+                    SemanticConfigError::InvalidWebBasePath { .. }
+                ));
+            }
+            other => panic!("expected Semantic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn web_icon_asset_missing_is_a_warning_diagnostic_under_target_web() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[web.icons]\nfavicon = \"missing.svg\"\n",
+        );
+        let resolution = resolve(&facts(dir.path(), ""), Some(Target::Web)).unwrap();
+        assert_eq!(resolution.diagnostics.len(), 1);
+        assert_eq!(
+            resolution.diagnostics[0].code,
+            "config.web_icon_asset_present.favicon"
+        );
+    }
+
+    #[test]
+    fn web_icon_asset_check_is_skipped_outside_target_web() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[web.icons]\nfavicon = \"missing.svg\"\n",
+        );
+        let resolution = resolve(&facts(dir.path(), ""), Some(Target::Native)).unwrap();
+        assert!(resolution.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn invalid_favicon_extension_is_a_semantic_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[web.icons]\nfavicon = \"favicon.gif\"\n",
+        );
+        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        match err {
+            ConfigError::Semantic(errors) => {
+                assert!(matches!(
+                    errors[0],
+                    SemanticConfigError::InvalidWebIconFormat {
+                        field: "favicon",
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected Semantic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_apple_touch_icon_extension_is_a_semantic_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[web.icons]\napple_touch_icon = \"icon.svg\"\n",
+        );
+        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        match err {
+            ConfigError::Semantic(errors) => {
+                assert!(matches!(
+                    errors[0],
+                    SemanticConfigError::InvalidWebIconFormat {
+                        field: "apple_touch_icon",
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected Semantic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn absent_web_icons_resolve_to_none_with_no_native_icon_inheritance() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app.icons]\nsource = \"assets/app.svg\"\n",
+        );
+        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        assert_eq!(resolution.config.web.icons.favicon, None);
+        assert_eq!(resolution.config.web.icons.apple_touch_icon, None);
     }
 }

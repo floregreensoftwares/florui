@@ -4,10 +4,10 @@
 //! plus whatever `florui.config.toml` sits at its package root into a fully
 //! defaulted [`ResolvedConfig`], with per-field [`Provenance`] and non-fatal
 //! [`Diagnostic`]s. Covers `schema_version`, `[app]`, `[app.icons]`,
-//! `[window]`, `[bundle]`, and `[dev]` (the last only to the extent needed
-//! to detect a conflict with the legacy `[package.metadata.florui.dev]`).
-//! Environments, activation, window persistence, locales, and `[web]` are
-//! not part of this schema yet.
+//! `[window]`, `[bundle]`, `[dev]` (the last only to the extent needed
+//! to detect a conflict with the legacy `[package.metadata.florui.dev]`),
+//! and the independent `[web]`/`[web.icons]`. Environments, activation,
+//! window persistence, and locales are not part of this schema yet.
 
 mod error;
 mod location;
@@ -28,5 +28,5 @@ pub use project::{
 pub use resolve::{Resolution, resolve};
 pub use resolved::{
     AppConfig, BundleConfig, DecorationsSetting, DevConfig, FieldProvenance, IconsConfig,
-    Provenance, ResolvedConfig, Target, WindowConfig,
+    Provenance, ResolvedConfig, Target, WebConfig, WebIconsConfig, WindowConfig,
 };
