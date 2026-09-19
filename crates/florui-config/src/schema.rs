@@ -4,6 +4,7 @@
 //! `Option<T>`, already validated for free by `toml`'s own type checking.
 
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::ops::Range;
 use toml::Spanned;
 
@@ -60,6 +61,18 @@ pub(crate) struct RawApp {
     pub(crate) version: Option<RawVersion>,
     pub(crate) icons: Option<RawIcons>,
     pub(crate) activation: Option<RawActivation>,
+    /// Spanned around the whole table -- an invalid tag or a
+    /// `default_locale` mismatch is a property of the declared set, not one
+    /// key, so every locale error cites the table's own location.
+    pub(crate) locales: Option<Spanned<BTreeMap<String, RawLocale>>>,
+    pub(crate) default_locale: Option<Spanned<String>>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawLocale {
+    pub(crate) name: Option<String>,
+    pub(crate) description: Option<String>,
 }
 
 /// Typed schema only -- no OS registration, no single-instance IPC, no

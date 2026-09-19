@@ -11,11 +11,11 @@ use crate::location::LineIndex;
 use crate::project::{CargoProjectFacts, config_file_path, parse_package_version};
 use crate::resolved::{
     ActivationConfig, AppConfig, BundleConfig, DecorationsSetting, DevConfig, FieldProvenance,
-    FileAssociationConfig, IconsConfig, Provenance, ResolvedConfig, Target, WebConfig,
-    WebIconsConfig, WindowConfig, WindowPersistenceConfig,
+    FileAssociationConfig, IconsConfig, LocaleConfig, LocalesConfig, Provenance, ResolvedConfig,
+    Target, WebConfig, WebIconsConfig, WindowConfig, WindowPersistenceConfig,
 };
 use crate::schema::{
-    RawActivation, RawConfig, RawDecorations, RawVersion, RawWeb, RawWindow,
+    RawActivation, RawApp, RawConfig, RawDecorations, RawVersion, RawWeb, RawWindow,
     SUPPORTED_SCHEMA_VERSION, SchemaVersionProbe,
 };
 use std::collections::BTreeSet;
@@ -170,13 +170,12 @@ pub fn resolve(
         validate_web_icon_formats(web, &config_path, config_lines, &mut errors);
     }
 
-    if let Some(activation) = raw
-        .as_ref()
-        .and_then(|c| c.app.as_ref())
-        .and_then(|a| a.activation.as_ref())
-    {
+    if let Some(app) = raw.as_ref().and_then(|c| c.app.as_ref()) {
         let config_lines = lines.as_ref().unwrap();
-        validate_activation(activation, &config_path, config_lines, &mut errors);
+        if let Some(activation) = app.activation.as_ref() {
+            validate_activation(activation, &config_path, config_lines, &mut errors);
+        }
+        validate_locales(app, &config_path, config_lines, &mut errors);
     }
 
     if !errors.is_empty() {
@@ -251,6 +250,7 @@ pub fn resolve(
         lines.as_ref(),
         &mut provenance,
     );
+    let locales = resolve_locales(raw_app, lines.as_ref(), &mut provenance);
 
     let app = AppConfig {
         identifier,
@@ -259,6 +259,7 @@ pub fn resolve(
         version,
         icons,
         activation,
+        locales,
     };
 
     let web = resolve_web(
@@ -881,6 +882,117 @@ fn resolve_persistence(
         }
     };
     WindowPersistenceConfig { enabled, key }
+}
+
+fn validate_locales(
+    app: &RawApp,
+    config_path: &Path,
+    lines: &LineIndex<'_>,
+    errors: &mut Vec<SemanticConfigError>,
+) {
+    if let Some(locales) = app.locales.as_ref() {
+        let location = lines.locate_start(locales.span());
+        for tag in locales.get_ref().keys() {
+            if !is_valid_locale_tag(tag) {
+                errors.push(SemanticConfigError::InvalidLocaleTag {
+                    config_path: config_path.to_owned(),
+                    tag: tag.clone(),
+                    location,
+                });
+            }
+        }
+    }
+
+    let Some(default_locale) = app.default_locale.as_ref() else {
+        return;
+    };
+    // Only validated against a declared, non-empty [app.locales] -- an
+    // undeclared default_locale is just an inert string today (nothing
+    // resolves runtime locale content yet), so it's accepted as-is.
+    let Some(locales) = app.locales.as_ref() else {
+        return;
+    };
+    if locales.get_ref().is_empty() {
+        return;
+    }
+    if !locales.get_ref().contains_key(default_locale.get_ref()) {
+        errors.push(SemanticConfigError::InvalidDefaultLocale {
+            config_path: config_path.to_owned(),
+            requested: default_locale.get_ref().clone(),
+            available: locales.get_ref().keys().cloned().collect(),
+            location: lines.locate_start(default_locale.span()),
+        });
+    }
+}
+
+/// A light structural heuristic, not full BCP-47/CLDR validation: subtags
+/// separated by `-`, the primary subtag 2-8 ASCII letters, every later
+/// subtag 1-8 ASCII alphanumerics.
+fn is_valid_locale_tag(tag: &str) -> bool {
+    let mut parts = tag.split('-');
+    let Some(primary) = parts.next() else {
+        return false;
+    };
+    let valid_primary =
+        (2..=8).contains(&primary.len()) && primary.chars().all(|c| c.is_ascii_alphabetic());
+    if !valid_primary {
+        return false;
+    }
+    parts.all(|part| {
+        (1..=8).contains(&part.len()) && part.chars().all(|c| c.is_ascii_alphanumeric())
+    })
+}
+
+/// No runtime locale switching -- `default_locale` only scopes the
+/// identity locale fallback contract; nothing here consumes a "current
+/// locale."
+fn resolve_locales(
+    raw_app: Option<&RawApp>,
+    lines: Option<&LineIndex<'_>>,
+    provenance: &mut Vec<FieldProvenance>,
+) -> LocalesConfig {
+    let locales = match raw_app.and_then(|a| a.locales.as_ref()) {
+        Some(spanned) => {
+            provenance.push(field(
+                "app.locales",
+                Provenance::ConfigFile(Some(lines.unwrap().locate_start(spanned.span()))),
+            ));
+            spanned
+                .get_ref()
+                .iter()
+                .map(|(tag, locale)| {
+                    (
+                        tag.clone(),
+                        LocaleConfig {
+                            name: locale.name.clone(),
+                            description: locale.description.clone(),
+                        },
+                    )
+                })
+                .collect()
+        }
+        None => {
+            provenance.push(field("app.locales", Provenance::BuiltinDefault));
+            std::collections::BTreeMap::new()
+        }
+    };
+    let default_locale = match raw_app.and_then(|a| a.default_locale.as_ref()) {
+        Some(spanned) => {
+            provenance.push(field(
+                "app.default_locale",
+                Provenance::ConfigFile(Some(lines.unwrap().locate_start(spanned.span()))),
+            ));
+            spanned.get_ref().clone()
+        }
+        None => {
+            provenance.push(field("app.default_locale", Provenance::BuiltinDefault));
+            "en".to_owned()
+        }
+    };
+    LocalesConfig {
+        default_locale,
+        locales,
+    }
 }
 
 /// Two-step parse: peeks `schema_version` first, so a genuinely newer or
@@ -1666,5 +1778,85 @@ mod tests {
         let persistence = &resolution.config.window.persistence;
         assert!(persistence.enabled);
         assert_eq!(persistence.key, "editor");
+    }
+
+    #[test]
+    fn default_locale_defaults_to_en_without_any_locales_declared() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "florui.config.toml", "schema_version = 1\n");
+        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        assert_eq!(resolution.config.app.locales.default_locale, "en");
+        assert!(resolution.config.app.locales.locales.is_empty());
+    }
+
+    #[test]
+    fn declared_locales_resolve_with_their_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app.locales.en]\nname = \"Garden\"\ndescription = \"A workspace for your ideas\"\n[app.locales.pt-BR]\nname = \"Garden\"\n",
+        );
+        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let locales = &resolution.config.app.locales.locales;
+        assert_eq!(locales.len(), 2);
+        assert_eq!(locales["en"].name.as_deref(), Some("Garden"));
+        assert_eq!(
+            locales["en"].description.as_deref(),
+            Some("A workspace for your ideas")
+        );
+        assert_eq!(locales["pt-BR"].name.as_deref(), Some("Garden"));
+    }
+
+    #[test]
+    fn default_locale_not_present_in_declared_locales_is_a_semantic_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app]\ndefault_locale = \"fr\"\n[app.locales.en]\nname = \"Garden\"\n",
+        );
+        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        match err {
+            ConfigError::Semantic(errors) => {
+                assert!(matches!(
+                    errors[0],
+                    SemanticConfigError::InvalidDefaultLocale { .. }
+                ));
+            }
+            other => panic!("expected Semantic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn default_locale_without_any_declared_locales_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app]\ndefault_locale = \"fr\"\n",
+        );
+        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        assert_eq!(resolution.config.app.locales.default_locale, "fr");
+    }
+
+    #[test]
+    fn invalid_locale_tag_shape_is_a_semantic_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app.locales.x]\nname = \"Garden\"\n",
+        );
+        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        match err {
+            ConfigError::Semantic(errors) => {
+                assert!(matches!(
+                    errors[0],
+                    SemanticConfigError::InvalidLocaleTag { .. }
+                ));
+            }
+            other => panic!("expected Semantic, got {other:?}"),
+        }
     }
 }

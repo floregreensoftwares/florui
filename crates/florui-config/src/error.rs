@@ -113,6 +113,17 @@ pub enum SemanticConfigError {
         location: SourceLocation,
         reason: FileAssociationError,
     },
+    InvalidDefaultLocale {
+        config_path: PathBuf,
+        requested: String,
+        available: Vec<String>,
+        location: SourceLocation,
+    },
+    InvalidLocaleTag {
+        config_path: PathBuf,
+        tag: String,
+        location: SourceLocation,
+    },
 }
 
 impl fmt::Display for SemanticConfigError {
@@ -203,6 +214,32 @@ impl fmt::Display for SemanticConfigError {
             } => write!(
                 f,
                 "{}:{location}: app.activation.file_associations entry is invalid: {reason}",
+                config_path.display()
+            ),
+            SemanticConfigError::InvalidDefaultLocale {
+                config_path,
+                requested,
+                available,
+                location,
+            } => {
+                let available = if available.is_empty() {
+                    "no locales are declared".to_owned()
+                } else {
+                    format!("available: {}", available.join(", "))
+                };
+                write!(
+                    f,
+                    "{}:{location}: app.default_locale \"{requested}\" is not declared in [app.locales] ({available})",
+                    config_path.display()
+                )
+            }
+            SemanticConfigError::InvalidLocaleTag {
+                config_path,
+                tag,
+                location,
+            } => write!(
+                f,
+                "{}:{location}: \"{tag}\" is not a valid locale tag",
                 config_path.display()
             ),
         }
