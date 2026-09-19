@@ -32,6 +32,30 @@ pub(crate) struct RawConfig {
     pub(crate) bundle: Option<RawBundle>,
     pub(crate) dev: Option<RawDev>,
     pub(crate) web: Option<RawWeb>,
+    /// Spanned around the whole table -- "unknown environment" and
+    /// "duplicate identifier" are properties of the declared set, not one
+    /// entry, so both errors cite this table's own location.
+    pub(crate) environments: Option<Spanned<BTreeMap<String, RawEnvironmentOverlay>>>,
+}
+
+/// Scoped to exactly what overlays application identity: `app.identifier`,
+/// `app.name`, `app.description`, `app.icons.*`. Not `window`, `bundle`,
+/// `dev`, `web`, `app.activation`, `app.locales`/`default_locale` -- an
+/// environment only ever overlays the fields that scope installation
+/// identity, instance coordination, and window persistence per-environment.
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawEnvironmentOverlay {
+    pub(crate) app: Option<RawEnvironmentOverlayApp>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawEnvironmentOverlayApp {
+    pub(crate) identifier: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) description: Option<String>,
+    pub(crate) icons: Option<RawIcons>,
 }
 
 /// `[web]` -- independent browser metadata/assets, never inheriting native

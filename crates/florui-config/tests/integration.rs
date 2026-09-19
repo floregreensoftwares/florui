@@ -117,7 +117,7 @@ fn workspace_version_inheritance_confirmed_end_to_end() {
 
     let facts = resolve_cargo_project(&package_dir, None).unwrap();
     assert_eq!(facts.package_version, "1.2.3");
-    let resolution = resolve(&facts, None).unwrap();
+    let resolution = resolve(&facts, None, None).unwrap();
     assert_eq!(resolution.config.app.version, "1.2.3");
 }
 
@@ -135,7 +135,7 @@ fn workspace_version_inheritance_missing_is_a_hard_error_end_to_end() {
     .unwrap();
 
     let facts = resolve_cargo_project(&package_dir, None).unwrap();
-    let err = resolve(&facts, None).unwrap_err();
+    let err = resolve(&facts, None, None).unwrap_err();
     match err {
         florui_config::ConfigError::Semantic(errors) => {
             assert!(matches!(

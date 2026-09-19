@@ -15,10 +15,11 @@ use crate::resolved::{
     Target, WebConfig, WebIconsConfig, WindowConfig, WindowPersistenceConfig,
 };
 use crate::schema::{
-    RawActivation, RawApp, RawConfig, RawDecorations, RawVersion, RawWeb, RawWindow,
-    SUPPORTED_SCHEMA_VERSION, SchemaVersionProbe,
+    RawActivation, RawApp, RawConfig, RawDecorations, RawEnvironmentOverlay,
+    RawEnvironmentOverlayApp, RawIcons, RawVersion, RawWeb, RawWindow, SUPPORTED_SCHEMA_VERSION,
+    SchemaVersionProbe,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use toml::Spanned;
 
@@ -27,15 +28,41 @@ pub struct Resolution {
     pub config: ResolvedConfig,
     pub provenance: Vec<FieldProvenance>,
     pub diagnostics: Vec<Diagnostic>,
+    pub environment: EnvironmentResolution,
+}
+
+/// Selects a named `[environments.<name>]` overlay. `explicit` distinguishes
+/// a user-typed `--environment <name>` (undeclared ⇒ a hard error) from a
+/// command's own implicit default guess like `"development"`/`"production"`
+/// (undeclared ⇒ silently resolves from base configuration).
+#[derive(Debug, Clone, Copy)]
+pub struct EnvironmentSelection<'a> {
+    pub name: &'a str,
+    pub explicit: bool,
+}
+
+/// What actually happened with environment selection, for `florui doctor`
+/// (and any other caller) to report without re-deriving it from `Resolution`.
+#[derive(Debug)]
+pub struct EnvironmentResolution {
+    pub selected: Option<String>,
+    /// `false` when `selected` names a declared environment whose `app`
+    /// table is absent or empty, same as when nothing was selected at all
+    /// -- no overlay field ever actually took effect either way.
+    pub overlay_applied: bool,
+    /// Every name under `[environments]`, in sorted order.
+    pub declared: Vec<String>,
 }
 
 /// Resolves `florui.config.toml` (if present) at `facts.package_root`
-/// against `facts` and the selected `target`. A missing config file is not
-/// an error -- it resolves to Cargo/legacy/built-in defaults, so an
-/// unmigrated project keeps working without notice.
+/// against `facts`, the selected `target`, and the selected `environment`.
+/// A missing config file is not an error -- it resolves to
+/// Cargo/legacy/built-in defaults, so an unmigrated project keeps working
+/// without notice.
 pub fn resolve(
     facts: &CargoProjectFacts,
     target: Option<Target>,
+    environment: Option<EnvironmentSelection<'_>>,
 ) -> Result<Resolution, ConfigError> {
     let config_path = config_file_path(&facts.package_root);
     let source = match std::fs::read_to_string(&config_path) {
@@ -54,6 +81,7 @@ pub fn resolve(
         None => None,
     };
     let lines = source.as_deref().map(LineIndex::new);
+    let raw_environments = raw.as_ref().and_then(|c| c.environments.as_ref());
 
     let mut errors: Vec<SemanticConfigError> = Vec::new();
 
@@ -178,6 +206,33 @@ pub fn resolve(
         validate_locales(app, &config_path, config_lines, &mut errors);
     }
 
+    if let Some(selection) = environment.as_ref().filter(|s| s.explicit) {
+        let declared = raw_environments.is_some_and(|e| e.get_ref().contains_key(selection.name));
+        if !declared {
+            let available = raw_environments
+                .map(|e| e.get_ref().keys().cloned().collect())
+                .unwrap_or_default();
+            let location = raw_environments.map(|e| lines.as_ref().unwrap().locate_start(e.span()));
+            errors.push(SemanticConfigError::UnknownEnvironment {
+                config_path: config_path.clone(),
+                requested: selection.name.to_owned(),
+                available,
+                location,
+            });
+        }
+    }
+
+    if let Some(environments) = raw_environments {
+        let config_lines = lines.as_ref().unwrap();
+        validate_environment_identity_collisions(
+            raw.as_ref().and_then(|c| c.app.as_ref()),
+            environments,
+            &config_path,
+            config_lines,
+            &mut errors,
+        );
+    }
+
     if !errors.is_empty() {
         return Err(ConfigError::Semantic(errors));
     }
@@ -189,17 +244,37 @@ pub fn resolve(
     let raw_window = raw.as_ref().and_then(|c| c.window.as_ref());
     let raw_bundle = raw.as_ref().and_then(|c| c.bundle.as_ref());
 
+    // Only ever `Some` for a *declared* environment with a non-empty `app`
+    // overlay table -- an explicit selection that fell through the
+    // now-passed validation above (undeclared-but-implicit) or a declared
+    // environment with no `app` table both resolve as "no overlay."
+    let selected_overlay: Option<(&str, &RawEnvironmentOverlayApp)> = environment.and_then(|sel| {
+        raw_environments
+            .and_then(|envs| envs.get_ref().get(sel.name))
+            .and_then(|overlay| overlay.app.as_ref())
+            .map(|app_overlay| (sel.name, app_overlay))
+    });
+
     let mut provenance = Vec::new();
 
-    let name = match raw_app.and_then(|a| a.name.as_deref()) {
+    let name = match selected_overlay.and_then(|(_, o)| o.name.as_deref()) {
         Some(name) => {
-            provenance.push(field("app.name", Provenance::ConfigFile(None)));
+            provenance.push(field(
+                "app.name",
+                Provenance::Environment(selected_overlay.unwrap().0.to_owned()),
+            ));
             name.to_owned()
         }
-        None => {
-            provenance.push(field("app.name", Provenance::CargoManifest));
-            facts.package_name.clone()
-        }
+        None => match raw_app.and_then(|a| a.name.as_deref()) {
+            Some(name) => {
+                provenance.push(field("app.name", Provenance::ConfigFile(None)));
+                name.to_owned()
+            }
+            None => {
+                provenance.push(field("app.name", Provenance::CargoManifest));
+                facts.package_name.clone()
+            }
+        },
     };
 
     let version = match raw_app.and_then(|a| a.version.as_ref()) {
@@ -223,14 +298,18 @@ pub fn resolve(
         }
     };
 
-    let identifier = optional_string_field(
+    let identifier = environment_optional_string_field(
+        selected_overlay.and_then(|(_, o)| o.identifier.as_deref()),
         raw_app.and_then(|a| a.identifier.as_deref()),
         "app.identifier",
+        selected_overlay.map(|(name, _)| name),
         &mut provenance,
     );
-    let description = optional_string_field(
+    let description = environment_optional_string_field(
+        selected_overlay.and_then(|(_, o)| o.description.as_deref()),
         raw_app.and_then(|a| a.description.as_deref()),
         "app.description",
+        selected_overlay.map(|(name, _)| name),
         &mut provenance,
     );
 
@@ -238,6 +317,8 @@ pub fn resolve(
     let mut diagnostics = Vec::new();
     let icons = resolve_icons(
         raw_app.and_then(|a| a.icons.as_ref()),
+        selected_overlay.and_then(|(_, o)| o.icons.as_ref()),
+        selected_overlay.map(|(name, _)| name),
         icons_dir,
         lines.as_ref(),
         target,
@@ -375,6 +456,14 @@ pub fn resolve(
     };
     let dev = DevConfig { example };
 
+    let environment_resolution = EnvironmentResolution {
+        selected: environment.map(|sel| sel.name.to_owned()),
+        overlay_applied: selected_overlay.is_some(),
+        declared: raw_environments
+            .map(|e| e.get_ref().keys().cloned().collect())
+            .unwrap_or_default(),
+    };
+
     Ok(Resolution {
         config: ResolvedConfig {
             app,
@@ -385,6 +474,7 @@ pub fn resolve(
         },
         provenance,
         diagnostics,
+        environment: environment_resolution,
     })
 }
 
@@ -409,6 +499,28 @@ fn optional_string_field(
             provenance.push(field(name, Provenance::BuiltinDefault));
             None
         }
+    }
+}
+
+/// Like `optional_string_field`, but tries the selected environment's
+/// overlay value first -- `Provenance::Environment` outranks `ConfigFile`
+/// for the same field, per the documented resolution order.
+fn environment_optional_string_field(
+    overlay: Option<&str>,
+    base: Option<&str>,
+    name: &'static str,
+    environment_name: Option<&str>,
+    provenance: &mut Vec<FieldProvenance>,
+) -> Option<String> {
+    match overlay {
+        Some(value) => {
+            provenance.push(field(
+                name,
+                Provenance::Environment(environment_name.unwrap().to_owned()),
+            ));
+            Some(value.to_owned())
+        }
+        None => optional_string_field(base, name, provenance),
     }
 }
 
@@ -459,9 +571,15 @@ fn validate_window_size(
     }
 }
 
+/// `overlay` is the selected environment's `app.icons` table, if any --
+/// tried before `raw` field-by-field (an environment can override just
+/// `source` while inheriting `windows`/`macos`/`linux` from base), matching
+/// "overlay tables merge by field."
 #[allow(clippy::too_many_arguments)]
 fn resolve_icons(
-    raw: Option<&crate::schema::RawIcons>,
+    raw: Option<&RawIcons>,
+    overlay: Option<&RawIcons>,
+    environment_name: Option<&str>,
     icons_dir: &Path,
     lines: Option<&LineIndex<'_>>,
     target: Option<Target>,
@@ -469,47 +587,66 @@ fn resolve_icons(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> IconsConfig {
     let checks_assets = matches!(target, Some(Target::Native));
-    let mut resolve_one = |raw: Option<&toml::Spanned<String>>,
+    let mut resolve_one = |overlay_raw: Option<&toml::Spanned<String>>,
+                           base_raw: Option<&toml::Spanned<String>>,
                            name: &'static str,
-                           code: &'static str| match raw {
-        Some(spanned) => {
-            let location = lines.unwrap().locate_start(spanned.span());
-            provenance.push(field(name, Provenance::ConfigFile(Some(location))));
-            let path = icons_dir.join(spanned.get_ref());
-            if checks_assets && !path.exists() {
-                diagnostics.push(Diagnostic {
-                    severity: Severity::Warning,
-                    code,
-                    message: format!("{name} points to {}, which does not exist", path.display()),
-                    location: Some(location),
-                    field: name,
-                });
+                           code: &'static str| {
+        let (spanned, from_environment) = match overlay_raw {
+            Some(spanned) => (Some(spanned), true),
+            None => (base_raw, false),
+        };
+        match spanned {
+            Some(spanned) => {
+                let location = lines.unwrap().locate_start(spanned.span());
+                let provenance_kind = if from_environment {
+                    Provenance::Environment(environment_name.unwrap().to_owned())
+                } else {
+                    Provenance::ConfigFile(Some(location))
+                };
+                provenance.push(field(name, provenance_kind));
+                let path = icons_dir.join(spanned.get_ref());
+                if checks_assets && !path.exists() {
+                    diagnostics.push(Diagnostic {
+                        severity: Severity::Warning,
+                        code,
+                        message: format!(
+                            "{name} points to {}, which does not exist",
+                            path.display()
+                        ),
+                        location: Some(location),
+                        field: name,
+                    });
+                }
+                Some(path)
             }
-            Some(path)
-        }
-        None => {
-            provenance.push(field(name, Provenance::BuiltinDefault));
-            None
+            None => {
+                provenance.push(field(name, Provenance::BuiltinDefault));
+                None
+            }
         }
     };
 
     IconsConfig {
         source: resolve_one(
+            overlay.and_then(|i| i.source.as_ref()),
             raw.and_then(|i| i.source.as_ref()),
             "app.icons.source",
             "config.icon_asset_present.source",
         ),
         windows: resolve_one(
+            overlay.and_then(|i| i.windows.as_ref()),
             raw.and_then(|i| i.windows.as_ref()),
             "app.icons.windows",
             "config.icon_asset_present.windows",
         ),
         macos: resolve_one(
+            overlay.and_then(|i| i.macos.as_ref()),
             raw.and_then(|i| i.macos.as_ref()),
             "app.icons.macos",
             "config.icon_asset_present.macos",
         ),
         linux: resolve_one(
+            overlay.and_then(|i| i.linux.as_ref()),
             raw.and_then(|i| i.linux.as_ref()),
             "app.icons.linux",
             "config.icon_asset_present.linux",
@@ -995,6 +1132,56 @@ fn resolve_locales(
     }
 }
 
+/// Resolves every declared environment's effective `app.identifier`
+/// simultaneously (base configuration plus each overlay's own
+/// field-merge rule: overlay value, or the base value) and flags any
+/// value shared by more than one -- independent of which environment is
+/// actually selected at this invocation, since the mistake exists in the
+/// file regardless. `None` identifiers never collide with each other:
+/// this crate never invents an identifier, so there's no identity to share.
+fn validate_environment_identity_collisions(
+    raw_app: Option<&RawApp>,
+    environments: &Spanned<BTreeMap<String, RawEnvironmentOverlay>>,
+    config_path: &Path,
+    lines: &LineIndex<'_>,
+    errors: &mut Vec<SemanticConfigError>,
+) {
+    let location = lines.locate_start(environments.span());
+    let base_identifier = raw_app.and_then(|a| a.identifier.as_deref());
+
+    let mut labels_by_identifier: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    if let Some(identifier) = base_identifier {
+        labels_by_identifier
+            .entry(identifier)
+            .or_default()
+            .push("(base configuration)".to_owned());
+    }
+    for (name, overlay) in environments.get_ref() {
+        let effective = overlay
+            .app
+            .as_ref()
+            .and_then(|a| a.identifier.as_deref())
+            .or(base_identifier);
+        if let Some(identifier) = effective {
+            labels_by_identifier
+                .entry(identifier)
+                .or_default()
+                .push(name.clone());
+        }
+    }
+
+    for (identifier, labels) in labels_by_identifier {
+        if labels.len() > 1 {
+            errors.push(SemanticConfigError::DuplicateEnvironmentIdentifier {
+                config_path: config_path.to_owned(),
+                identifier: identifier.to_owned(),
+                environments: labels,
+                location,
+            });
+        }
+    }
+}
+
 /// Two-step parse: peeks `schema_version` first, so a genuinely newer or
 /// older schema shape reports a clean "unsupported schema_version" error
 /// rather than "unknown field" noise for every field this build doesn't
@@ -1092,7 +1279,7 @@ mod tests {
     #[test]
     fn missing_config_file_falls_back_to_defaults_without_error() {
         let dir = tempfile::tempdir().unwrap();
-        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
         assert_eq!(resolution.config.app.name, "app");
         assert_eq!(resolution.config.app.version, "0.1.0");
         assert_eq!(resolution.config.window.title, "app");
@@ -1107,7 +1294,7 @@ mod tests {
     fn unsupported_schema_version_is_rejected_with_a_location() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "florui.config.toml", "schema_version = 2\n");
-        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        let err = resolve(&facts(dir.path(), ""), None, None).unwrap_err();
         match err {
             ConfigError::Semantic(errors) => {
                 assert_eq!(errors.len(), 1);
@@ -1132,7 +1319,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\nbogus = true\n",
         );
-        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        let err = resolve(&facts(dir.path(), ""), None, None).unwrap_err();
         match err {
             ConfigError::Toml {
                 location: Some(_), ..
@@ -1145,7 +1332,7 @@ mod tests {
     fn app_name_defaults_to_the_cargo_package_name() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "florui.config.toml", "schema_version = 1\n");
-        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
         assert_eq!(resolution.config.app.name, "app");
         assert!(
             resolution
@@ -1163,7 +1350,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[app]\nname = \"Garden\"\n",
         );
-        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
         assert_eq!(resolution.config.app.name, "Garden");
         assert!(
             resolution
@@ -1181,7 +1368,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[app]\nversion = \"9.9.9\"\n",
         );
-        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
         assert_eq!(resolution.config.app.version, "9.9.9");
     }
 
@@ -1193,7 +1380,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[app]\nversion = 123\n",
         );
-        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        let err = resolve(&facts(dir.path(), ""), None, None).unwrap_err();
         match err {
             ConfigError::Semantic(errors) => {
                 assert!(matches!(
@@ -1214,7 +1401,7 @@ mod tests {
             "schema_version = 1\n[app]\nversion = { workspace = true }\n",
         );
         let manifest = "[package]\nname = \"app\"\nversion.workspace = true\n";
-        let resolution = resolve(&facts(dir.path(), manifest), None).unwrap();
+        let resolution = resolve(&facts(dir.path(), manifest), None, None).unwrap();
         assert_eq!(resolution.config.app.version, "0.1.0");
     }
 
@@ -1228,7 +1415,7 @@ mod tests {
         );
         // The same shape examples/florui-example-app/Cargo.toml has today.
         let manifest = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n";
-        let err = resolve(&facts(dir.path(), manifest), None).unwrap_err();
+        let err = resolve(&facts(dir.path(), manifest), None, None).unwrap_err();
         match err {
             ConfigError::Semantic(errors) => {
                 assert!(matches!(
@@ -1248,7 +1435,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[window]\nwidth = nan\n",
         );
-        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        let err = resolve(&facts(dir.path(), ""), None, None).unwrap_err();
         match err {
             ConfigError::Semantic(errors) => {
                 assert!(matches!(
@@ -1271,7 +1458,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[window]\nwidth = 0\n",
         );
-        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        let err = resolve(&facts(dir.path(), ""), None, None).unwrap_err();
         match err {
             ConfigError::Semantic(errors) => {
                 assert!(matches!(
@@ -1294,7 +1481,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[window]\nwidth = 400\nmin_width = 800\n",
         );
-        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        let err = resolve(&facts(dir.path(), ""), None, None).unwrap_err();
         match err {
             ConfigError::Semantic(errors) => {
                 assert!(matches!(
@@ -1324,7 +1511,7 @@ mod tests {
             span: 0..7,
         };
         f.legacy_dev_example = Some(located);
-        let err = resolve(&f, None).unwrap_err();
+        let err = resolve(&f, None, None).unwrap_err();
         match err {
             ConfigError::Semantic(errors) => {
                 assert!(matches!(
@@ -1344,7 +1531,7 @@ mod tests {
             value: "counter".to_owned(),
             span: 0..7,
         });
-        let resolution = resolve(&f, None).unwrap();
+        let resolution = resolve(&f, None, None).unwrap();
         assert_eq!(resolution.config.dev.example.as_deref(), Some("counter"));
         assert!(
             resolution
@@ -1362,7 +1549,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[dev]\nexample = \"counter\"\n",
         );
-        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
         assert_eq!(resolution.config.dev.example.as_deref(), Some("counter"));
     }
 
@@ -1374,7 +1561,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[app.icons]\nsource = \"missing.svg\"\n",
         );
-        let resolution = resolve(&facts(dir.path(), ""), Some(Target::Native)).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), Some(Target::Native), None).unwrap();
         assert_eq!(resolution.diagnostics.len(), 1);
         assert_eq!(
             resolution.diagnostics[0].code,
@@ -1390,7 +1577,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[app.icons]\nsource = \"missing.svg\"\n",
         );
-        let resolution = resolve(&facts(dir.path(), ""), Some(Target::Web)).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), Some(Target::Web), None).unwrap();
         assert!(resolution.diagnostics.is_empty());
     }
 
@@ -1402,7 +1589,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[app.icons]\nsource = \"missing.svg\"\n",
         );
-        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
         assert!(resolution.diagnostics.is_empty());
     }
 
@@ -1415,7 +1602,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[app.icons]\nsource = \"icon.svg\"\n",
         );
-        let resolution = resolve(&facts(dir.path(), ""), Some(Target::Native)).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), Some(Target::Native), None).unwrap();
         assert!(resolution.diagnostics.is_empty());
         assert_eq!(
             resolution.config.app.icons.source,
@@ -1450,7 +1637,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[app]\nname = \"Garden\"\n[window]\ntitle = \"A Different Title\"\n",
         );
-        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
         assert_eq!(resolution.config.web.title, "Garden");
         assert_eq!(resolution.config.window.title, "A Different Title");
     }
@@ -1463,7 +1650,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[app]\ndescription = \"A workspace for your ideas\"\n",
         );
-        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
         assert_eq!(
             resolution.config.web.description.as_deref(),
             Some("A workspace for your ideas")
@@ -1474,7 +1661,7 @@ mod tests {
     fn web_base_path_defaults_to_root() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "florui.config.toml", "schema_version = 1\n");
-        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
         assert_eq!(resolution.config.web.base_path, "/");
     }
 
@@ -1486,7 +1673,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[web]\nbase_path = \"garden/\"\n",
         );
-        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        let err = resolve(&facts(dir.path(), ""), None, None).unwrap_err();
         match err {
             ConfigError::Semantic(errors) => {
                 assert!(matches!(
@@ -1506,7 +1693,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[web.icons]\nfavicon = \"missing.svg\"\n",
         );
-        let resolution = resolve(&facts(dir.path(), ""), Some(Target::Web)).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), Some(Target::Web), None).unwrap();
         assert_eq!(resolution.diagnostics.len(), 1);
         assert_eq!(
             resolution.diagnostics[0].code,
@@ -1522,7 +1709,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[web.icons]\nfavicon = \"missing.svg\"\n",
         );
-        let resolution = resolve(&facts(dir.path(), ""), Some(Target::Native)).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), Some(Target::Native), None).unwrap();
         assert!(resolution.diagnostics.is_empty());
     }
 
@@ -1534,7 +1721,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[web.icons]\nfavicon = \"favicon.gif\"\n",
         );
-        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        let err = resolve(&facts(dir.path(), ""), None, None).unwrap_err();
         match err {
             ConfigError::Semantic(errors) => {
                 assert!(matches!(
@@ -1557,7 +1744,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[web.icons]\napple_touch_icon = \"icon.svg\"\n",
         );
-        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        let err = resolve(&facts(dir.path(), ""), None, None).unwrap_err();
         match err {
             ConfigError::Semantic(errors) => {
                 assert!(matches!(
@@ -1580,7 +1767,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[app.icons]\nsource = \"assets/app.svg\"\n",
         );
-        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
         assert_eq!(resolution.config.web.icons.favicon, None);
         assert_eq!(resolution.config.web.icons.apple_touch_icon, None);
     }
@@ -1589,7 +1776,7 @@ mod tests {
     fn activation_defaults_to_disabled_single_instance_and_empty_schemes_and_associations() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "florui.config.toml", "schema_version = 1\n");
-        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
         let activation = &resolution.config.app.activation;
         assert!(!activation.single_instance);
         assert!(activation.url_schemes.is_empty());
@@ -1604,7 +1791,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[app.activation]\nsingle_instance = true\nurl_schemes = [\"garden\"]\n",
         );
-        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
         let activation = &resolution.config.app.activation;
         assert!(activation.single_instance);
         assert_eq!(activation.url_schemes, vec!["garden".to_owned()]);
@@ -1618,7 +1805,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[app.activation]\nurl_schemes = [\"\"]\n",
         );
-        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        let err = resolve(&facts(dir.path(), ""), None, None).unwrap_err();
         match err {
             ConfigError::Semantic(errors) => {
                 assert!(matches!(
@@ -1641,7 +1828,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[app.activation]\nurl_schemes = [\"1garden\"]\n",
         );
-        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        let err = resolve(&facts(dir.path(), ""), None, None).unwrap_err();
         match err {
             ConfigError::Semantic(errors) => {
                 assert!(matches!(
@@ -1664,7 +1851,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[app.activation]\nurl_schemes = [\"garden\", \"Garden\"]\n",
         );
-        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        let err = resolve(&facts(dir.path(), ""), None, None).unwrap_err();
         match err {
             ConfigError::Semantic(errors) => {
                 assert!(matches!(
@@ -1687,7 +1874,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[[app.activation.file_associations]]\nextension = \"garden\"\nmime_type = \"application/x-garden\"\ndescription = \"Garden document\"\nidentity = \"com.floregreen.garden.document\"\n",
         );
-        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
         let association = &resolution.config.app.activation.file_associations[0];
         assert_eq!(association.extension, "garden");
         assert_eq!(
@@ -1712,7 +1899,7 @@ mod tests {
              extension = \"gdn\"\n\
              identity = \"com.floregreen.garden.document\"\n",
         );
-        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        let err = resolve(&facts(dir.path(), ""), None, None).unwrap_err();
         match err {
             ConfigError::Semantic(errors) => {
                 assert!(matches!(
@@ -1741,7 +1928,7 @@ mod tests {
              extension = \"Garden\"\n\
              identity = \"com.floregreen.garden.other\"\n",
         );
-        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        let err = resolve(&facts(dir.path(), ""), None, None).unwrap_err();
         match err {
             ConfigError::Semantic(errors) => {
                 assert!(matches!(
@@ -1760,7 +1947,7 @@ mod tests {
     fn window_persistence_defaults_disabled_with_key_main() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "florui.config.toml", "schema_version = 1\n");
-        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
         let persistence = &resolution.config.window.persistence;
         assert!(!persistence.enabled);
         assert_eq!(persistence.key, "main");
@@ -1774,7 +1961,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[window.persistence]\nenabled = true\nkey = \"editor\"\n",
         );
-        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
         let persistence = &resolution.config.window.persistence;
         assert!(persistence.enabled);
         assert_eq!(persistence.key, "editor");
@@ -1784,7 +1971,7 @@ mod tests {
     fn default_locale_defaults_to_en_without_any_locales_declared() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "florui.config.toml", "schema_version = 1\n");
-        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
         assert_eq!(resolution.config.app.locales.default_locale, "en");
         assert!(resolution.config.app.locales.locales.is_empty());
     }
@@ -1797,7 +1984,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[app.locales.en]\nname = \"Garden\"\ndescription = \"A workspace for your ideas\"\n[app.locales.pt-BR]\nname = \"Garden\"\n",
         );
-        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
         let locales = &resolution.config.app.locales.locales;
         assert_eq!(locales.len(), 2);
         assert_eq!(locales["en"].name.as_deref(), Some("Garden"));
@@ -1816,7 +2003,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[app]\ndefault_locale = \"fr\"\n[app.locales.en]\nname = \"Garden\"\n",
         );
-        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        let err = resolve(&facts(dir.path(), ""), None, None).unwrap_err();
         match err {
             ConfigError::Semantic(errors) => {
                 assert!(matches!(
@@ -1836,7 +2023,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[app]\ndefault_locale = \"fr\"\n",
         );
-        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
         assert_eq!(resolution.config.app.locales.default_locale, "fr");
     }
 
@@ -1848,7 +2035,7 @@ mod tests {
             "florui.config.toml",
             "schema_version = 1\n[app.locales.x]\nname = \"Garden\"\n",
         );
-        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        let err = resolve(&facts(dir.path(), ""), None, None).unwrap_err();
         match err {
             ConfigError::Semantic(errors) => {
                 assert!(matches!(
@@ -1858,5 +2045,175 @@ mod tests {
             }
             other => panic!("expected Semantic, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn environment_overlay_merges_identifier_and_icons_by_field() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n\
+             [app]\n\
+             identifier = \"com.floregreen.garden\"\n\
+             [app.icons]\n\
+             windows = \"assets/app.ico\"\n\
+             [environments.development.app]\n\
+             identifier = \"com.floregreen.garden.dev\"\n\
+             [environments.development.app.icons]\n\
+             source = \"assets/app-dev.svg\"\n",
+        );
+        let resolution = resolve(
+            &facts(dir.path(), ""),
+            None,
+            Some(EnvironmentSelection {
+                name: "development",
+                explicit: true,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            resolution.config.app.identifier.as_deref(),
+            Some("com.floregreen.garden.dev")
+        );
+        assert_eq!(
+            resolution.config.app.icons.source,
+            Some(dir.path().join("assets/app-dev.svg"))
+        );
+        assert_eq!(
+            resolution.config.app.icons.windows,
+            Some(dir.path().join("assets/app.ico"))
+        );
+        assert!(resolution.environment.overlay_applied);
+        assert_eq!(
+            resolution.environment.selected.as_deref(),
+            Some("development")
+        );
+    }
+
+    #[test]
+    fn unselected_environment_falls_back_to_base_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app]\nidentifier = \"com.floregreen.garden\"\n\
+             [environments.development.app]\nidentifier = \"com.floregreen.garden.dev\"\n",
+        );
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
+        assert_eq!(
+            resolution.config.app.identifier.as_deref(),
+            Some("com.floregreen.garden")
+        );
+        assert!(!resolution.environment.overlay_applied);
+        assert_eq!(resolution.environment.selected, None);
+        assert_eq!(
+            resolution.environment.declared,
+            vec!["development".to_owned()]
+        );
+    }
+
+    #[test]
+    fn implicit_default_environment_missing_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "florui.config.toml", "schema_version = 1\n");
+        let resolution = resolve(
+            &facts(dir.path(), ""),
+            None,
+            Some(EnvironmentSelection {
+                name: "production",
+                explicit: false,
+            }),
+        )
+        .unwrap();
+        assert!(!resolution.environment.overlay_applied);
+        assert_eq!(
+            resolution.environment.selected.as_deref(),
+            Some("production")
+        );
+    }
+
+    #[test]
+    fn explicit_unknown_environment_is_a_semantic_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "florui.config.toml", "schema_version = 1\n");
+        let err = resolve(
+            &facts(dir.path(), ""),
+            None,
+            Some(EnvironmentSelection {
+                name: "staging",
+                explicit: true,
+            }),
+        )
+        .unwrap_err();
+        match err {
+            ConfigError::Semantic(errors) => {
+                assert!(matches!(
+                    errors[0],
+                    SemanticConfigError::UnknownEnvironment { .. }
+                ));
+            }
+            other => panic!("expected Semantic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_identifier_between_declared_environment_and_base_is_a_semantic_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app]\nidentifier = \"com.floregreen.garden\"\n\
+             [environments.development]\n",
+        );
+        let err = resolve(&facts(dir.path(), ""), None, None).unwrap_err();
+        match err {
+            ConfigError::Semantic(errors) => {
+                assert!(matches!(
+                    errors[0],
+                    SemanticConfigError::DuplicateEnvironmentIdentifier { .. }
+                ));
+            }
+            other => panic!("expected Semantic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_identifier_between_two_declared_environments_is_a_semantic_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n\
+             [environments.development.app]\nidentifier = \"com.floregreen.garden.shared\"\n\
+             [environments.staging.app]\nidentifier = \"com.floregreen.garden.shared\"\n",
+        );
+        let err = resolve(&facts(dir.path(), ""), None, None).unwrap_err();
+        match err {
+            ConfigError::Semantic(errors) => {
+                assert!(matches!(
+                    errors[0],
+                    SemanticConfigError::DuplicateEnvironmentIdentifier { .. }
+                ));
+            }
+            other => panic!("expected Semantic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn distinct_identifiers_across_environments_pass_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app]\nidentifier = \"com.floregreen.garden\"\n\
+             [environments.development.app]\nidentifier = \"com.floregreen.garden.dev\"\n\
+             [environments.staging.app]\nidentifier = \"com.floregreen.garden.staging\"\n",
+        );
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
+        assert_eq!(
+            resolution.config.app.identifier.as_deref(),
+            Some("com.floregreen.garden")
+        );
     }
 }

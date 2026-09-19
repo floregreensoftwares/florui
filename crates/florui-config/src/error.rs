@@ -124,6 +124,21 @@ pub enum SemanticConfigError {
         tag: String,
         location: SourceLocation,
     },
+    UnknownEnvironment {
+        config_path: PathBuf,
+        requested: String,
+        available: Vec<String>,
+        /// `None` only when no `[environments]` table exists at all.
+        location: Option<SourceLocation>,
+    },
+    DuplicateEnvironmentIdentifier {
+        config_path: PathBuf,
+        identifier: String,
+        /// Every environment (and `"(base configuration)"` when it's one
+        /// of the colliding entries) that resolves to `identifier`.
+        environments: Vec<String>,
+        location: SourceLocation,
+    },
 }
 
 impl fmt::Display for SemanticConfigError {
@@ -241,6 +256,44 @@ impl fmt::Display for SemanticConfigError {
                 f,
                 "{}:{location}: \"{tag}\" is not a valid locale tag",
                 config_path.display()
+            ),
+            SemanticConfigError::UnknownEnvironment {
+                config_path,
+                requested,
+                available,
+                location: Some(location),
+            } => {
+                let available = if available.is_empty() {
+                    "none declared".to_owned()
+                } else {
+                    available.join(", ")
+                };
+                write!(
+                    f,
+                    "{}:{location}: --environment {requested} is not declared in [environments] (available: {available})",
+                    config_path.display()
+                )
+            }
+            SemanticConfigError::UnknownEnvironment {
+                config_path,
+                requested,
+                location: None,
+                ..
+            } => write!(
+                f,
+                "{}: --environment {requested} is not declared (no [environments] table exists)",
+                config_path.display()
+            ),
+            SemanticConfigError::DuplicateEnvironmentIdentifier {
+                config_path,
+                identifier,
+                environments,
+                location,
+            } => write!(
+                f,
+                "{}:{location}: app.identifier \"{identifier}\" is shared by {} -- side-by-side environments must use distinct identifiers",
+                config_path.display(),
+                environments.join(", ")
             ),
         }
     }
