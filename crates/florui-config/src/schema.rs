@@ -59,6 +59,36 @@ pub(crate) struct RawApp {
     pub(crate) description: Option<String>,
     pub(crate) version: Option<RawVersion>,
     pub(crate) icons: Option<RawIcons>,
+    pub(crate) activation: Option<RawActivation>,
+}
+
+/// Typed schema only -- no OS registration, no single-instance IPC, no
+/// activation events. `florui-platform` has no `florui-config` consumer at
+/// all yet, so there is no runtime to wire this into; the shape is defined
+/// ahead of the runtime that will eventually consume it, the same
+/// schema-before-behavior treatment `[window]`/`[app.icons]` already got.
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawActivation {
+    pub(crate) single_instance: Option<bool>,
+    /// Spanned around the whole array: a per-scheme problem (empty,
+    /// invalid characters, duplicate) is a property of one entry, but
+    /// there's no existing convention for spanning one element of a TOML
+    /// array here, so every activation error cites the array's own
+    /// location, same coarseness as `[environments]`'s table span.
+    pub(crate) url_schemes: Option<Spanned<Vec<String>>>,
+    pub(crate) file_associations: Option<Vec<RawFileAssociation>>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawFileAssociation {
+    pub(crate) extension: Spanned<String>,
+    pub(crate) mime_type: Option<String>,
+    pub(crate) description: Option<String>,
+    /// A stable identity for this association, distinct from `extension`,
+    /// meant to survive a renamed extension or description across releases.
+    pub(crate) identity: Spanned<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -80,6 +110,16 @@ pub(crate) struct RawWindow {
     pub(crate) min_height: Option<Spanned<f64>>,
     pub(crate) decorations: Option<Spanned<RawDecorations>>,
     pub(crate) transparent: Option<bool>,
+    pub(crate) persistence: Option<RawWindowPersistence>,
+}
+
+/// Typed schema only -- no bounds save/restore, no monitor revalidation, no
+/// `florui-platform` consumer yet (see `RawActivation`'s own doc comment).
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawWindowPersistence {
+    pub(crate) enabled: Option<bool>,
+    pub(crate) key: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
