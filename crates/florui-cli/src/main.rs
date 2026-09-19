@@ -31,6 +31,14 @@ struct Cli {
     /// from a virtual workspace root with more than one candidate member).
     #[arg(long, global = true)]
     package: Option<String>,
+    /// Selects a named `[environments.<name>]` overlay from
+    /// `florui.config.toml`. Defaults to "development" for `dev` and
+    /// "production" for `doctor`; naming an environment that isn't
+    /// declared is only an error when this flag is given explicitly --
+    /// the command's own default silently falls back to base
+    /// configuration when undeclared.
+    #[arg(long, global = true)]
+    environment: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -170,7 +178,7 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Dev { fixture, example } => match fixture {
             Some(fixture) => run_dev(fixture),
-            None => run_dev_example(cli.package, example),
+            None => run_dev_example(cli.package, example, cli.environment),
         },
         Command::New { name } => not_implemented(&format!("`florui new {name}`")),
         Command::Test => run_test(),
@@ -198,6 +206,7 @@ fn main() -> ExitCode {
         } => doctor::run(doctor::Options {
             target,
             package: cli.package,
+            environment: cli.environment,
             graphics,
             presentation,
             distribution,
@@ -301,7 +310,11 @@ fn exit_code_from_status(status: ExitStatus) -> ExitCode {
 ///
 /// Exits once the running example's own window closes on its own (not as
 /// a result of a restart this loop performed), returning its exit code.
-fn run_dev_example(package: Option<String>, example_override: Option<String>) -> ExitCode {
+fn run_dev_example(
+    package: Option<String>,
+    example_override: Option<String>,
+    environment: Option<String>,
+) -> ExitCode {
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(err) => return fail(format!("could not determine the current directory: {err}")),
@@ -310,7 +323,11 @@ fn run_dev_example(package: Option<String>, example_override: Option<String>) ->
         Ok(facts) => facts,
         Err(err) => return fail(err.to_string()),
     };
-    let resolved_config = match florui_config::resolve(&facts, None, None) {
+    let selection = florui_config::EnvironmentSelection {
+        name: environment.as_deref().unwrap_or("development"),
+        explicit: environment.is_some(),
+    };
+    let resolved_config = match florui_config::resolve(&facts, None, Some(selection)) {
         Ok(resolution) => resolution,
         Err(err) => return fail(err.to_string()),
     };

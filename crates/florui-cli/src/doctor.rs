@@ -99,6 +99,7 @@ impl Check {
 pub struct Options {
     pub target: String,
     pub package: Option<String>,
+    pub environment: Option<String>,
     pub graphics: bool,
     pub presentation: bool,
     pub distribution: bool,
@@ -112,7 +113,11 @@ pub fn run(options: Options) -> ExitCode {
     let mut checks = Vec::new();
 
     checks.extend(environment_checks());
-    checks.extend(project_checks(options.package.as_deref(), &options.target));
+    checks.extend(project_checks(
+        options.package.as_deref(),
+        options.environment.as_deref(),
+        &options.target,
+    ));
 
     match options.target.as_str() {
         "native" => {
@@ -283,9 +288,9 @@ fn tool_version_check(id: &'static str, program: &str, required: bool) -> Check 
 /// checks. Outside a resolvable project, returns a single
 /// `NotApplicable` check rather than failing outright -- a doctor run
 /// should still report environment checks in that case.
-fn project_checks(package: Option<&str>, target: &str) -> Vec<Check> {
+fn project_checks(package: Option<&str>, environment: Option<&str>, target: &str) -> Vec<Check> {
     match env::current_dir() {
-        Ok(cwd) => project_checks_at(&cwd, package, target),
+        Ok(cwd) => project_checks_at(&cwd, package, environment, target),
         Err(error) => vec![check_unknown(
             "project.resolved",
             format!("could not determine the current directory: {error}"),
@@ -298,7 +303,12 @@ fn project_checks(package: Option<&str>, target: &str) -> Vec<Check> {
 /// temporary Cargo workspace without mutating global process state, the
 /// same reasoning `florui_config::resolve_cargo_project` itself already
 /// applies.
-fn project_checks_at(cwd: &Path, package: Option<&str>, target: &str) -> Vec<Check> {
+fn project_checks_at(
+    cwd: &Path,
+    package: Option<&str>,
+    environment: Option<&str>,
+    target: &str,
+) -> Vec<Check> {
     let facts = match florui_config::resolve_cargo_project(cwd, package) {
         Ok(facts) => facts,
         // An explicit --package that doesn't exist is a real user mistake,
@@ -386,7 +396,11 @@ fn project_checks_at(cwd: &Path, package: Option<&str>, target: &str) -> Vec<Che
         _ => None,
     };
     let config_exists = florui_config::config_file_path(&facts.package_root).exists();
-    let resolution = florui_config::resolve(&facts, config_target, None);
+    let selection = florui_config::EnvironmentSelection {
+        name: environment.unwrap_or("production"),
+        explicit: environment.is_some(),
+    };
+    let resolution = florui_config::resolve(&facts, config_target, Some(selection));
 
     checks.push(dev_example_target_check(&facts, &resolution));
     checks.push(config_discovered_check(config_exists));
@@ -395,6 +409,12 @@ fn project_checks_at(cwd: &Path, package: Option<&str>, target: &str) -> Vec<Che
     checks.push(config_legacy_migration_check(config_exists, &resolution));
     checks.push(config_identity_check(config_exists, &resolution));
     checks.push(config_window_size_check(config_exists, &resolution));
+    checks.push(config_environment_selected_check(
+        Some(selection),
+        &resolution,
+    ));
+    checks.push(config_environment_known_check(&resolution));
+    checks.push(config_identity_collision_check(config_exists, &resolution));
     checks.extend(config_icon_asset_checks(
         config_exists,
         config_target,
@@ -705,6 +725,115 @@ fn config_window_size_check(
         None => check_pass(
             "config.window_size_valid",
             "window sizes (if declared) are finite, positive, and min/max-consistent".to_string(),
+        ),
+    }
+}
+
+/// Always Pass -- purely informational, reporting what environment
+/// selection was actually requested and (when resolution succeeded)
+/// whether a declared overlay actually applied. `config.environment_known`
+/// and `config.identity_collision` carry the pass/fail verdicts.
+fn config_environment_selected_check(
+    selection: Option<florui_config::EnvironmentSelection<'_>>,
+    resolution: &Result<florui_config::Resolution, florui_config::ConfigError>,
+) -> Check {
+    let evidence = match resolution {
+        Ok(resolution) => match &resolution.environment.selected {
+            Some(name) if resolution.environment.overlay_applied => {
+                format!("environment \"{name}\" selected ([environments.{name}] applied)")
+            }
+            Some(name) => format!(
+                "environment \"{name}\" selected (using base configuration -- not declared, \
+                 or no app overlay)"
+            ),
+            None => "no environment selected -- using base configuration".to_string(),
+        },
+        Err(_) => match selection {
+            Some(selection) => format!("environment \"{}\" requested", selection.name),
+            None => "no environment selected".to_string(),
+        },
+    };
+    check_pass("config.environment_selected", evidence)
+}
+
+fn config_environment_known_check(
+    resolution: &Result<florui_config::Resolution, florui_config::ConfigError>,
+) -> Check {
+    if parse_failed(resolution) {
+        return check_unknown(
+            "config.environment_known",
+            "not evaluated: florui.config.toml failed to parse".to_string(),
+        );
+    }
+    match semantic_errors(resolution).iter().find(|error| {
+        matches!(
+            error,
+            florui_config::SemanticConfigError::UnknownEnvironment { .. }
+        )
+    }) {
+        Some(error) => Check {
+            id: "config.environment_known",
+            category: "config",
+            status: Status::Fail,
+            required: false,
+            observed: None,
+            expected: None,
+            evidence: error.to_string(),
+            reason: None,
+            remediation: Some(
+                "pass --environment with a name declared under [environments], or omit it"
+                    .to_string(),
+            ),
+        },
+        None => check_pass(
+            "config.environment_known",
+            "the requested environment (if any) is declared".to_string(),
+        ),
+    }
+}
+
+fn config_identity_collision_check(
+    config_exists: bool,
+    resolution: &Result<florui_config::Resolution, florui_config::ConfigError>,
+) -> Check {
+    if !config_exists {
+        return check_not_applicable(
+            "config.identity_collision",
+            "no florui.config.toml to check",
+        );
+    }
+    if parse_failed(resolution) {
+        return check_unknown(
+            "config.identity_collision",
+            "not evaluated: florui.config.toml failed to parse".to_string(),
+        );
+    }
+    match semantic_errors(resolution).iter().find(|error| {
+        matches!(
+            error,
+            florui_config::SemanticConfigError::DuplicateEnvironmentIdentifier { .. }
+        )
+    }) {
+        Some(error) => Check {
+            id: "config.identity_collision",
+            category: "config",
+            status: Status::Fail,
+            required: false,
+            observed: None,
+            expected: None,
+            evidence: error.to_string(),
+            reason: None,
+            remediation: Some(
+                "give each declared environment (and base configuration) a distinct \
+                 app.identifier"
+                    .to_string(),
+            ),
+        },
+        None => check_pass(
+            "config.identity_collision",
+            "no declared environment shares app.identifier with another or with base \
+             configuration"
+                .to_string(),
         ),
     }
 }
@@ -1289,7 +1418,7 @@ mod tests {
     #[test]
     fn project_checks_at_reports_not_applicable_outside_a_project() {
         let dir = tempfile::tempdir().unwrap();
-        let checks = project_checks_at(dir.path(), None, "native");
+        let checks = project_checks_at(dir.path(), None, None, "native");
         assert_eq!(
             find(&checks, "project.resolved").status,
             Status::NotApplicable
@@ -1300,7 +1429,7 @@ mod tests {
     fn project_checks_at_reports_config_discovered_and_defaults_without_a_config_file() {
         let dir = tempfile::tempdir().unwrap();
         scaffold_project(dir.path());
-        let checks = project_checks_at(dir.path(), None, "native");
+        let checks = project_checks_at(dir.path(), None, None, "native");
         assert_eq!(find(&checks, "config.discovered").status, Status::Pass);
         assert_eq!(
             find(&checks, "config.schema_valid").status,
@@ -1317,7 +1446,7 @@ mod tests {
             "schema_version = 2\n",
         )
         .unwrap();
-        let checks = project_checks_at(dir.path(), None, "native");
+        let checks = project_checks_at(dir.path(), None, None, "native");
         assert_eq!(
             find(&checks, "config.schema_version_supported").status,
             Status::Fail
@@ -1340,7 +1469,7 @@ mod tests {
             "schema_version = 1\n[dev]\nexample = \"counter\"\n",
         )
         .unwrap();
-        let checks = project_checks_at(dir.path(), None, "native");
+        let checks = project_checks_at(dir.path(), None, None, "native");
         assert_eq!(
             find(&checks, "config.legacy_migration_conflict").status,
             Status::Fail
@@ -1356,7 +1485,7 @@ mod tests {
             "schema_version = 1\n[app.icons]\nsource = \"missing.svg\"\n",
         )
         .unwrap();
-        let checks = project_checks_at(dir.path(), None, "native");
+        let checks = project_checks_at(dir.path(), None, None, "native");
         assert_eq!(
             find(&checks, "config.icon_asset_present.source").status,
             Status::Warning
@@ -1372,10 +1501,59 @@ mod tests {
             "schema_version = 1\n[app.icons]\nsource = \"missing.svg\"\n",
         )
         .unwrap();
-        let checks = project_checks_at(dir.path(), None, "web");
+        let checks = project_checks_at(dir.path(), None, None, "web");
         assert_eq!(
             find(&checks, "config.icon_asset_present.source").status,
             Status::NotApplicable
+        );
+    }
+
+    #[test]
+    fn project_checks_at_reports_the_selected_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_project(dir.path());
+        std::fs::write(
+            dir.path().join("florui.config.toml"),
+            "schema_version = 1\n[environments.development.app]\nidentifier = \"com.floregreen.garden.dev\"\n",
+        )
+        .unwrap();
+        let checks = project_checks_at(dir.path(), None, Some("development"), "native");
+        let check = find(&checks, "config.environment_selected");
+        assert_eq!(check.status, Status::Pass);
+        assert!(check.evidence.contains("development"));
+        assert!(check.evidence.contains("applied"));
+    }
+
+    #[test]
+    fn project_checks_at_flags_an_unknown_explicit_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_project(dir.path());
+        std::fs::write(
+            dir.path().join("florui.config.toml"),
+            "schema_version = 1\n",
+        )
+        .unwrap();
+        let checks = project_checks_at(dir.path(), None, Some("staging"), "native");
+        assert_eq!(
+            find(&checks, "config.environment_known").status,
+            Status::Fail
+        );
+    }
+
+    #[test]
+    fn project_checks_at_flags_a_duplicate_environment_identifier() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_project(dir.path());
+        std::fs::write(
+            dir.path().join("florui.config.toml"),
+            "schema_version = 1\n[app]\nidentifier = \"com.floregreen.garden\"\n\
+             [environments.development]\n",
+        )
+        .unwrap();
+        let checks = project_checks_at(dir.path(), None, None, "native");
+        assert_eq!(
+            find(&checks, "config.identity_collision").status,
+            Status::Fail
         );
     }
 }
