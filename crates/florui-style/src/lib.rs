@@ -33,6 +33,7 @@
 mod animation;
 mod cascade;
 mod color;
+mod container_query_adapter;
 mod default_stylesheet;
 mod error;
 mod height_media_adapter;
@@ -43,11 +44,13 @@ mod tree;
 
 pub use animation::AnimationTimeline;
 pub use cascade::{
-    BorderSide, BoxShadow, ComputedStyle, ContentAlignment, Display, Edges, FilterFunction,
-    FlexDirection, FlexWrap, FontFamily, GridPlacement, GridTrackSize, ItemAlignment,
-    LengthPercentage, TransformFunction, Viewport, compute,
+    BorderSide, BoxShadow, ComputedStyle, ContainerType, ContentAlignment, Display, Edges,
+    FilterFunction, FlexDirection, FlexWrap, FontFamily, GridPlacement, GridTrackSize,
+    ItemAlignment, LengthPercentage, TransformFunction, Viewport, compute,
+    compute_with_container_query_signature,
 };
 pub use color::{ColorParseError, Rgba, parse_hex_color};
+pub use container_query_adapter::{ContentBoxSize, resolve_container_query_signatures};
 pub use error::StyleError;
 pub use interaction::InteractionState;
 pub use stylesheet_parse::{Rule, parse_stylesheet};

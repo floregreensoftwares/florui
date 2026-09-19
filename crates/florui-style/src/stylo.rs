@@ -54,9 +54,10 @@ use stylo_dom::ElementState;
 
 use crate::animation::AnimationTimeline;
 use crate::cascade::{
-    BorderSide as FlorBorderSide, BoxShadow as FlorBoxShadow, ComputedStyle, ContentAlignment,
-    Display as FlorDisplay, Edges, FilterFunction as FlorFilterFunction, FlexDirection, FlexWrap,
-    FontFamily as FlorFontFamily, ItemAlignment, LengthPercentage as FlorLengthPercentage,
+    BorderSide as FlorBorderSide, BoxShadow as FlorBoxShadow, ComputedStyle,
+    ContainerType as FlorContainerType, ContentAlignment, Display as FlorDisplay, Edges,
+    FilterFunction as FlorFilterFunction, FlexDirection, FlexWrap, FontFamily as FlorFontFamily,
+    ItemAlignment, LengthPercentage as FlorLengthPercentage,
     TransformFunction as FlorTransformFunction, Viewport as FlorViewport,
 };
 use crate::color::Rgba;
@@ -830,18 +831,30 @@ fn device(viewport: FlorViewport) -> Device {
 /// Computes real Stylo styles for every node in `arena`, driving Stylo's
 /// own selector matching, cascade, and inheritance via [`resolve_style`]
 /// — this crate reimplements none of them. `viewport` is what `@media`'s
-/// own size features resolve against. `timeline` carries `transition`/
-/// `@keyframes` state across calls — see [`crate::animation`]'s module
-/// doc.
+/// own size features resolve against. `container_query_signature` is the
+/// flattened, in-order truth value of every `@container` block across
+/// `rules` for *this one cascade* — see [`crate::container_query_adapter`]'s
+/// own module doc; the caller (`florui_layout::compute_with_style`) is
+/// responsible for resolving it per node and calling this once per distinct
+/// signature. `timeline` carries `transition`/`@keyframes` state across
+/// calls — see [`crate::animation`]'s module doc.
 pub(crate) fn compute(
     arena: &Arena,
     rules: &[Rule],
     state: &InteractionState,
     viewport: FlorViewport,
     timeline: &mut AnimationTimeline,
+    container_query_signature: &[bool],
 ) -> HashMap<NodeId, ComputedStyle> {
     style::thread_state::enter(style::thread_state::ThreadState::LAYOUT);
-    let result = compute_in_layout_state(arena, rules, state, viewport, timeline);
+    let result = compute_in_layout_state(
+        arena,
+        rules,
+        state,
+        viewport,
+        timeline,
+        container_query_signature,
+    );
     style::thread_state::exit(style::thread_state::ThreadState::LAYOUT);
     result
 }
@@ -852,6 +865,7 @@ fn compute_in_layout_state(
     state: &InteractionState,
     viewport: FlorViewport,
     timeline: &mut AnimationTimeline,
+    container_query_signature: &[bool],
 ) -> HashMap<NodeId, ComputedStyle> {
     let mut result = HashMap::new();
     if arena.roots().is_empty() {
@@ -866,14 +880,31 @@ fn compute_in_layout_state(
     // Origin::UserAgent — Stylo's real cascade-origin precedence means an
     // application rule below overrides it regardless of specificity or
     // this registration order, the same as a real browser's UA stylesheet.
+    // The default stylesheet never contains a `@container` block of its
+    // own, so it always gets an empty slice regardless of this call's own
+    // signature.
     let default_rule = crate::default_stylesheet::rule();
     stylist.append_stylesheet(
-        DocumentStyleSheet(default_rule.stylesheet(viewport.height)),
+        DocumentStyleSheet(default_rule.stylesheet(viewport.height, &[])),
         &lock.read(),
     );
+    // `container_query_signature` is one flat, in-order slice spanning
+    // every rule's own `@container` blocks — each rule here only reads the
+    // sub-slice its own `container_query_blocks()` contributed. Shorter
+    // than that (an empty slice from `compute`'s own "treat everything as
+    // non-matching" convenience wrapper included) is not an error: any
+    // block past the end of what the caller provided is simply treated as
+    // non-matching, same as [`crate::container_query_adapter::find_container`]
+    // returning `None`.
+    let mut signature_offset = 0;
     for rule in rules {
+        let block_count = rule.container_query_blocks().len();
+        let rule_signature: Vec<bool> = (signature_offset..signature_offset + block_count)
+            .map(|i| container_query_signature.get(i).copied().unwrap_or(false))
+            .collect();
+        signature_offset += block_count;
         stylist.append_stylesheet(
-            DocumentStyleSheet(rule.stylesheet(viewport.height)),
+            DocumentStyleSheet(rule.stylesheet(viewport.height, &rule_signature)),
             &lock.read(),
         );
     }
@@ -1296,7 +1327,27 @@ fn to_computed_style(values: &ComputedValues) -> ComputedStyle {
         transform_origin: to_transform_origin(&box_style.transform_origin),
         filter: to_filter(&effects.filter.0),
         backdrop_filter: to_filter(&effects.backdrop_filter.0),
+        container_type: to_container_type(box_style.clone_container_type()),
+        container_name: to_container_name(&box_style.clone_container_name()),
     }
+}
+
+/// `container-type` — checked in the same `size` before `inline-size`
+/// order Stylo's own `container_rule.rs::container_type_axes` uses
+/// (`size` containment is itself a superset of `inline-size`'s own bit).
+fn to_container_type(value: style::values::computed::ContainerType) -> FlorContainerType {
+    use style::values::computed::ContainerType as StyloContainerType;
+    if value.intersects(StyloContainerType::SIZE) {
+        FlorContainerType::Size
+    } else if value.intersects(StyloContainerType::INLINE_SIZE) {
+        FlorContainerType::InlineSize
+    } else {
+        FlorContainerType::Normal
+    }
+}
+
+fn to_container_name(value: &style::values::computed::ContainerName) -> Vec<String> {
+    value.0.iter().map(|ident| ident.0.to_string()).collect()
 }
 
 /// Shared by `filter` and `backdrop-filter` — same grammar, and Stylo's

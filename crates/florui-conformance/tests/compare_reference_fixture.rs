@@ -162,3 +162,7 @@ fixture_test!(
     media_query_min_height_matches_chromium,
     "media-query-min-height"
 );
+fixture_test!(
+    container_query_nested_matches_chromium,
+    "container-query-nested"
+);

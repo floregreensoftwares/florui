@@ -54,9 +54,9 @@
 use std::collections::HashMap;
 
 use florui_style::{
-    Arena, ComputedStyle, ContentAlignment, Display as StyleDisplay,
-    FlexDirection as StyleFlexDirection, FlexWrap as StyleFlexWrap, InlineItem as StyleInlineItem,
-    ItemAlignment, NodeId,
+    AnimationTimeline, Arena, ComputedStyle, ContentAlignment, ContentBoxSize,
+    Display as StyleDisplay, FlexDirection as StyleFlexDirection, FlexWrap as StyleFlexWrap,
+    InlineItem as StyleInlineItem, InteractionState, ItemAlignment, NodeId, Rule, Viewport,
 };
 use taffy::prelude::*;
 use taffy::{Baselines, compute_leaf_layout};
@@ -84,6 +84,11 @@ pub struct BoxLayout {
     pub width: f32,
     pub height: f32,
 }
+
+/// [`compute_with_style`]'s own return shape — resolved styles alongside
+/// the geometry they produced, the same pairing `UiRuntime::geometry`
+/// already hands callers.
+pub type StyleAndLayout = (HashMap<NodeId, ComputedStyle>, HashMap<NodeId, BoxLayout>);
 
 #[derive(Debug)]
 pub struct LayoutError(taffy::TaffyError);
@@ -593,6 +598,104 @@ pub fn compute_layout(
     }
 
     Ok(result)
+}
+
+/// Same job as calling [`florui_style::compute`] then [`compute_layout`] in
+/// sequence — which is exactly what this does when `rules` has no
+/// `@container` block at all (`Rule::has_container_queries`), at no extra
+/// cost. When it does, a `@container` condition's match depends on real,
+/// already-laid-out geometry `florui-style` alone can't produce (see
+/// `florui_style::container_query_adapter`'s own module doc, not public
+/// from here — this is the orchestration its doc points callers to), so
+/// this runs a bounded, three-step sequence instead of the naive one:
+///
+/// 1. A base style+layout pass with every `@container` condition treated
+///    as non-matching (real CSS doesn't let a container's own
+///    `container-type` be gated behind a query on itself either).
+/// 2. Every node's own real per-block signature, resolved against that
+///    base pass's real sizes ([`florui_style::resolve_container_query_signatures`]);
+///    grouped by distinct signature, one more style-only pass per group
+///    ([`florui_style::compute_with_container_query_signature`]), merged
+///    by node.
+/// 3. One final layout pass with the merged, now-correct styles.
+///
+/// Never more than two layout passes, regardless of how many distinct
+/// `@container` signatures exist in the tree — there is no fixed-point
+/// iteration here to bound, only this fixed sequence. That's exact only
+/// when a container's own size on its contained axis doesn't itself
+/// depend on its query-gated descendants (true for the recommended,
+/// common case: a definite or stretched container size, not
+/// `width: fit-content`/`flex-basis: auto` shrink-to-fit sizing driven by
+/// query-gated children) — a container that violates this is a documented
+/// gap, not silently assumed correct.
+///
+/// `transition`/`@keyframes` animation only threads through `timeline` for
+/// the base pass (step 1) — a node whose resolved declarations actually
+/// differ between the base pass and its own matched signature does not
+/// yet animate a transition on that difference; every per-signature pass
+/// in step 2 uses its own disposable timeline so it can't corrupt
+/// `timeline`'s real cross-frame bookkeeping for everything else. A
+/// documented gap, not a silent approximation.
+pub fn compute_with_style(
+    font: &mut florui_text::Font,
+    arena: &Arena,
+    rules: &[Rule],
+    state: &InteractionState,
+    viewport: Viewport,
+    timeline: &mut AnimationTimeline,
+    available: Size<AvailableSpace>,
+) -> Result<StyleAndLayout, LayoutError> {
+    let base_styles = florui_style::compute(arena, rules, state, viewport, timeline);
+    let base_layouts = compute_layout(font, arena, &base_styles, available)?;
+
+    if !rules.iter().any(Rule::has_container_queries) {
+        return Ok((base_styles, base_layouts));
+    }
+
+    let sizes: HashMap<NodeId, ContentBoxSize> = base_layouts
+        .iter()
+        .map(|(&id, layout)| {
+            (
+                id,
+                ContentBoxSize {
+                    width: layout.width,
+                    height: layout.height,
+                },
+            )
+        })
+        .collect();
+    let signatures =
+        florui_style::resolve_container_query_signatures(arena, rules, &base_styles, &sizes);
+
+    let mut distinct_signatures: Vec<Vec<bool>> = Vec::new();
+    for signature in signatures.values() {
+        if !distinct_signatures.contains(signature) {
+            distinct_signatures.push(signature.clone());
+        }
+    }
+
+    let mut final_styles = HashMap::with_capacity(base_styles.len());
+    for signature in &distinct_signatures {
+        let mut disposable_timeline = AnimationTimeline::default();
+        let pass_styles = florui_style::compute_with_container_query_signature(
+            arena,
+            rules,
+            state,
+            viewport,
+            &mut disposable_timeline,
+            signature,
+        );
+        for (&id, node_signature) in &signatures {
+            if node_signature == signature
+                && let Some(style) = pass_styles.get(&id)
+            {
+                final_styles.insert(id, style.clone());
+            }
+        }
+    }
+
+    let final_layouts = compute_layout(font, arena, &final_styles, available)?;
+    Ok((final_styles, final_layouts))
 }
 
 /// A leaf with no text measures at `0x0` — `compute_leaf_layout` only
@@ -2424,5 +2527,186 @@ mod tests {
             Some(leaf),
             "the leaf sits at the origin at every depth"
         );
+    }
+
+    mod container_queries {
+        use super::*;
+
+        fn compute_with_style_for(
+            tree: &Element,
+            css: &str,
+            available: Size<AvailableSpace>,
+        ) -> (
+            Arena,
+            HashMap<NodeId, ComputedStyle>,
+            HashMap<NodeId, BoxLayout>,
+        ) {
+            let arena = Arena::build(tree);
+            let rules = florui_style::parse_stylesheet(css).unwrap();
+            let mut font = florui_text::Font::load_embedded();
+            let mut timeline = florui_style::AnimationTimeline::default();
+            let (styles, layouts) = compute_with_style(
+                &mut font,
+                &arena,
+                &rules,
+                &InteractionState::new(),
+                florui_style::Viewport::default(),
+                &mut timeline,
+                available,
+            )
+            .unwrap();
+            (arena, styles, layouts)
+        }
+
+        /// The real, end-to-end path: an outer explicitly-narrow container
+        /// and a nested wider one, both size containers — a descendant's
+        /// `@container (min-width: ...)` must resolve against its own
+        /// nearest real container's real laid-out width, not the outer
+        /// one, and the resulting declaration must actually reach the
+        /// element's painted geometry (a background color, verified via
+        /// `ComputedStyle`, is enough to prove the declaration applied;
+        /// layout itself doesn't carry color).
+        #[test]
+        fn nested_containers_resolve_against_real_laid_out_geometry() {
+            let tree: Element = view! {
+                <div class="outer">
+                    <div class="inner">
+                        <div class="card" />
+                    </div>
+                </div>
+            };
+            let css = "
+                .outer { container-type: inline-size; width: 200px; }
+                .inner { container-type: inline-size; width: 500px; }
+                @container (min-width: 400px) { .card { background-color: #ff0000; } }
+            ";
+            let (arena, styles, _layouts) = compute_with_style_for(&tree, css, Size::MAX_CONTENT);
+            let outer = arena.roots()[0];
+            let inner = arena.children(outer)[0];
+            let card = arena.children(inner)[0];
+
+            assert_eq!(
+                styles[&card].background_color,
+                florui_style::Rgba::opaque(0xff, 0, 0),
+                "the nearer 500px `.inner` container matches, even though the \
+                 farther 200px `.outer` one alone would not"
+            );
+        }
+
+        /// The same stylesheet, laid out at two different available widths
+        /// for the single container involved — a real resize must flip
+        /// which branch applies, driven only by `compute_with_style`'s own
+        /// base layout pass, the same way every other layout-dependent
+        /// value already invalidates on a fresh call.
+        #[test]
+        fn resizing_the_container_changes_which_declarations_apply() {
+            let tree: Element = view! {
+                <div class="box">
+                    <div class="card" />
+                </div>
+            };
+            let css = "
+                .box { container-type: inline-size; width: 100%; }
+                @container (min-width: 400px) { .card { background-color: #ff0000; } }
+            ";
+
+            let narrow = Size {
+                width: AvailableSpace::Definite(300.0),
+                height: AvailableSpace::Definite(100.0),
+            };
+            let (arena, styles, _) = compute_with_style_for(&tree, css, narrow);
+            let card = arena.children(arena.roots()[0])[0];
+            assert_eq!(
+                styles[&card].background_color,
+                florui_style::Rgba::TRANSPARENT
+            );
+
+            let wide = Size {
+                width: AvailableSpace::Definite(600.0),
+                height: AvailableSpace::Definite(100.0),
+            };
+            let (arena, styles, _) = compute_with_style_for(&tree, css, wide);
+            let card = arena.children(arena.roots()[0])[0];
+            assert_eq!(
+                styles[&card].background_color,
+                florui_style::Rgba::opaque(0xff, 0, 0)
+            );
+        }
+
+        /// A gated `width` declaration only takes effect once the query
+        /// matches — proving the final layout pass, not just the final
+        /// *styles*, reflects the matched declarations, using an explicit
+        /// pixel width to isolate that from a separate, pre-existing gap:
+        /// `ComputedStyle::width` collapses any percentage to the same
+        /// `None` as `auto` (`to_optional_length`'s own doc, in
+        /// `crates/florui-style/src/stylo.rs`) — a real `width: 50%` and no
+        /// `width` at all currently produce the identical (auto-fallback,
+        /// full-stretch) layout either way, container query or not. Not
+        /// this change's own scope to fix; verified only that container
+        /// queries don't regress or change that existing behavior below.
+        #[test]
+        fn a_gated_width_only_applies_once_the_container_query_matches() {
+            let tree: Element = view! {
+                <div class="box">
+                    <div class="card" />
+                </div>
+            };
+            let css = "
+                .box { container-type: inline-size; width: 500px; }
+                @container (min-width: 400px) { .card { width: 250px; height: 10px; } }
+            ";
+            let root = Size {
+                width: AvailableSpace::Definite(500.0),
+                height: AvailableSpace::Definite(100.0),
+            };
+            let (arena, _styles, layouts) = compute_with_style_for(&tree, css, root);
+            let card = arena.children(arena.roots()[0])[0];
+
+            assert_eq!(
+                layouts[&card].width, 250.0,
+                "the gated 250px width only applies once `.box`'s real size matches"
+            );
+        }
+
+        /// A percentage `width` declared inside a matched `@container`
+        /// block resolves exactly the same way the identical percentage
+        /// would unconditionally (today: falls back to filling the parent
+        /// — see the previous test's own doc for the pre-existing,
+        /// out-of-scope reason). Container queries don't change or
+        /// regress that existing behavior.
+        #[test]
+        fn a_percentage_inside_a_matched_container_behaves_the_same_as_unconditionally() {
+            let tree: Element = view! {
+                <div class="box">
+                    <div class="card" />
+                </div>
+            };
+            let css = "
+                .box { container-type: inline-size; width: 500px; }
+                @container (min-width: 400px) { .card { width: 50%; height: 10px; } }
+            ";
+            let root = Size {
+                width: AvailableSpace::Definite(500.0),
+                height: AvailableSpace::Definite(100.0),
+            };
+            let (arena, _styles, layouts) = compute_with_style_for(&tree, css, root);
+            let card = arena.children(arena.roots()[0])[0];
+
+            assert_eq!(layouts[&card].width, 500.0);
+        }
+
+        /// A stylesheet with zero `@container` blocks must take the cheap
+        /// early-out path (`Rule::has_container_queries`) — same result a
+        /// plain `compute` + `compute_layout` call already produced, at no
+        /// extra cost.
+        #[test]
+        fn a_stylesheet_with_no_container_queries_behaves_exactly_like_before() {
+            let tree: Element = view! { <div class="card" /> };
+            let css = ".card { width: 123px; height: 45px; }";
+            let (arena, _styles, layouts) = compute_with_style_for(&tree, css, Size::MAX_CONTENT);
+            let node = arena.roots()[0];
+            assert_eq!(layouts[&node].width, 123.0);
+            assert_eq!(layouts[&node].height, 45.0);
+        }
     }
 }

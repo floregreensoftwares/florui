@@ -246,6 +246,25 @@ pub enum TransformFunction {
     },
 }
 
+/// `container-type` — whether, and on which axes, this node establishes a
+/// size query container for its descendants' `@container` conditions. Real
+/// CSS's own three-keyword grammar (`normal`/`size`/`inline-size`), read
+/// back verbatim from Stylo (no reimplementation): only the `@container`
+/// at-rule itself needs a hand-built adapter (Stylo's CSS parser never
+/// recognizes it outside a `gecko` build), not this property — see
+/// [`crate::stylo`]'s own module doc for why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ContainerType {
+    #[default]
+    Normal,
+    /// Establishes containment on the inline axis only (the axis
+    /// `writing-mode` currently makes horizontal — this crate has no
+    /// `writing-mode` support, so always physical width).
+    InlineSize,
+    /// Establishes containment on both axes.
+    Size,
+}
+
 /// One `filter` function, already reduced to this crate's documented
 /// initial subset: `blur()`, `brightness()`, `contrast()`, and
 /// `saturate()`. `grayscale()`, `hue-rotate()`, `invert()`, the filter
@@ -406,6 +425,14 @@ pub struct ComputedStyle {
     /// Same grammar/subset as [`Self::filter`], applied to whatever is
     /// already painted behind this node instead of its own content.
     pub backdrop_filter: Vec<FilterFunction>,
+    /// `container-type` — see [`ContainerType`]'s own doc.
+    pub container_type: ContainerType,
+    /// `container-name` — zero or more `<custom-ident>`s a descendant's
+    /// `@container <name> (...)` can filter by; empty is real CSS's own
+    /// initial `none`. Meaningless when [`Self::container_type`] is
+    /// [`ContainerType::Normal`], matching real CSS (a name with no
+    /// established containment names nothing).
+    pub container_name: Vec<String>,
 }
 
 /// The viewport `@media` queries evaluate against — real CSS's own
@@ -434,6 +461,15 @@ impl Default for Viewport {
 /// what `@media`'s own size features (`min-width`, ...) resolve against.
 /// `timeline` carries `transition`/`@keyframes` state across calls — see
 /// [`crate::AnimationTimeline`]'s own doc.
+///
+/// Every `@container` condition resolves as non-matching under this
+/// entry point (an empty signature) — a stylesheet with `@container`
+/// blocks needs [`compute_with_container_query_signature`] instead, driven
+/// by `florui_layout::compute_with_style`'s own multi-pass orchestration
+/// (a container query's match depends on real, already-laid-out geometry
+/// this crate alone can't produce — see
+/// [`crate::container_query_adapter`]'s own module doc). Every existing
+/// caller with no container queries of its own is unaffected either way.
 pub fn compute(
     arena: &Arena,
     rules: &[Rule],
@@ -441,7 +477,34 @@ pub fn compute(
     viewport: Viewport,
     timeline: &mut crate::animation::AnimationTimeline,
 ) -> HashMap<NodeId, ComputedStyle> {
-    stylo::compute(arena, rules, state, viewport, timeline)
+    stylo::compute(arena, rules, state, viewport, timeline, &[])
+}
+
+/// Same as [`compute`], but with an explicit, real per-node
+/// `@container` signature instead of treating every condition as
+/// non-matching. `container_query_signature` must be exactly the flattened,
+/// in-order length every `Rule` in `rules` reports via its own (crate-
+/// private) `container_query_blocks()` — see
+/// [`crate::container_query_adapter::resolve_container_query_signatures`]
+/// for how a caller derives one for a specific node's own signature, and
+/// `florui_layout::compute_with_style` for the orchestration that groups
+/// nodes by signature and calls this once per distinct group.
+pub fn compute_with_container_query_signature(
+    arena: &Arena,
+    rules: &[Rule],
+    state: &InteractionState,
+    viewport: Viewport,
+    timeline: &mut crate::animation::AnimationTimeline,
+    container_query_signature: &[bool],
+) -> HashMap<NodeId, ComputedStyle> {
+    stylo::compute(
+        arena,
+        rules,
+        state,
+        viewport,
+        timeline,
+        container_query_signature,
+    )
 }
 
 #[cfg(test)]
@@ -655,6 +718,57 @@ mod tests {
         let (arena, computed) = styles(&tree, ".over { opacity: 3; }", &InteractionState::new());
         let node = arena.roots()[0];
         assert_eq!(computed[&node].opacity, 1.0);
+    }
+
+    #[test]
+    fn container_type_defaults_to_normal() {
+        let tree: Element = view! { <div /> };
+        let (arena, computed) = styles(&tree, "", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].container_type, ContainerType::Normal);
+    }
+
+    #[test]
+    fn container_type_resolves_inline_size_and_size_from_real_css() {
+        let tree: Element = view! { <div class="a" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".a { container-type: inline-size; }",
+            &InteractionState::new(),
+        );
+        assert_eq!(
+            computed[&arena.roots()[0]].container_type,
+            ContainerType::InlineSize
+        );
+
+        let tree: Element = view! { <div class="b" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".b { container-type: size; }",
+            &InteractionState::new(),
+        );
+        assert_eq!(
+            computed[&arena.roots()[0]].container_type,
+            ContainerType::Size
+        );
+    }
+
+    #[test]
+    fn container_name_defaults_to_empty_and_resolves_from_real_css() {
+        let tree: Element = view! { <div /> };
+        let (arena, computed) = styles(&tree, "", &InteractionState::new());
+        assert!(computed[&arena.roots()[0]].container_name.is_empty());
+
+        let tree: Element = view! { <div class="sidebar" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".sidebar { container-name: sidebar; }",
+            &InteractionState::new(),
+        );
+        assert_eq!(
+            computed[&arena.roots()[0]].container_name,
+            vec!["sidebar".to_string()]
+        );
     }
 
     #[test]
