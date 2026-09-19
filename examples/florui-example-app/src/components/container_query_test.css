@@ -1,0 +1,51 @@
+.page {
+    display: flex;
+    flex-direction: column;
+    padding-top: 24px;
+    padding-right: 24px;
+    padding-bottom: 24px;
+    padding-left: 24px;
+    background-color: #1e1e22;
+    color: #ffffff;
+}
+
+.instructions {
+    font-size: 14px;
+    margin-bottom: 24px;
+}
+
+.outer {
+    container-type: inline-size;
+    border: 2px solid #555555;
+    padding-top: 16px;
+    padding-right: 16px;
+    padding-bottom: 16px;
+    padding-left: 16px;
+}
+
+.inner {
+    container-type: inline-size;
+    width: 300px;
+    margin-top: 12px;
+    border: 2px dashed #555555;
+    padding-top: 16px;
+    padding-right: 16px;
+    padding-bottom: 16px;
+    padding-left: 16px;
+}
+
+.card {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 64px;
+    background-color: #8a8a92;
+    font-size: 13px;
+    color: #1e1e22;
+}
+
+@container (min-width: 500px) {
+    .card {
+        background-color: #2f7d6c;
+    }
+}
