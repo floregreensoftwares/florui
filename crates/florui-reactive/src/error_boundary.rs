@@ -90,7 +90,7 @@ impl<E: Clone + 'static> ErrorBoundary<E> {
 ///
 /// # Panics
 ///
-/// Panics outside a [`Scope::render`](crate::Scope::render) pass, or if
+/// Panics outside a [`ComponentScope::render`](crate::ComponentScope::render) pass, or if
 /// hooks ran in a different order or count than last render.
 pub fn use_error_boundary<E: Clone + 'static>() -> ErrorBoundary<E> {
     let error = use_signal(|| None::<E>);
@@ -126,14 +126,14 @@ pub fn error_boundary<E: Clone + 'static, T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Scope, use_context};
+    use crate::{ComponentScope, use_context};
 
     #[derive(Debug, Clone, PartialEq)]
     struct DemoError(&'static str);
 
     #[test]
     fn no_error_renders_children_via_a_keyed_scope() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         let value =
             scope.render(|| error_boundary::<DemoError, _>(|| "children", |_, _| "fallback"));
         assert_eq!(value, "children");
@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn a_reported_error_switches_to_the_fallback() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
 
         // First render: no error, but a descendant reports one.
         scope.render(|| {
@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn reset_clears_the_error_and_advances_generation() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
 
         let generation_before = scope.render(|| {
             let boundary = use_error_boundary::<DemoError>();
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn resetting_disposes_the_previous_generations_state() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         let disposed = std::rc::Rc::new(std::cell::Cell::new(false));
 
         let mount_child = |disposed: &std::rc::Rc<std::cell::Cell<bool>>| {
@@ -254,7 +254,7 @@ mod tests {
     /// shape (which positional/keyed hooks run, and in what order) stays
     /// identical every render — only the reported errors driving which
     /// branches get taken change between calls.
-    fn nested_boundaries(scope: &Scope) -> DemoError {
+    fn nested_boundaries(scope: &ComponentScope) -> DemoError {
         scope.render(|| {
             error_boundary::<DemoError, _>(
                 || {
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn a_failure_while_rendering_the_fallback_reaches_the_next_boundary_out() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
 
         // Render 1: both boundaries healthy — inner's children runs,
         // reporting nothing (the inner error_boundary's own fallback,
@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn sibling_state_outside_the_boundary_is_unaffected_by_its_failure() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         let sibling_signal = scope.render(|| {
             let sibling = use_signal(|| "sibling-untouched");
             error_boundary::<DemoError, _>(

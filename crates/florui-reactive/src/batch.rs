@@ -72,11 +72,11 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
-    use crate::Scope;
+    use crate::ComponentScope;
 
     #[test]
     fn two_writes_in_one_batch_wake_the_host_exactly_once() {
-        let (scope, dirty) = Scope::new();
+        let (scope, dirty) = ComponentScope::new();
         let wakes = Rc::new(StdCell::new(0));
         let wakes_in_waker = Rc::clone(&wakes);
         dirty.on_mark(move || wakes_in_waker.set(wakes_in_waker.get() + 1));
@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn a_write_outside_any_batch_still_wakes_immediately() {
-        let (scope, dirty) = Scope::new();
+        let (scope, dirty) = ComponentScope::new();
         let wakes = Rc::new(StdCell::new(0));
         let wakes_in_waker = Rc::clone(&wakes);
         dirty.on_mark(move || wakes_in_waker.set(wakes_in_waker.get() + 1));
@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn a_read_inside_a_batch_sees_the_latest_write_synchronously() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         let value = batch(|| {
             scope.render(|| {
                 let signal = crate::use_signal(|| 0);
@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn nested_batches_only_wake_when_the_outermost_one_finishes() {
-        let (scope, dirty) = Scope::new();
+        let (scope, dirty) = ComponentScope::new();
         let wakes = Rc::new(StdCell::new(0));
         let wakes_in_waker = Rc::clone(&wakes);
         dirty.on_mark(move || wakes_in_waker.set(wakes_in_waker.get() + 1));
@@ -149,8 +149,8 @@ mod tests {
 
     #[test]
     fn two_independent_dirty_flags_each_wake_once() {
-        let (scope_a, dirty_a) = Scope::new();
-        let (scope_b, dirty_b) = Scope::new();
+        let (scope_a, dirty_a) = ComponentScope::new();
+        let (scope_b, dirty_b) = ComponentScope::new();
         let wakes_a = Rc::new(StdCell::new(0));
         let wakes_b = Rc::new(StdCell::new(0));
         let (wa, wb) = (Rc::clone(&wakes_a), Rc::clone(&wakes_b));

@@ -1,4 +1,4 @@
-//! [`Scope`]: where a tree's hook state lives across repeated re-renders.
+//! [`ComponentScope`]: where a tree's hook state lives across repeated re-renders.
 
 use std::any::{Any, TypeId};
 use std::cell::{Cell, RefCell};
@@ -8,10 +8,10 @@ use std::rc::Rc;
 use crate::{DirtyFlag, Key};
 
 thread_local! {
-    pub(crate) static ACTIVE_SCOPES: RefCell<Vec<Rc<ScopeInner>>> = const { RefCell::new(Vec::new()) };
+    pub(crate) static ACTIVE_SCOPES: RefCell<Vec<Rc<ComponentScopeInner>>> = const { RefCell::new(Vec::new()) };
 }
 
-pub(crate) struct ScopeInner {
+pub(crate) struct ComponentScopeInner {
     pub(crate) slots: RefCell<Vec<Box<dyn Any>>>,
     pub(crate) cursor: Cell<usize>,
     pub(crate) dirty: DirtyFlag,
@@ -27,20 +27,20 @@ pub(crate) struct ScopeInner {
     /// [`use_child_scope_keyed`]. Separate from `slots`: a keyed child's
     /// identity must survive its position changing between renders, which
     /// a positional slot index cannot express.
-    pub(crate) keyed_children: RefCell<HashMap<Key, Scope>>,
+    pub(crate) keyed_children: RefCell<HashMap<Key, ComponentScope>>,
     /// Which keys `use_child_scope_keyed` was actually called with during
     /// the render pass in progress — reset at the start of each
-    /// [`Scope::render`], consulted at the end to prune any
+    /// [`ComponentScope::render`], consulted at the end to prune any
     /// `keyed_children` entry not touched this time (its item was removed
     /// or its key changed), disposing it the same way dropping any other
     /// scope does.
     pub(crate) keys_seen_this_render: RefCell<HashSet<Key>>,
 }
 
-impl Drop for ScopeInner {
+impl Drop for ComponentScopeInner {
     /// Removing an identity disposes its hooks: every effect and
     /// attachment this scope (and, as the field drop cascades into any
-    /// stored child `Scope`, every scope nested inside it) still owns runs
+    /// stored child `ComponentScope`, every scope nested inside it) still owns runs
     /// its cleanup here.
     fn drop(&mut self) {
         crate::effect::dispose(self);
@@ -65,11 +65,11 @@ pub(crate) struct PendingAttachment {
 /// `use_signal`/`use_memo` calls against the same slots, in the same
 /// order, is what lets a plain Rust function call keep state instead of
 /// starting fresh every time.
-pub struct Scope {
-    inner: Rc<ScopeInner>,
+pub struct ComponentScope {
+    inner: Rc<ComponentScopeInner>,
 }
 
-impl Scope {
+impl ComponentScope {
     /// A fresh scope, plus the [`DirtyFlag`] a host uses to know when a
     /// [`Signal::set`](crate::Signal::set) inside it (or inside any
     /// [`use_child_scope`] nested within it) means "render again" —
@@ -84,7 +84,7 @@ impl Scope {
     /// under it is still visible to whoever holds that flag.
     fn with_dirty_flag(dirty: DirtyFlag) -> Self {
         Self {
-            inner: Rc::new(ScopeInner {
+            inner: Rc::new(ComponentScopeInner {
                 slots: RefCell::new(Vec::new()),
                 cursor: Cell::new(0),
                 dirty,
@@ -112,10 +112,10 @@ impl Scope {
         let popped = ACTIVE_SCOPES.with(|scopes| scopes.borrow_mut().pop());
         debug_assert!(
             popped.is_some_and(|popped| Rc::ptr_eq(&popped, &self.inner)),
-            "Scope::render must pop the exact scope it pushed"
+            "ComponentScope::render must pop the exact scope it pushed"
         );
         // A keyed child not touched this render had its item removed, or
-        // its key changed — either way it's gone, and dropping its Scope
+        // its key changed — either way it's gone, and dropping its ComponentScope
         // here (if this was the last reference to it) disposes it, same
         // as any other scope going away.
         let seen = self.inner.keys_seen_this_render.borrow();
@@ -130,7 +130,7 @@ impl Scope {
     }
 }
 
-impl Clone for Scope {
+impl Clone for ComponentScope {
     fn clone(&self) -> Self {
         Self {
             inner: Rc::clone(&self.inner),
@@ -138,24 +138,24 @@ impl Clone for Scope {
     }
 }
 
-impl Default for Scope {
+impl Default for ComponentScope {
     fn default() -> Self {
         Self::new().0
     }
 }
 
-/// Renders `render` once, in a fresh, throwaway [`Scope`] — every
+/// Renders `render` once, in a fresh, throwaway [`ComponentScope`] — every
 /// `#[component]` call needs one active somewhere up the call stack, and
 /// this is the convenient choice for a one-shot render (a test, a static
 /// capture) that never needs its hook state to persist afterward. A host
-/// that renders repeatedly should keep its own [`Scope`] and call
-/// [`Scope::render`] directly instead, so state actually survives between
+/// that renders repeatedly should keep its own [`ComponentScope`] and call
+/// [`ComponentScope::render`] directly instead, so state actually survives between
 /// renders.
 pub fn render_once<T>(render: impl FnOnce() -> T) -> T {
-    Scope::new().0.render(render)
+    ComponentScope::new().0.render(render)
 }
 
-/// Gives each call site of this function its own persistent [`Scope`],
+/// Gives each call site of this function its own persistent [`ComponentScope`],
 /// nested inside whichever scope is currently active — this is the
 /// mechanism `#[component]` needs so every component gets its own hook
 /// state, not one shared list for the whole tree; it is not meant to be
@@ -165,16 +165,18 @@ pub fn render_once<T>(render: impl FnOnce() -> T) -> T {
 ///
 /// # Panics
 ///
-/// Panics if called outside a [`Scope::render`] pass, or if this call's
+/// Panics if called outside a [`ComponentScope::render`] pass, or if this call's
 /// position held something other than a child scope last render.
 pub fn use_child_scope<T>(render: impl FnOnce() -> T) -> T {
     let (parent, index) = active_slot("use_child_scope");
     let mut slots = parent.slots.borrow_mut();
     if index == slots.len() {
-        slots.push(Box::new(Scope::with_dirty_flag(parent.dirty.clone())));
+        slots.push(Box::new(ComponentScope::with_dirty_flag(
+            parent.dirty.clone(),
+        )));
     }
     let child = slots[index]
-        .downcast_ref::<Scope>()
+        .downcast_ref::<ComponentScope>()
         .unwrap_or_else(|| {
             panic!(
                 "hook order changed between renders at call position {index} — \
@@ -186,18 +188,18 @@ pub fn use_child_scope<T>(render: impl FnOnce() -> T) -> T {
     child.render(render)
 }
 
-/// Gives the child at `key` (within whichever [`Scope`] is currently
+/// Gives the child at `key` (within whichever [`ComponentScope`] is currently
 /// active) its own persistent hook state, addressed by that key instead
 /// of call position — unlike [`use_child_scope`], a keyed child keeps its
 /// state across renders even if its position among siblings changes
 /// (items reordering in a list), as long as the same key is used. A key
 /// no longer passed on a later render is treated as removed: its scope
 /// (and everything nested inside it) is disposed the next time its
-/// parent renders — see [`Scope::render`].
+/// parent renders — see [`ComponentScope::render`].
 ///
 /// # Panics
 ///
-/// Panics if called outside a [`Scope::render`] pass, or if `key` was
+/// Panics if called outside a [`ComponentScope::render`] pass, or if `key` was
 /// already used by an earlier sibling in this same render — keys are
 /// scoped to siblings, and a duplicate would otherwise silently reuse one
 /// item's state for another.
@@ -217,37 +219,37 @@ pub fn use_child_scope_keyed<K: Into<Key>, T>(key: K, render: impl FnOnce() -> T
         .keyed_children
         .borrow_mut()
         .entry(key)
-        .or_insert_with(|| Scope::with_dirty_flag(parent.dirty.clone()))
+        .or_insert_with(|| ComponentScope::with_dirty_flag(parent.dirty.clone()))
         .clone();
     child.render(render)
 }
 
-/// The currently active [`Scope`], without reserving a positional slot in
+/// The currently active [`ComponentScope`], without reserving a positional slot in
 /// it — for hooks (like [`use_child_scope_keyed`]) whose identity comes
 /// from somewhere other than call order.
 ///
 /// # Panics
 ///
-/// Panics if called outside a [`Scope::render`] pass.
-fn active_scope(hook_name: &str) -> Rc<ScopeInner> {
+/// Panics if called outside a [`ComponentScope::render`] pass.
+fn active_scope(hook_name: &str) -> Rc<ComponentScopeInner> {
     ACTIVE_SCOPES.with(|scopes| {
         scopes.borrow().last().cloned().unwrap_or_else(|| {
             panic!(
-                "{hook_name} called outside of Scope::render — hooks must run \
+                "{hook_name} called outside of ComponentScope::render — hooks must run \
                  during a component tree's render pass"
             )
         })
     })
 }
 
-/// Reserves the next call-order slot in the currently active [`Scope`] —
+/// Reserves the next call-order slot in the currently active [`ComponentScope`] —
 /// shared by every order-sensitive hook. `hook_name` names the caller in
 /// the panic message.
 ///
 /// # Panics
 ///
-/// Panics if called outside a [`Scope::render`] pass.
-pub(crate) fn active_slot(hook_name: &str) -> (Rc<ScopeInner>, usize) {
+/// Panics if called outside a [`ComponentScope::render`] pass.
+pub(crate) fn active_slot(hook_name: &str) -> (Rc<ComponentScopeInner>, usize) {
     let scope = active_scope(hook_name);
     let index = scope.cursor.get();
     scope.cursor.set(index + 1);
@@ -261,8 +263,8 @@ mod tests {
 
     #[test]
     fn independent_scopes_never_share_state() {
-        let (a, _) = Scope::new();
-        let (b, _) = Scope::new();
+        let (a, _) = ComponentScope::new();
+        let (b, _) = ComponentScope::new();
         a.render(|| use_signal(|| 0).set(1));
         let b_value = b.render(|| use_signal(|| 0).get());
         assert_eq!(b_value, 0, "scope b's signal is its own, not scope a's");
@@ -270,8 +272,8 @@ mod tests {
 
     #[test]
     fn nested_scope_renders_restore_the_outer_scope_afterward() {
-        let (outer, _) = Scope::new();
-        let (inner, _) = Scope::new();
+        let (outer, _) = ComponentScope::new();
+        let (inner, _) = ComponentScope::new();
         outer.render(|| {
             use_signal(|| "outer-before").get();
             inner.render(|| {
@@ -285,7 +287,7 @@ mod tests {
 
     #[test]
     fn a_child_scope_persists_its_own_state_across_renders_of_the_parent() {
-        let (root, _dirty) = Scope::new();
+        let (root, _dirty) = ComponentScope::new();
         root.render(|| {
             use_child_scope(|| use_signal(|| 0).set(5));
         });
@@ -298,7 +300,7 @@ mod tests {
 
     #[test]
     fn two_child_scopes_at_different_positions_are_independent() {
-        let (root, _dirty) = Scope::new();
+        let (root, _dirty) = ComponentScope::new();
         let (a, b) = root.render(|| {
             let a = use_child_scope(|| use_signal(|| "a").get());
             let b = use_child_scope(|| use_signal(|| "b").get());
@@ -310,7 +312,7 @@ mod tests {
 
     #[test]
     fn setting_a_signal_in_a_child_scope_marks_the_shared_dirty_flag() {
-        let (root, dirty) = Scope::new();
+        let (root, dirty) = ComponentScope::new();
         root.render(|| {
             use_child_scope(|| use_signal(|| 0).set(1));
         });
@@ -322,7 +324,7 @@ mod tests {
 
     #[test]
     fn a_waker_registered_on_the_root_flag_fires_from_a_signal_set_in_a_child_scope() {
-        let (root, dirty) = Scope::new();
+        let (root, dirty) = ComponentScope::new();
         let woken = Rc::new(std::cell::Cell::new(false));
         let woken_in_waker = Rc::clone(&woken);
         dirty.on_mark(move || woken_in_waker.set(true));
@@ -339,7 +341,7 @@ mod tests {
 
     #[test]
     fn a_grandchild_scope_also_shares_the_root_dirty_flag() {
-        let (root, dirty) = Scope::new();
+        let (root, dirty) = ComponentScope::new();
         root.render(|| {
             use_child_scope(|| {
                 use_child_scope(|| use_signal(|| 0).set(1));
@@ -349,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "use_child_scope called outside of Scope::render")]
+    #[should_panic(expected = "use_child_scope called outside of ComponentScope::render")]
     fn use_child_scope_outside_a_render_panics() {
         use_child_scope(|| ());
     }
@@ -357,7 +359,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "hook order changed between renders")]
     fn a_non_child_scope_hook_at_the_same_position_panics() {
-        let (root, _dirty) = Scope::new();
+        let (root, _dirty) = ComponentScope::new();
         root.render(|| {
             use_child_scope(|| ());
         });
@@ -368,7 +370,7 @@ mod tests {
 
     #[test]
     fn a_keyed_child_persists_its_state_across_renders_with_the_same_key() {
-        let (root, _dirty) = Scope::new();
+        let (root, _dirty) = ComponentScope::new();
         root.render(|| {
             use_child_scope_keyed("a", || use_signal(|| 0).set(5));
         });
@@ -381,7 +383,7 @@ mod tests {
 
     #[test]
     fn reordering_keyed_children_keeps_each_ones_own_state() {
-        let (root, _dirty) = Scope::new();
+        let (root, _dirty) = ComponentScope::new();
 
         // First render: item "a" then item "b", each setting its own signal.
         root.render(|| {
@@ -410,7 +412,7 @@ mod tests {
 
     #[test]
     fn a_key_no_longer_rendered_disposes_its_scope() {
-        let (root, _dirty) = Scope::new();
+        let (root, _dirty) = ComponentScope::new();
         let disposed = Rc::new(std::cell::Cell::new(false));
 
         root.render(|| {
@@ -435,7 +437,7 @@ mod tests {
 
     #[test]
     fn two_keyed_children_with_different_keys_are_independent() {
-        let (root, _dirty) = Scope::new();
+        let (root, _dirty) = ComponentScope::new();
         let (a, b) = root.render(|| {
             let a = use_child_scope_keyed("a", || use_signal(|| "a").get());
             let b = use_child_scope_keyed("b", || use_signal(|| "b").get());
@@ -446,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "use_child_scope_keyed called outside of Scope::render")]
+    #[should_panic(expected = "use_child_scope_keyed called outside of ComponentScope::render")]
     fn use_child_scope_keyed_outside_a_render_panics() {
         use_child_scope_keyed("a", || ());
     }
@@ -454,7 +456,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "duplicate key")]
     fn a_duplicate_key_among_siblings_in_the_same_render_panics() {
-        let (root, _dirty) = Scope::new();
+        let (root, _dirty) = ComponentScope::new();
         root.render(|| {
             use_child_scope_keyed("a", || ());
             use_child_scope_keyed("a", || ());
@@ -463,7 +465,7 @@ mod tests {
 
     #[test]
     fn the_same_key_reused_across_separate_renders_is_not_a_duplicate() {
-        let (root, _dirty) = Scope::new();
+        let (root, _dirty) = ComponentScope::new();
         root.render(|| use_child_scope_keyed("a", || ()));
         // A second, later render reusing "a" is exactly the point of a
         // keyed child persisting — not a same-render duplicate.

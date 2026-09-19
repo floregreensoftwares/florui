@@ -53,7 +53,7 @@ impl<T: Clone + 'static> Signal<T> {
 
 impl<T> Signal<T> {
     /// Writes a new value immediately, then marks the owning
-    /// [`Scope`](crate::Scope) dirty — deferred to wake its host only
+    /// [`ComponentScope`](crate::ComponentScope) dirty — deferred to wake its host only
     /// once, alongside every other write in the same [`crate::batch`], if
     /// one is in progress; otherwise immediately, same as always. Also
     /// records an [`crate::trace::UpdateTrace`] attributed to whichever
@@ -70,7 +70,7 @@ impl<T> Signal<T> {
 ///
 /// # Panics
 ///
-/// Panics outside a [`Scope::render`](crate::Scope::render) pass, or if
+/// Panics outside a [`ComponentScope::render`](crate::ComponentScope::render) pass, or if
 /// hooks ran in a different order or count than last render.
 pub fn use_signal<T: 'static>(init: impl FnOnce() -> T) -> Signal<T> {
     let (scope, index) = active_slot("use_signal");
@@ -98,18 +98,18 @@ pub fn use_signal<T: 'static>(init: impl FnOnce() -> T) -> Signal<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Scope;
+    use crate::ComponentScope;
 
     #[test]
     fn a_signal_reads_back_the_value_it_was_initialized_with() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         let value = scope.render(|| use_signal(|| 42).get());
         assert_eq!(value, 42);
     }
 
     #[test]
     fn a_signal_persists_its_value_across_renders_of_the_same_scope() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         scope.render(|| use_signal(|| 0).set(7));
         let value = scope.render(|| use_signal(|| 0).get());
         assert_eq!(
@@ -120,7 +120,7 @@ mod tests {
 
     #[test]
     fn two_use_signal_calls_in_one_render_get_independent_slots() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         let (first, second) = scope.render(|| (use_signal(|| "a").get(), use_signal(|| "b").get()));
         assert_eq!(first, "a");
         assert_eq!(second, "b");
@@ -128,7 +128,7 @@ mod tests {
 
     #[test]
     fn setting_a_signal_marks_its_scope_dirty() {
-        let (scope, dirty) = Scope::new();
+        let (scope, dirty) = ComponentScope::new();
         assert!(!dirty.get());
         scope.render(|| use_signal(|| 0).set(1));
         assert!(dirty.get());
@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn cloning_a_signal_still_reads_and_writes_the_same_cell() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         let clone = scope.render(|| {
             let signal = use_signal(|| 0);
             let clone = signal.clone();
@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn binding_reads_the_signals_current_value_and_writes_through_on_request() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         let signal = scope.render(|| use_signal(|| "initial"));
 
         let binding = signal.binding();
@@ -163,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "use_signal called outside of Scope::render")]
+    #[should_panic(expected = "use_signal called outside of ComponentScope::render")]
     fn use_signal_outside_a_render_panics() {
         use_signal(|| 0);
     }
@@ -171,7 +171,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "hook order changed between renders")]
     fn a_different_type_at_the_same_call_position_panics() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         scope.render(|| {
             use_signal(|| 0_i32);
         });

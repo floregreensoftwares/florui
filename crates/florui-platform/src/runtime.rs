@@ -13,7 +13,7 @@ use std::rc::Rc;
 use florui::Element;
 use florui_layout::BoxLayout;
 use florui_reactive::executor::{Executor, LocalExecutor};
-use florui_reactive::{DirtyFlag, Scope, provide_context};
+use florui_reactive::{ComponentScope, DirtyFlag, provide_context};
 use florui_style::{
     AnimationTimeline, Arena, ComputedStyle, InteractionState, NodeId, Rule, StyleError,
 };
@@ -22,7 +22,7 @@ use taffy::prelude::*;
 use crate::size_observer::SizeObserverRegistry;
 
 pub struct UiRuntime {
-    scope: Scope,
+    scope: ComponentScope,
     dirty: DirtyFlag,
     rules: Vec<Rule>,
     root: Box<dyn Fn() -> Element>,
@@ -107,7 +107,7 @@ impl UiRuntime {
         viewport: Size<AvailableSpace>,
         extra_context_providers: Vec<Box<dyn Fn()>>,
     ) -> Self {
-        let (scope, dirty) = Scope::new();
+        let (scope, dirty) = ComponentScope::new();
         let mut runtime = Self {
             scope,
             dirty,

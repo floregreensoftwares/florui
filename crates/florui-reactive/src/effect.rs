@@ -2,7 +2,7 @@
 
 use std::any::Any;
 
-use crate::scope::{PendingEffect, ScopeInner, active_slot};
+use crate::scope::{ComponentScopeInner, PendingEffect, active_slot};
 
 pub type Cleanup = Box<dyn FnOnce()>;
 
@@ -14,11 +14,11 @@ struct EffectSlot {
 /// Runs `effect` after this render commits, but only the first time this
 /// call site is reached or when `deps` differs from the previous render's.
 /// `effect`'s return value, if any, is run as cleanup before the next time
-/// it re-runs, and when the owning [`Scope`](crate::Scope) is dropped.
+/// it re-runs, and when the owning [`ComponentScope`](crate::ComponentScope) is dropped.
 ///
 /// # Panics
 ///
-/// Panics outside a [`Scope::render`](crate::Scope::render) pass, or if
+/// Panics outside a [`ComponentScope::render`](crate::ComponentScope::render) pass, or if
 /// hooks ran in a different order or count than last render.
 pub fn use_effect<D>(deps: D, effect: impl FnOnce() -> Option<Cleanup> + 'static)
 where
@@ -59,8 +59,8 @@ where
 
 /// Runs every effect queued during the render just finished: previous
 /// cleanup first (if any), then the new run. Called by
-/// [`Scope::render`](crate::Scope::render) right after a render commits.
-pub(crate) fn run_pending(scope: &ScopeInner) {
+/// [`ComponentScope::render`](crate::ComponentScope::render) right after a render commits.
+pub(crate) fn run_pending(scope: &ComponentScopeInner) {
     let pending: Vec<PendingEffect> = std::mem::take(&mut *scope.pending_effects.borrow_mut());
     for pending in pending {
         let old_cleanup = scope.slots.borrow_mut()[pending.index]
@@ -82,7 +82,7 @@ pub(crate) fn run_pending(scope: &ScopeInner) {
 
 /// Runs every remaining effect's cleanup, in slot order — called when a
 /// scope is dropped: removing an identity disposes its hooks.
-pub(crate) fn dispose(scope: &ScopeInner) {
+pub(crate) fn dispose(scope: &ComponentScopeInner) {
     for slot in scope.slots.borrow_mut().iter_mut() {
         if let Some(effect) = slot.downcast_mut::<EffectSlot>()
             && let Some(cleanup) = effect.cleanup.take()
@@ -98,11 +98,11 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
-    use crate::Scope;
+    use crate::ComponentScope;
 
     #[test]
     fn runs_on_first_render_and_skips_unchanged_dependencies() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         let runs = Rc::new(Cell::new(0));
 
         for _ in 0..2 {
@@ -120,7 +120,7 @@ mod tests {
 
     #[test]
     fn reruns_when_dependencies_change() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         let runs = Rc::new(Cell::new(0));
 
         for dep in [1, 1, 2] {
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn cleanup_runs_before_the_effect_reruns_on_changed_dependencies() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         let events = Rc::new(RefCell::new(Vec::<&'static str>::new()));
 
         for dep in [1, 2] {
@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn cleanup_runs_when_the_scope_is_dropped() {
         let events = Rc::new(RefCell::new(Vec::<&'static str>::new()));
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
 
         let events_run = events.clone();
         let events_cleanup = events.clone();
@@ -175,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "use_effect called outside of Scope::render")]
+    #[should_panic(expected = "use_effect called outside of ComponentScope::render")]
     fn use_effect_outside_a_render_panics() {
         use_effect(1, || None);
     }
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "hook order changed between renders")]
     fn a_non_effect_hook_at_the_same_position_panics() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         scope.render(|| {
             use_effect(1, || None);
         });

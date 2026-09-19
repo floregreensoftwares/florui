@@ -41,7 +41,7 @@ fn Boundary(fail: bool, log: Rc<RefCell<Vec<String>>>) -> Element {
 #[test]
 fn a_reported_error_switches_the_tree_to_the_fallback_on_the_next_render() {
     let log = Rc::new(RefCell::new(Vec::new()));
-    let (scope, _dirty) = Scope::new();
+    let (scope, _dirty) = ComponentScope::new();
 
     scope.render(|| view! { <Boundary fail={false} log={Rc::clone(&log)} /> });
     assert_eq!(*log.borrow(), vec!["content"]);

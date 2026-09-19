@@ -32,7 +32,7 @@ fn Widget(log: Log) -> Element {
 #[test]
 fn attachments_set_up_in_order_and_clean_up_in_reverse_through_the_macro_surface() {
     let log: Log = Rc::new(RefCell::new(Vec::new()));
-    let (scope, _dirty) = Scope::new();
+    let (scope, _dirty) = ComponentScope::new();
 
     scope.render({
         let log = Rc::clone(&log);

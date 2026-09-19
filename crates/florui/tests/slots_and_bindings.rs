@@ -28,7 +28,7 @@ fn Dialog(header: Element, body: Element, footer: Option<Element>) -> Element {
 
 #[test]
 fn named_slots_place_content_where_declared_with_no_extra_wrapper() {
-    let (scope, _dirty) = Scope::new();
+    let (scope, _dirty) = ComponentScope::new();
     let tree = scope.render(|| {
         view! {
             <Dialog
@@ -55,7 +55,7 @@ fn named_slots_place_content_where_declared_with_no_extra_wrapper() {
 
 #[test]
 fn an_explicitly_provided_optional_slot_overrides_the_components_default() {
-    let (scope, _dirty) = Scope::new();
+    let (scope, _dirty) = ComponentScope::new();
     let tree = scope.render(|| {
         view! {
             <Dialog
@@ -112,7 +112,7 @@ fn logged_item_renderer() -> RenderItem {
 #[test]
 fn a_scoped_slot_creates_distinct_keyed_identities_that_survive_reordering() {
     let log: Log = Rc::new(RefCell::new(Vec::new()));
-    let (scope, _dirty) = Scope::new();
+    let (scope, _dirty) = ComponentScope::new();
 
     scope.render({
         let log = Rc::clone(&log);
@@ -165,7 +165,7 @@ fn a_scoped_slot_creates_distinct_keyed_identities_that_survive_reordering() {
 #[test]
 fn a_scoped_slots_closure_captures_the_callers_own_lexical_values() {
     let log: Log = Rc::new(RefCell::new(Vec::new()));
-    let (scope, _dirty) = Scope::new();
+    let (scope, _dirty) = ComponentScope::new();
     let prefix = "captured-".to_string();
 
     let render: RenderItem = Box::new(move |item: &str, log: Log| {
@@ -192,10 +192,10 @@ fn a_binding_reads_the_owners_value_and_writes_through_a_requested_update() {
     // A separate scope purely to own `name`'s storage — the main `scope`
     // below is reserved for the component tree itself, so the two don't
     // collide over the same positional hook slots.
-    let (owner, _owner_dirty) = Scope::new();
+    let (owner, _owner_dirty) = ComponentScope::new();
     let name = owner.render(|| use_signal(|| "Alice".to_string()));
 
-    let (scope, _dirty) = Scope::new();
+    let (scope, _dirty) = ComponentScope::new();
     let tree = scope.render({
         let name = name.clone();
         move || view! { <TextField value={name.binding()} /> }
@@ -218,10 +218,10 @@ fn ValidatedField(value: Binding<i32>) -> Element {
 #[test]
 fn a_validating_binding_rejects_an_update_and_the_control_reconciles_to_the_accepted_value() {
     // As above: a separate scope purely to own `accepted`'s storage.
-    let (owner, _owner_dirty) = Scope::new();
+    let (owner, _owner_dirty) = ComponentScope::new();
     let accepted = owner.render(|| use_signal(|| 10_i32));
 
-    let (scope, _dirty) = Scope::new();
+    let (scope, _dirty) = ComponentScope::new();
     let binding = |accepted: Signal<i32>| {
         Binding::new(accepted.get(), move |requested: i32| {
             // Only accept non-negative values.

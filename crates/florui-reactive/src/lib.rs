@@ -1,15 +1,15 @@
 //! Persistent local component state: [`use_signal`], [`use_memo`],
 //! [`use_context`], [`use_ref`], [`use_effect`], [`use_child_scope`]/
-//! [`use_child_scope_keyed`], and the [`Scope`] that gives them somewhere
+//! [`use_child_scope_keyed`], and the [`ComponentScope`] that gives them somewhere
 //! stable to live across repeated renders of the same tree. Also
 //! [`KeyedExtents`]/[`ScrollAnchor`]: keyed-measurement and scroll-anchor
 //! *contracts* for a future virtualized collection, not a virtualized
 //! collection itself.
 //!
-//! # Scope
+//! # ComponentScope
 //!
 //! Not built yet: automatic dependency tracking for `use_memo`/`use_effect`
-//! (deps are compared by equality, not inferred). One `Scope` has one
+//! (deps are compared by equality, not inferred). One `ComponentScope` has one
 //! flat, call-ordered slot list for its *positional* hooks, so every
 //! order-sensitive hook call in the tree it renders must run in the same
 //! order and count every time — `use_context` is the exception (a
@@ -59,6 +59,6 @@ pub use loading::{TrackedRead, loading_boundary};
 pub use memo::use_memo;
 pub use refs::{Ref, use_ref};
 pub use resource::{Resource, ResourceHandle, use_resource};
-pub use scope::{Scope, render_once, use_child_scope, use_child_scope_keyed};
+pub use scope::{ComponentScope, render_once, use_child_scope, use_child_scope_keyed};
 pub use signal::{Signal, use_signal};
 pub use virtualization::{Extent, KeyedExtents, ScrollAnchor};
