@@ -502,7 +502,19 @@ struct WindowState {
     /// close time (see [`DesktopHost::close_if_confirmed`]) to flush a
     /// final save.
     persistence: Option<WindowPersistence>,
+    /// `Some` once this window's bounds changed since the last successful
+    /// save; cleared on save. Reset (not just refreshed) on every further
+    /// change, so a continuous resize drag keeps pushing the save deadline
+    /// out — a true debounce, not a fixed-interval throttle — instead of
+    /// saving mid-drag on every qualifying tick.
+    pending_geometry_save: Option<std::time::Instant>,
 }
+
+/// Long enough that a drag-resize (many `Resized`/`Moved` events per
+/// second) collapses into one save after the user stops; short enough
+/// that a crash/kill within a second or two of the last move doesn't lose
+/// much. Not spec-mandated to an exact number, only "bounded/debounced."
+const WINDOW_STATE_SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl WindowState {
     fn viewport_scale(&self) -> ViewportScale {
@@ -642,6 +654,38 @@ impl WindowState {
         let (arena, _, layouts) = self.runtime.geometry();
         let physical_layouts = scale_layouts(layouts, scale_factor as f32);
         sync_input_regions(&self.controls, &self.window, arena, &physical_layouts);
+    }
+
+    /// Marks this window's bounds as changed since the last save, resetting
+    /// (not just refreshing) the debounce deadline — see
+    /// [`WINDOW_STATE_SAVE_DEBOUNCE`]'s own doc. A no-op window without
+    /// persistence enabled.
+    fn mark_geometry_dirty(&mut self) {
+        if self.persistence.is_some() {
+            self.pending_geometry_save = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Writes this window's current geometry if a change is pending and its
+    /// debounce deadline has passed, clearing the pending flag either way
+    /// (an unreachable-monitor/disabled edge case never reaches this with
+    /// `persistence: None`, since [`Self::mark_geometry_dirty`] never sets
+    /// it then). Called from [`ApplicationHandler::about_to_wait`] once per
+    /// loop iteration, and unconditionally (regardless of any pending
+    /// deadline) from [`DesktopHost::close_if_confirmed`] before this
+    /// window's state is dropped.
+    fn flush_geometry_save_if_due(&mut self, now: std::time::Instant) {
+        let Some(persistence) = &self.persistence else {
+            return;
+        };
+        let Some(changed_at) = self.pending_geometry_save else {
+            return;
+        };
+        if now < changed_at + WINDOW_STATE_SAVE_DEBOUNCE {
+            return;
+        }
+        window_state::capture_and_save(&self.window, persistence);
+        self.pending_geometry_save = None;
     }
 
     /// Updates `:hover` against the runtime's cached geometry — no
@@ -1002,6 +1046,7 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 _css_watcher: css_watcher,
                 theme_preference,
                 persistence: spec.options.persistence.clone(),
+                pending_geometry_save: None,
             };
             state.redraw();
             // A `@keyframes` animation already running on mount (no `:hover`
@@ -1031,6 +1076,12 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 }
                 None => {}
             }
+            state.flush_geometry_save_if_due(now);
+            if let Some(changed_at) = state.pending_geometry_save {
+                let save_deadline = changed_at + WINDOW_STATE_SAVE_DEBOUNCE;
+                next_wake =
+                    Some(next_wake.map_or(save_deadline, |current| current.min(save_deadline)));
+            }
         }
         match next_wake {
             Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
@@ -1055,7 +1106,10 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
             return;
         };
         match event {
-            WindowEvent::Resized(_) => state.update_and_request_redraw(),
+            WindowEvent::Resized(_) => {
+                state.update_and_request_redraw();
+                state.mark_geometry_dirty();
+            }
             // Fires on its own — not bundled into `Resized` — when the
             // window moves to a display with a different scale factor, or
             // the OS scale setting changes live; `viewport_scale` re-reads
@@ -1068,7 +1122,10 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
             // own screen-space regions sit -- resyncing them here, from
             // the already-computed layout, avoids paying for a full
             // re-render on every step of a drag.
-            WindowEvent::Moved(_) => state.resync_input_regions(),
+            WindowEvent::Moved(_) => {
+                state.resync_input_regions();
+                state.mark_geometry_dirty();
+            }
             WindowEvent::RedrawRequested => state.redraw_for_frame(),
             WindowEvent::CursorMoved { position, .. } => {
                 state.handle_cursor_moved(position.x, position.y);
