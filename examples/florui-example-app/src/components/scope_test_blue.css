@@ -1,0 +1,14 @@
+.box {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 160px;
+    height: 120px;
+    background-color: #4f6fd9;
+}
+
+.label {
+    font-size: 16px;
+    font-weight: bold;
+    color: #ffffff;
+}
