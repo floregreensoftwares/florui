@@ -12,6 +12,7 @@ use style::media_queries::MediaList;
 use style::servo_arc::Arc as StyloArc;
 use style::stylesheets::{AllowImportRules, Origin, Stylesheet};
 
+use crate::container_query_adapter::{self, ContainerQueryBlock};
 use crate::error::StyleError;
 use crate::height_media_adapter::substitute_height_features;
 use crate::stylo::shared_lock;
@@ -28,61 +29,110 @@ static GRID_ENABLED: LazyLock<()> =
 static BACKDROP_FILTER_ENABLED: LazyLock<()> =
     LazyLock::new(|| stylo_config::set_bool("layout.unimplemented", true));
 
-/// How many distinct substituted-text results a [`RuleKind::HeightSensitive`]
-/// keeps parsed at once. A resize only produces a new entry when it
-/// crosses a `min-height`/`max-height` breakpoint, so real usage rarely
-/// needs more than one or two; this just bounds the worst case.
-const HEIGHT_CACHE_CAPACITY: usize = 8;
+/// `container-type`/`container-name` (the plain properties, distinct from
+/// the `@container` at-rule itself — see
+/// [`crate::container_query_adapter`]'s own module doc for that gap) are
+/// real Stylo properties in both engines, gated only by this runtime pref.
+static CONTAINER_QUERIES_ENABLED: LazyLock<()> =
+    LazyLock::new(|| stylo_config::set_bool("layout.container-queries.enabled", true));
+
+/// How many distinct substituted-text results a [`RuleKind::Dynamic`] keeps
+/// parsed at once. A resize only produces a new entry when it crosses a
+/// `min-height`/`max-height` breakpoint or a container-query threshold, so
+/// real usage rarely needs more than a handful; this just bounds the worst
+/// case.
+const DYNAMIC_CACHE_CAPACITY: usize = 8;
 
 /// One parsed stylesheet. Opaque: `florui-style` is the only crate that
 /// reads what's inside — everything else only holds, clones, and passes
 /// this to [`crate::cascade::compute`]. Cloning is cheap and shares the
-/// same underlying state (an [`Arc`]), including the height cache below.
+/// same underlying state (an [`Arc`]), including the cache below.
 #[derive(Clone)]
 pub struct Rule(Arc<RuleKind>);
 
 enum RuleKind {
     /// The common case: nothing in the authored CSS could possibly be a
-    /// `height` media feature, so this is the same parsed stylesheet
-    /// every version of this crate has always produced, reused as-is
-    /// regardless of viewport.
+    /// `height` media feature or a `@container` block, so this is the same
+    /// parsed stylesheet every version of this crate has always produced,
+    /// reused as-is regardless of viewport or container sizes.
     Static(StyloArc<Stylesheet>),
-    /// The CSS mentions `height` inside an `@media` prelude — see
-    /// [`crate::height_media_adapter`]. Real parsing is deferred to the
-    /// first [`Rule::stylesheet`] call for a given viewport height, and
-    /// cached by the resulting substituted text: two heights that
-    /// resolve every height condition the same way produce identical
-    /// text, so they safely share one parse.
-    HeightSensitive {
+    /// The CSS mentions `height` inside an `@media` prelude (see
+    /// [`crate::height_media_adapter`]) and/or contains one or more
+    /// `@container` blocks (see [`crate::container_query_adapter`]). Real
+    /// parsing is deferred to the first [`Rule::stylesheet`] call for a
+    /// given viewport height/container-query signature, and cached by the
+    /// resulting substituted text: two calls that resolve every dynamic
+    /// condition the same way produce identical text, so they safely share
+    /// one parse.
+    Dynamic {
         css: String,
         origin: Origin,
+        container_blocks: Vec<ContainerQueryBlock>,
         cache: Mutex<Vec<(String, StyloArc<Stylesheet>)>>,
     },
 }
 
 impl Rule {
-    pub(crate) fn stylesheet(&self, viewport_height: f32) -> StyloArc<Stylesheet> {
+    /// `container_query_signature[i]` is whether [`Self::container_query_blocks`]`()[i]`'s
+    /// condition currently matches, for the single cascade this call is
+    /// for — see [`crate::container_query_adapter`]'s own module doc. Must
+    /// be exactly [`Self::container_query_blocks`]`().len()` long.
+    pub(crate) fn stylesheet(
+        &self,
+        viewport_height: f32,
+        container_query_signature: &[bool],
+    ) -> StyloArc<Stylesheet> {
         match &*self.0 {
             RuleKind::Static(sheet) => sheet.clone(),
-            RuleKind::HeightSensitive { css, origin, cache } => {
-                let substituted = substitute_height_features(css, viewport_height);
+            RuleKind::Dynamic {
+                css,
+                origin,
+                container_blocks,
+                cache,
+            } => {
+                let after_height = substitute_height_features(css, viewport_height);
+                let after_containers = container_query_adapter::literalize(
+                    &after_height,
+                    container_blocks,
+                    container_query_signature,
+                );
                 let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(pos) = cache
                     .iter()
-                    .position(|(key, _)| key == substituted.as_ref())
+                    .position(|(key, _)| key == after_containers.as_ref())
                 {
                     let (key, sheet) = cache.remove(pos);
                     cache.push((key, sheet.clone()));
                     return sheet;
                 }
-                let sheet = parse_str(&substituted, *origin);
-                if cache.len() >= HEIGHT_CACHE_CAPACITY {
+                let sheet = parse_str(&after_containers, *origin);
+                if cache.len() >= DYNAMIC_CACHE_CAPACITY {
                     cache.remove(0);
                 }
-                cache.push((substituted.into_owned(), sheet.clone()));
+                cache.push((after_containers.into_owned(), sheet.clone()));
                 sheet
             }
         }
+    }
+
+    /// Every `@container` block this rule's own CSS contains, in source
+    /// order — the order [`Self::stylesheet`]'s own `container_query_signature`
+    /// must align to. Empty for a [`RuleKind::Static`] rule.
+    pub(crate) fn container_query_blocks(&self) -> &[ContainerQueryBlock] {
+        match &*self.0 {
+            RuleKind::Static(_) => &[],
+            RuleKind::Dynamic {
+                container_blocks, ..
+            } => container_blocks,
+        }
+    }
+
+    /// Whether this rule's own CSS contains at least one `@container`
+    /// block — `florui_layout::compute_with_style`'s own cheap early-out:
+    /// a stylesheet with none of these costs nothing beyond what it
+    /// already did before this feature existed.
+    pub fn has_container_queries(&self) -> bool {
+        !self.container_query_blocks().is_empty()
     }
 }
 
@@ -98,10 +148,13 @@ pub fn parse_stylesheet(css: &str) -> Result<Vec<Rule>, StyleError> {
 pub(crate) fn parse_stylesheet_with_origin(css: &str, origin: Origin) -> Result<Rule, StyleError> {
     LazyLock::force(&GRID_ENABLED);
     LazyLock::force(&BACKDROP_FILTER_ENABLED);
-    if css.to_ascii_lowercase().contains("height") {
-        return Ok(Rule(Arc::new(RuleKind::HeightSensitive {
+    LazyLock::force(&CONTAINER_QUERIES_ENABLED);
+    let container_blocks = container_query_adapter::extract_container_queries(css);
+    if !container_blocks.is_empty() || css.to_ascii_lowercase().contains("height") {
+        return Ok(Rule(Arc::new(RuleKind::Dynamic {
             css: css.to_string(),
             origin,
+            container_blocks,
             cache: Mutex::new(Vec::new()),
         })));
     }

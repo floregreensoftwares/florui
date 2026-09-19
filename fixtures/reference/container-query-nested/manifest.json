@@ -1,0 +1,28 @@
+{
+  "id": "container-query-nested",
+  "description": "A 40px-wide `.outer` size container wraps a 60px-wide `.inner` size container, which wraps `.card` (gray by default, teal under @container (min-width: 50px)). Only the nearer `.inner` container (60px) satisfies that condition -- the farther `.outer` one (40px) alone would not -- so `.card` turning teal proves nested containers resolve against the real, nearest matching container, not an arbitrary ancestor.",
+  "html": "index.html",
+  "css": "style.css",
+  "element_id": "el",
+  "viewport": { "width_css_px": 120, "height_css_px": 120, "device_pixel_ratio": 1.0 },
+  "canvas_color": "#ffffff",
+  "florui": {
+    "tag": "div",
+    "class": "outer",
+    "css": ".outer { container-type: inline-size; width: 40px; height: 10px; } .inner { container-type: inline-size; width: 60px; height: 60px; background-color: #ffffff; } .card { width: 40px; height: 40px; background-color: #808080; } @container (min-width: 50px) { .card { background-color: #2f7d6c; } }",
+    "children": [
+      {
+        "tag": "div",
+        "class": "inner",
+        "children": [
+          {
+            "tag": "div",
+            "class": "card",
+            "children": []
+          }
+        ]
+      }
+    ]
+  },
+  "classification": { "kind": "exact" }
+}

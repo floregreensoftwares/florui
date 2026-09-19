@@ -1,6 +1,6 @@
 //! Renders a [`FloruiSpec`] through Florui's own real style/layout/paint
-//! pipeline — `Arena::build` → `compute` → `compute_layout` →
-//! `paint_to_buffer` — replacing the `florui_devtools::scene` stand-in
+//! pipeline — `Arena::build` → `compute_with_style` → `paint_to_buffer` —
+//! replacing the `florui_devtools::scene` stand-in
 //! this crate used before real style/layout/paint existed (see
 //! [`crate::reference_fixture`]'s own module doc for that history).
 //!
@@ -28,11 +28,9 @@ use std::collections::HashMap;
 use std::fmt;
 
 use florui::Element;
-use florui_layout::{BoxLayout, LayoutError, absolute_position, compute_layout};
+use florui_layout::{BoxLayout, LayoutError, absolute_position};
 use florui_paint::paint_to_buffer;
-use florui_style::{
-    Arena, ComputedStyle, InteractionState, NodeId, Rgba, compute, parse_stylesheet,
-};
+use florui_style::{Arena, ComputedStyle, InteractionState, NodeId, Rgba, parse_stylesheet};
 use image::RgbaImage;
 use taffy::prelude::{AvailableSpace, Size};
 
@@ -149,7 +147,13 @@ pub fn render_fixture(
 
     let arena = Arena::build(&tree);
     let rules = parse_stylesheet(css).expect("fixture CSS must be valid");
-    let styles = compute(
+    let available = Size {
+        width: AvailableSpace::Definite(width_css_px as f32),
+        height: AvailableSpace::Definite(height_css_px as f32),
+    };
+    let mut font = florui_text::Font::load_embedded();
+    let (styles, layouts) = florui_layout::compute_with_style(
+        &mut font,
         &arena,
         &rules,
         &InteractionState::new(),
@@ -158,15 +162,9 @@ pub fn render_fixture(
             height: height_css_px as f32,
         },
         &mut florui_style::AnimationTimeline::default(),
-    );
-
-    let available = Size {
-        width: AvailableSpace::Definite(width_css_px as f32),
-        height: AvailableSpace::Definite(height_css_px as f32),
-    };
-    let mut font = florui_text::Font::load_embedded();
-    let layouts =
-        compute_layout(&mut font, &arena, &styles, available).map_err(EngineError::Layout)?;
+        available,
+    )
+    .map_err(EngineError::Layout)?;
 
     let wrapper = arena.roots()[0];
     let node = arena.children(wrapper)[0];
