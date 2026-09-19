@@ -22,7 +22,7 @@ pub fn Counter() -> Element {
 
 #[cfg(test)]
 mod tests {
-    use florui_reactive::Scope;
+    use florui_reactive::ComponentScope;
     use florui_style::Arena;
 
     use super::*;
@@ -34,7 +34,7 @@ mod tests {
         arena.text_content(node).to_string()
     }
 
-    fn render(scope: &Scope) -> Arena {
+    fn render(scope: &ComponentScope) -> Arena {
         let tree = scope.render(|| Counter(CounterProps {}));
         Arena::build(&tree)
     }
@@ -46,7 +46,7 @@ mod tests {
 
     #[test]
     fn starts_at_zero_and_survives_a_render_with_no_click() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         assert_eq!(text_of_class(&render(&scope), "count"), "0");
         assert_eq!(
             text_of_class(&render(&scope), "count"),
@@ -57,7 +57,7 @@ mod tests {
 
     #[test]
     fn a_click_increments_and_the_next_render_keeps_it() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         let arena = render(&scope);
         assert_eq!(text_of_class(&arena, "count"), "0");
 
@@ -79,7 +79,7 @@ mod tests {
 
     #[test]
     fn a_click_marks_the_scope_dirty() {
-        let (scope, dirty) = Scope::new();
+        let (scope, dirty) = ComponentScope::new();
         let arena = render(&scope);
         assert!(
             !dirty.get(),
@@ -91,7 +91,7 @@ mod tests {
 
     #[test]
     fn the_doubled_memo_tracks_the_count() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         let arena = render(&scope);
         assert_eq!(text_of_class(&arena, "doubled"), "x2 = 0");
 

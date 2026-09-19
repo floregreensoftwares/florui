@@ -9,7 +9,7 @@ struct DirtyFlagInner {
     waker: RefCell<Option<Box<dyn Fn()>>>,
 }
 
-/// Shared handle onto one [`Scope`](crate::Scope)'s dirty state. Cloning
+/// Shared handle onto one [`ComponentScope`](crate::ComponentScope)'s dirty state. Cloning
 /// is cheap and every clone reads/writes the same underlying flag.
 pub struct DirtyFlag {
     inner: Rc<DirtyFlagInner>,

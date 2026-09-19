@@ -62,7 +62,7 @@ fn an_async_failure_reaches_the_boundary_disposes_the_subtree_and_resets_to_a_fr
     let executor = Rc::new(LocalExecutor::new());
     let fetches: PendingFetches = Rc::new(RefCell::new(Vec::new()));
     let log = Rc::new(RefCell::new(Vec::new()));
-    let (scope, _dirty) = Scope::new();
+    let (scope, _dirty) = ComponentScope::new();
 
     let render = |fetches: PendingFetches, log: Rc<RefCell<Vec<String>>>, retry: bool| {
         let executor = Rc::clone(&executor);

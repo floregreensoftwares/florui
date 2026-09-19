@@ -28,7 +28,7 @@ fn LoggedItem(id: String, log: Rc<RefCell<Vec<String>>>) -> Element {
 #[test]
 fn key_preserves_state_across_reordering_and_disposes_removed_items() {
     let log = Rc::new(RefCell::new(Vec::new()));
-    let (scope, _dirty) = Scope::new();
+    let (scope, _dirty) = ComponentScope::new();
 
     scope.render(|| {
         view! {
@@ -74,7 +74,7 @@ fn key_preserves_state_across_reordering_and_disposes_removed_items() {
 #[test]
 fn a_key_can_be_a_non_string_displayable_value() {
     let log = Rc::new(RefCell::new(Vec::new()));
-    let (scope, _dirty) = Scope::new();
+    let (scope, _dirty) = ComponentScope::new();
 
     scope.render(|| {
         view! {

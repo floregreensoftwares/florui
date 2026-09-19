@@ -52,7 +52,7 @@ fn reveals_content_through_the_macro_surface_once_the_resource_settles() {
     let (future, resolver) = manual_future::<Result<i32, String>>();
     let future_slot: PendingFetch = Rc::new(RefCell::new(Some(future)));
     let log: Log = Rc::new(RefCell::new(Vec::new()));
-    let (scope, _dirty) = Scope::new();
+    let (scope, _dirty) = ComponentScope::new();
 
     let render = |executor: Rc<LocalExecutor>, future_slot: PendingFetch, log: Log| {
         move || {

@@ -34,7 +34,7 @@ fn Counter() -> Element {
 #[test]
 fn a_signal_set_inside_a_component_is_attributed_to_its_name() {
     let (captured, reset) = capture_traces();
-    let (scope, _dirty) = Scope::new();
+    let (scope, _dirty) = ComponentScope::new();
 
     scope.render(|| view! { <Counter /> });
 
@@ -62,7 +62,7 @@ fn Parent() -> Element {
 #[test]
 fn a_nested_components_write_is_attributed_to_itself_not_its_parent() {
     let (captured, reset) = capture_traces();
-    let (scope, _dirty) = Scope::new();
+    let (scope, _dirty) = ComponentScope::new();
 
     scope.render(|| view! { <Parent /> });
 
@@ -96,7 +96,7 @@ fn an_async_resource_completion_is_attributed_to_the_component_that_started_it()
     let executor = Rc::new(LocalExecutor::new());
     let (future, resolver) = manual_future::<Result<i32, String>>();
     let future_slot: PendingFetch = Rc::new(RefCell::new(Some(future)));
-    let (scope, _dirty) = Scope::new();
+    let (scope, _dirty) = ComponentScope::new();
 
     let executor_for_render = Rc::clone(&executor);
     scope.render(move || {

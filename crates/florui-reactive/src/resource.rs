@@ -117,7 +117,7 @@ impl<T: Clone + 'static, E: Clone + 'static> ResourceHandle<T, E> {
 ///
 /// # Panics
 ///
-/// Panics outside a [`crate::Scope::render`] pass, if hooks ran in a
+/// Panics outside a [`crate::ComponentScope::render`] pass, if hooks ran in a
 /// different order or count than last render, or if no [`Executor`] is
 /// reachable via context.
 pub fn use_resource<K, T, E, F, Fut>(key: K, fetch: F) -> ResourceHandle<T, E>
@@ -223,7 +223,7 @@ mod tests {
     use super::*;
     use crate::executor::LocalExecutor;
     use crate::testing::{Resolver, manual_future};
-    use crate::{Scope, provide_context};
+    use crate::{ComponentScope, provide_context};
 
     fn with_executor<R>(f: impl FnOnce(&Rc<LocalExecutor>) -> R) -> R {
         f(&Rc::new(LocalExecutor::new()))
@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn starts_idle_and_becomes_pending_once_the_fetch_is_running() {
         with_executor(|executor| {
-            let (scope, _dirty) = Scope::new();
+            let (scope, _dirty) = ComponentScope::new();
             let executor = Rc::clone(executor);
 
             let handle = scope.render(move || {
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn a_completed_fetch_becomes_ready_and_keeps_that_data_after_a_refetch_starts() {
         with_executor(|executor| {
-            let (scope, _dirty) = Scope::new();
+            let (scope, _dirty) = ComponentScope::new();
             let (future, resolver) = manual_future::<Result<i32, &'static str>>();
             let executor_for_render = Rc::clone(executor);
 
@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn a_failed_fetch_reports_the_error_and_keeps_prior_data_as_stale() {
         with_executor(|executor| {
-            let (scope, _dirty) = Scope::new();
+            let (scope, _dirty) = ComponentScope::new();
             let (first, first_resolver) = manual_future::<Result<i32, &'static str>>();
             let executor_for_render = Rc::clone(executor);
 
@@ -321,7 +321,7 @@ mod tests {
     #[test]
     fn out_of_order_responses_do_not_let_an_older_run_overwrite_a_newer_one() {
         with_executor(|executor| {
-            let (scope, _dirty) = Scope::new();
+            let (scope, _dirty) = ComponentScope::new();
             let (slow, slow_resolver) = manual_future::<Result<i32, &'static str>>();
             let executor_for_render = Rc::clone(executor);
 
@@ -357,7 +357,7 @@ mod tests {
     #[test]
     fn cancelling_before_completion_prevents_the_result_from_committing() {
         with_executor(|executor| {
-            let (scope, _dirty) = Scope::new();
+            let (scope, _dirty) = ComponentScope::new();
             let (future, resolver) = manual_future::<Result<i32, &'static str>>();
             let executor_for_render = Rc::clone(executor);
 
@@ -382,7 +382,7 @@ mod tests {
     #[test]
     fn cancelling_after_completion_is_a_harmless_no_op() {
         with_executor(|executor| {
-            let (scope, _dirty) = Scope::new();
+            let (scope, _dirty) = ComponentScope::new();
             let (future, resolver) = manual_future::<Result<i32, &'static str>>();
             let executor_for_render = Rc::clone(executor);
 
@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn unmounting_cancels_the_in_flight_fetch_and_a_late_completion_is_dropped() {
         with_executor(|executor| {
-            let (scope, _dirty) = Scope::new();
+            let (scope, _dirty) = ComponentScope::new();
             let (future, resolver) = manual_future::<Result<i32, &'static str>>();
             let executor_for_render = Rc::clone(executor);
 
@@ -429,7 +429,7 @@ mod tests {
     #[test]
     fn retry_reruns_the_fetch_for_the_same_key() {
         with_executor(|executor| {
-            let (scope, _dirty) = Scope::new();
+            let (scope, _dirty) = ComponentScope::new();
             let call_count = Rc::new(std::cell::Cell::new(0));
             let resolvers: PendingResolvers = Rc::new(RefCell::new(Vec::new()));
 

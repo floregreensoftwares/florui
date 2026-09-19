@@ -41,7 +41,7 @@ thread_local! {
 
 /// Attributes any write [`record`] observes while `f` runs — directly, or
 /// later through a [`crate::use_effect`] `f`'s own render queues, since
-/// that effect still runs before `f` returns (see [`crate::Scope::render`])
+/// that effect still runs before `f` returns (see [`crate::ComponentScope::render`])
 /// — to `component`. Nested calls attribute to the innermost one active,
 /// matching how a child component's own writes are its own, not its
 /// parent's.

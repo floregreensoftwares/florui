@@ -37,7 +37,7 @@ fn calling_the_stored_handler_runs_the_original_closure() {
 
 #[test]
 fn a_signal_set_from_an_onclick_handler_persists_across_a_real_render_cycle() {
-    let (scope, _dirty) = Scope::new();
+    let (scope, _dirty) = ComponentScope::new();
 
     #[component]
     fn Counter() -> Element {

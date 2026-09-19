@@ -58,7 +58,7 @@ fn Provider(items: Vec<String>, log: Log) -> Element {
 #[test]
 fn a_scoped_slots_items_see_the_ancestors_context_and_clean_up_when_removed() {
     let log: Log = Rc::new(RefCell::new(Vec::new()));
-    let (scope, _dirty) = Scope::new();
+    let (scope, _dirty) = ComponentScope::new();
 
     scope.render({
         let log = Rc::clone(&log);
@@ -130,7 +130,7 @@ fn render_watched_boundary(
 fn an_attachment_inside_loading_boundary_content_sets_up_once_revealed_and_survives_a_refresh() {
     let executor = Rc::new(LocalExecutor::new());
     let log: Log = Rc::new(RefCell::new(Vec::new()));
-    let (scope, _dirty) = Scope::new();
+    let (scope, _dirty) = ComponentScope::new();
 
     let (first, first_resolver) = manual_future::<Result<i32, String>>();
     scope.render(render_watched_boundary(
@@ -190,7 +190,7 @@ fn an_attachment_inside_loading_boundary_content_sets_up_once_revealed_and_survi
 
 #[test]
 fn two_binding_writes_in_one_batch_wake_the_host_exactly_once() {
-    let (owner, dirty) = Scope::new();
+    let (owner, dirty) = ComponentScope::new();
     let (a, b) = owner.render(|| (use_signal(|| 0), use_signal(|| 0)));
 
     let wakes = Rc::new(RefCell::new(0));

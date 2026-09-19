@@ -17,7 +17,7 @@
 use std::any::Any;
 
 use crate::Cleanup;
-use crate::scope::{PendingAttachment, ScopeInner, active_slot};
+use crate::scope::{ComponentScopeInner, PendingAttachment, active_slot};
 
 struct AttachmentSlot {
     deps: Box<dyn Any>,
@@ -27,12 +27,12 @@ struct AttachmentSlot {
 /// Sets up (or replaces) an attachment on `handle`, keyed to this call
 /// site. Runs `setup(&handle)` after this render commits — never during
 /// the render itself, and never with a hook reachable from inside it,
-/// since by the time it runs no [`crate::Scope::render`] pass is active
+/// since by the time it runs no [`crate::ComponentScope::render`] pass is active
 /// — the first time this call site is reached, or whenever `deps` differs
 /// from the previous render's.
 ///
 /// Its returned cleanup runs before a changed attachment's replacement
-/// setup, and once when this call site's owning [`crate::Scope`] is
+/// setup, and once when this call site's owning [`crate::ComponentScope`] is
 /// dropped. Unlike [`crate::use_effect`], when several attachments share
 /// one scope their setups run in declaration order and their unmount
 /// cleanups run in the *reverse* of that order — matching how nested
@@ -42,7 +42,7 @@ struct AttachmentSlot {
 ///
 /// # Panics
 ///
-/// Panics outside a [`crate::Scope::render`] pass, or if hooks ran in a
+/// Panics outside a [`crate::ComponentScope::render`] pass, or if hooks ran in a
 /// different order or count than last render.
 pub fn use_attachment<H: 'static, D: PartialEq + 'static>(
     handle: H,
@@ -87,9 +87,9 @@ pub fn use_attachment<H: 'static, D: PartialEq + 'static>(
 
 /// Runs every attachment queued during the render just finished, in the
 /// order they were declared: previous cleanup first (if any), then the
-/// new setup. Called by [`crate::Scope::render`] right after a render
+/// new setup. Called by [`crate::ComponentScope::render`] right after a render
 /// commits, after ordinary effects.
-pub(crate) fn run_pending(scope: &ScopeInner) {
+pub(crate) fn run_pending(scope: &ComponentScopeInner) {
     let pending: Vec<PendingAttachment> =
         std::mem::take(&mut *scope.pending_attachments.borrow_mut());
     for pending in pending {
@@ -115,7 +115,7 @@ pub(crate) fn run_pending(scope: &ScopeInner) {
 /// its hooks, and attachments.md requires attachments specifically to
 /// unwind in the opposite order they were set up in, unlike plain
 /// effects.
-pub(crate) fn dispose(scope: &ScopeInner) {
+pub(crate) fn dispose(scope: &ComponentScopeInner) {
     for slot in scope.slots.borrow_mut().iter_mut().rev() {
         if let Some(attachment) = slot.downcast_mut::<AttachmentSlot>()
             && let Some(cleanup) = attachment.cleanup.take()
@@ -131,11 +131,11 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
-    use crate::Scope;
+    use crate::ComponentScope;
 
     #[test]
     fn setup_runs_on_first_render_and_skips_unchanged_dependencies() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         let runs = Rc::new(RefCell::new(0));
 
         for _ in 0..2 {
@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn changed_dependencies_run_cleanup_then_the_new_setup() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         let events = Rc::new(RefCell::new(Vec::<&'static str>::new()));
 
         for dep in [1, 2] {
@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn multiple_attachments_set_up_in_order_and_clean_up_in_reverse_on_unmount() {
         let events = Rc::new(RefCell::new(Vec::<&'static str>::new()));
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
 
         let events_for_render = Rc::clone(&events);
         scope.render(move || {
@@ -203,7 +203,7 @@ mod tests {
 
     #[test]
     fn a_discarded_keyed_child_disposes_its_attachment() {
-        let (root, _dirty) = Scope::new();
+        let (root, _dirty) = ComponentScope::new();
         let disposed = Rc::new(RefCell::new(false));
 
         root.render(|| {
@@ -228,9 +228,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "use_signal called outside of Scope::render")]
+    #[should_panic(expected = "use_signal called outside of ComponentScope::render")]
     fn hooks_cannot_be_called_inside_a_deferred_setup_callback() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         scope.render(|| {
             use_attachment((), (), |_| {
                 crate::use_signal(|| 0);
@@ -240,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "use_attachment called outside of Scope::render")]
+    #[should_panic(expected = "use_attachment called outside of ComponentScope::render")]
     fn use_attachment_outside_a_render_panics() {
         use_attachment((), (), |_| None);
     }
@@ -248,7 +248,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "hook order changed between renders")]
     fn a_non_attachment_hook_at_the_same_position_panics() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         scope.render(|| {
             use_attachment((), (), |_| None);
         });

@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use crate::scope::active_slot;
 
-/// Persistent local storage that never marks its [`Scope`](crate::Scope)
+/// Persistent local storage that never marks its [`ComponentScope`](crate::ComponentScope)
 /// dirty — unlike [`Signal`](crate::Signal), writing to a `Ref` never
 /// schedules a render on its own.
 pub struct Ref<T> {
@@ -49,7 +49,7 @@ impl<T> Ref<T> {
 ///
 /// # Panics
 ///
-/// Panics outside a [`Scope::render`](crate::Scope::render) pass, or if
+/// Panics outside a [`ComponentScope::render`](crate::ComponentScope::render) pass, or if
 /// hooks ran in a different order or count than last render.
 pub fn use_ref<T: 'static>(init: impl FnOnce() -> T) -> Ref<T> {
     let (scope, index) = active_slot("use_ref");
@@ -76,18 +76,18 @@ pub fn use_ref<T: 'static>(init: impl FnOnce() -> T) -> Ref<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Scope;
+    use crate::ComponentScope;
 
     #[test]
     fn a_ref_reads_back_the_value_it_was_initialized_with() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         let value = scope.render(|| use_ref(|| 42).get());
         assert_eq!(value, 42);
     }
 
     #[test]
     fn a_ref_persists_its_value_across_renders_of_the_same_scope() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         scope.render(|| use_ref(|| 0).set(7));
         let value = scope.render(|| use_ref(|| 0).get());
         assert_eq!(
@@ -98,7 +98,7 @@ mod tests {
 
     #[test]
     fn setting_a_ref_does_not_mark_the_scope_dirty() {
-        let (scope, dirty) = Scope::new();
+        let (scope, dirty) = ComponentScope::new();
         scope.render(|| use_ref(|| 0).set(1));
         assert!(
             !dirty.get(),
@@ -108,7 +108,7 @@ mod tests {
 
     #[test]
     fn with_mut_mutates_in_place_and_persists() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         scope.render(|| {
             use_ref(Vec::<i32>::new).with_mut(|v| v.push(1));
         });
@@ -120,7 +120,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "use_ref called outside of Scope::render")]
+    #[should_panic(expected = "use_ref called outside of ComponentScope::render")]
     fn use_ref_outside_a_render_panics() {
         use_ref(|| 0);
     }
@@ -128,7 +128,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "hook order changed between renders")]
     fn a_different_type_at_the_same_call_position_panics() {
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         scope.render(|| {
             use_ref(|| 0_i32);
         });

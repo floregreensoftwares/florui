@@ -51,7 +51,7 @@ impl<T: Clone + 'static, E: Clone + 'static> TrackedRead for ResourceHandle<T, E
 ///
 /// # Panics
 ///
-/// Panics outside a [`crate::Scope::render`] pass, or if hooks ran in a
+/// Panics outside a [`crate::ComponentScope::render`] pass, or if hooks ran in a
 /// different order or count than last render.
 pub fn loading_boundary<T>(
     required: &[&dyn TrackedRead],
@@ -81,7 +81,7 @@ mod tests {
     use super::*;
     use crate::executor::{Executor, LocalExecutor};
     use crate::testing::{ManualFuture, manual_future};
-    use crate::{Cleanup, Scope, provide_context, use_effect, use_resource};
+    use crate::{Cleanup, ComponentScope, provide_context, use_effect, use_resource};
 
     #[derive(Debug, Clone, PartialEq)]
     struct DemoError(&'static str);
@@ -92,7 +92,7 @@ mod tests {
     fn shows_the_fallback_until_every_required_read_settles() {
         let executor = Rc::new(LocalExecutor::new());
         let (a, _resolver_a) = manual_future::<Result<i32, DemoError>>();
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
 
         let value = scope.render(move || {
             provide_context(Rc::clone(&executor) as Rc<dyn Executor>);
@@ -105,7 +105,7 @@ mod tests {
     #[test]
     fn reveals_content_only_once_all_required_reads_are_ready() {
         let executor = Rc::new(LocalExecutor::new());
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         let (a, resolver_a) = manual_future::<Result<i32, DemoError>>();
         let (b, resolver_b) = manual_future::<Result<i32, DemoError>>();
 
@@ -176,7 +176,7 @@ mod tests {
     #[test]
     fn a_later_refetch_keeps_content_mounted_and_reports_refreshing() {
         let executor = Rc::new(LocalExecutor::new());
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         let (first, first_resolver) = manual_future::<Result<i32, DemoError>>();
 
         let (value, _handle) =
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn a_failed_required_read_still_counts_as_settled() {
         let executor = Rc::new(LocalExecutor::new());
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         let (future, resolver) = manual_future::<Result<i32, DemoError>>();
 
         scope.render({
@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn hidden_pending_content_never_mounts_and_so_never_runs_its_effects() {
         let executor = Rc::new(LocalExecutor::new());
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         let (future, _resolver) = manual_future::<Result<i32, DemoError>>();
         let mounted = Rc::new(RefCell::new(false));
         let mounted_in_content = Rc::clone(&mounted);
@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn a_nested_boundary_does_not_block_on_its_parents_own_required_reads() {
         let executor = Rc::new(LocalExecutor::new());
-        let (scope, _dirty) = Scope::new();
+        let (scope, _dirty) = ComponentScope::new();
         let (outer, outer_resolver) = manual_future::<Result<i32, DemoError>>();
         let inner_slot: Rc<RefCell<Option<DemoFuture>>> = Rc::new(RefCell::new(None));
         let (inner, _inner_resolver) = manual_future::<Result<i32, DemoError>>();
