@@ -96,7 +96,7 @@ impl UiRuntime {
         root: impl Fn() -> Element + 'static,
         viewport: Size<AvailableSpace>,
     ) -> Self {
-        Self::with_rules_and_context(rules, root, viewport, Vec::new(), true, false)
+        Self::with_rules_and_context(rules, root, viewport, Vec::new(), true, false, false)
     }
 
     /// Same as [`Self::with_rules`], but for a host (only
@@ -116,7 +116,10 @@ impl UiRuntime {
     /// Seeded here, a `@keyframes` animation already running at mount is
     /// correctly suppressed (or not) on frame one; seeded only afterward,
     /// it would render unsuppressed for exactly one frame regardless of
-    /// the real OS preference.
+    /// the real OS preference. `initial_prefers_dark_color_scheme` follows
+    /// the identical requirement, for the identical reason — a
+    /// `@media (prefers-color-scheme: dark)` rule must already resolve
+    /// correctly on this constructor's own first render.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_rules_and_context(
         rules: Vec<Rule>,
@@ -125,11 +128,13 @@ impl UiRuntime {
         extra_context_providers: Vec<Box<dyn Fn()>>,
         respect_reduced_motion: bool,
         initial_os_prefers_reduced_motion: bool,
+        initial_prefers_dark_color_scheme: bool,
     ) -> Self {
         let (scope, dirty) = ComponentScope::new();
         let mut animation_timeline = AnimationTimeline::new();
         animation_timeline.set_auto_suppress_motion(respect_reduced_motion);
         animation_timeline.set_os_prefers_reduced_motion(initial_os_prefers_reduced_motion);
+        animation_timeline.set_prefers_dark_color_scheme(initial_prefers_dark_color_scheme);
         let mut runtime = Self {
             scope,
             dirty,
@@ -158,6 +163,16 @@ impl UiRuntime {
     /// distinction matters). Does not itself trigger a render.
     pub(crate) fn set_os_prefers_reduced_motion(&mut self, value: bool) {
         self.animation_timeline.set_os_prefers_reduced_motion(value);
+    }
+
+    /// Pushes a freshly-resolved effective color scheme in — a real
+    /// desktop host calls this on window construction (via
+    /// [`Self::with_rules_and_context`]'s own constructor argument) and
+    /// again on every live `WindowEvent::ThemeChanged` while no explicit
+    /// `WindowOptions.theme` override is active. Does not itself trigger a
+    /// render.
+    pub(crate) fn set_prefers_dark_color_scheme(&mut self, value: bool) {
+        self.animation_timeline.set_prefers_dark_color_scheme(value);
     }
 
     /// The flag that marks itself whenever a
@@ -522,8 +537,15 @@ mod tests {
         let providers: Vec<Box<dyn Fn()>> =
             vec![Box::new(|| florui_reactive::provide_context(42_i32))];
 
-        let _runtime =
-            UiRuntime::with_rules_and_context(Vec::new(), root, viewport(), providers, true, false);
+        let _runtime = UiRuntime::with_rules_and_context(
+            Vec::new(),
+            root,
+            viewport(),
+            providers,
+            true,
+            false,
+            false,
+        );
 
         assert_eq!(
             *seen.borrow(),
@@ -560,8 +582,15 @@ mod tests {
         let rules = florui_style::parse_stylesheet(css).unwrap();
         let root = || view! { <div class="box" /> };
 
-        let runtime =
-            UiRuntime::with_rules_and_context(rules, root, viewport(), Vec::new(), true, true);
+        let runtime = UiRuntime::with_rules_and_context(
+            rules,
+            root,
+            viewport(),
+            Vec::new(),
+            true,
+            true,
+            false,
+        );
 
         let (arena, styles, _) = runtime.geometry();
         let node = arena.roots()[0];
@@ -569,6 +598,41 @@ mod tests {
             styles[&node].opacity, 1.0,
             "suppression seeded at construction must already apply to the constructor's own \
              first render (plain opacity: 1), not splice in the animation's 0.3 value"
+        );
+    }
+
+    /// Same shape again, for `initial_prefers_dark_color_scheme`: a
+    /// `@media (prefers-color-scheme: dark)` rule must already resolve
+    /// correctly on the constructor's own first render, not just on
+    /// updates after it.
+    #[test]
+    fn color_scheme_applies_starting_from_the_very_first_render() {
+        let css = "
+            .box { background-color: #ffffff; }
+            @media (prefers-color-scheme: dark) {
+                .box { background-color: #000000; }
+            }
+        ";
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let root = || view! { <div class="box" /> };
+
+        let runtime = UiRuntime::with_rules_and_context(
+            rules,
+            root,
+            viewport(),
+            Vec::new(),
+            true,
+            false,
+            true,
+        );
+
+        let (arena, styles, _) = runtime.geometry();
+        let node = arena.roots()[0];
+        assert_eq!(
+            styles[&node].background_color,
+            florui_style::Rgba::opaque(0, 0, 0),
+            "the dark-scheme value seeded at construction must already apply to the \
+             constructor's own first render"
         );
     }
 

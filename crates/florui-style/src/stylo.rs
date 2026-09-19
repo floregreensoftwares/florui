@@ -816,7 +816,7 @@ pub(crate) fn shared_lock() -> &'static SharedRwLock {
     &LOCK
 }
 
-fn device(viewport: FlorViewport) -> Device {
+fn device(viewport: FlorViewport, prefers_color_scheme: PrefersColorScheme) -> Device {
     Device::new(
         MediaType::screen(),
         QuirksMode::NoQuirks,
@@ -824,7 +824,7 @@ fn device(viewport: FlorViewport) -> Device {
         euclid::Scale::new(1.0),
         Box::new(NoFontMetrics),
         ComputedValues::initial_values_with_font_override(FontStruct::initial_values()),
-        PrefersColorScheme::Light,
+        prefers_color_scheme,
     )
 }
 
@@ -874,7 +874,12 @@ fn compute_in_layout_state(
 
     let (tree, _primary_root) = StyloTree::new(arena, state, timeline);
 
-    let mut stylist = Stylist::new(device(viewport), QuirksMode::NoQuirks);
+    let prefers_color_scheme = if timeline.prefers_dark_color_scheme() {
+        PrefersColorScheme::Dark
+    } else {
+        PrefersColorScheme::Light
+    };
+    let mut stylist = Stylist::new(device(viewport, prefers_color_scheme), QuirksMode::NoQuirks);
     let lock = shared_lock();
     // The framework's own default element stylesheet first, under
     // Origin::UserAgent — Stylo's real cascade-origin precedence means an

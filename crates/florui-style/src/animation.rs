@@ -45,6 +45,16 @@ struct PathKey {
 /// reproducible instant construct one and call [`Self::advance_to`]
 /// directly rather than reading a real clock — the "shared controllable
 /// clock" this crate's own motion spec calls for.
+///
+/// Also the carrier for host-supplied display-preference signals
+/// (`prefers-reduced-motion`, `prefers-color-scheme`) that need to reach
+/// [`crate::stylo::device`] — not because either is an animation-timing
+/// concept, but because this struct is already threaded through every
+/// `compute()` call site that needs them, and adding a second public
+/// parameter everywhere `&mut AnimationTimeline` already flows would
+/// break two public signatures (`crate::cascade::compute`/
+/// `compute_with_container_query_signature`, and
+/// `florui_layout::compute_with_style`) for no functional gain.
 #[derive(Default)]
 pub struct AnimationTimeline {
     pub(crate) now: f64,
@@ -69,6 +79,16 @@ pub struct AnimationTimeline {
     /// written via [`Self::set_auto_suppress_motion`], which keeps the
     /// public API framed positively (`true` = suppress).
     auto_suppress_motion_disabled: bool,
+    /// The real OS/window color-scheme preference, as of the last time a
+    /// host pushed it in — `false` (light, the `Default` value) for every
+    /// caller that never does. Unlike reduced motion, this is already the
+    /// *effective* value (an explicit `WindowOptions.theme` override, if
+    /// any, is resolved before it ever reaches here) — `florui-platform`
+    /// has no way to separately recover "what the OS truly prefers
+    /// regardless of an active override" once one is set (a real `winit`
+    /// limitation, not a choice this crate made), so there is only ever
+    /// one signal to carry, not two.
+    prefers_dark_color_scheme: bool,
 }
 
 impl AnimationTimeline {
@@ -106,6 +126,22 @@ impl AnimationTimeline {
     /// agree.
     pub(crate) fn should_suppress_animations(&self) -> bool {
         !self.auto_suppress_motion_disabled && self.os_prefers_reduced_motion
+    }
+
+    /// The effective color-scheme preference — see the field's own doc for
+    /// why this is already resolved (override-or-OS), not a separate pair
+    /// of signals the way reduced motion's are.
+    pub(crate) fn prefers_dark_color_scheme(&self) -> bool {
+        self.prefers_dark_color_scheme
+    }
+
+    /// Pushes a freshly-resolved effective color scheme in — a real host
+    /// calls this once at window construction and again on every live
+    /// `WindowEvent::ThemeChanged` (only while no explicit
+    /// `WindowOptions.theme` override is active; an override already makes
+    /// the window immune to OS changes on the `florui-platform` side).
+    pub fn set_prefers_dark_color_scheme(&mut self, value: bool) {
+        self.prefers_dark_color_scheme = value;
     }
 
     /// Sets the instant `compute()` samples any in-progress animation or

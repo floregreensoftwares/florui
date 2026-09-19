@@ -1943,6 +1943,83 @@ mod tests {
     }
 
     #[test]
+    fn a_prefers_color_scheme_media_query_resolves_against_the_real_timeline_value() {
+        let tree: Element = view! { <div class="card" /> };
+        let rules = parse_stylesheet(
+            "@media (prefers-color-scheme: dark) { .card { background-color: #ff0000; } }",
+        )
+        .unwrap();
+
+        for prefers_dark in [true, false, true] {
+            let arena = Arena::build(&tree);
+            let node = arena.roots()[0];
+            let mut timeline = crate::AnimationTimeline::new();
+            timeline.set_prefers_dark_color_scheme(prefers_dark);
+            let computed = compute(
+                &arena,
+                &rules,
+                &InteractionState::new(),
+                Viewport::default(),
+                &mut timeline,
+            );
+            let expected = if prefers_dark {
+                Rgba::opaque(0xff, 0, 0)
+            } else {
+                Rgba::TRANSPARENT
+            };
+            assert_eq!(computed[&node].background_color, expected);
+        }
+    }
+
+    #[test]
+    fn a_theme_change_updates_style_without_resetting_component_state() {
+        // Mirrors set_rules_changes_style_without_resetting_component_state
+        // (in florui-platform's runtime.rs) at the florui-style layer: the
+        // literal "theme changes must invalidate dependent values correctly
+        // without remounting component state" requirement.
+        let css = "
+            .card { background-color: #ffffff; }
+            @media (prefers-color-scheme: dark) {
+                .card { background-color: #000000; }
+            }
+        ";
+        let rules = parse_stylesheet(css).unwrap();
+        let tree: Element = view! { <div class="card" /> };
+        let arena = Arena::build(&tree);
+        let node = arena.roots()[0];
+        let mut timeline = crate::AnimationTimeline::new();
+
+        let light = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+            &mut timeline,
+        );
+        assert_eq!(
+            light[&node].background_color,
+            Rgba::opaque(0xff, 0xff, 0xff)
+        );
+
+        // Same Arena, same AnimationTimeline (the only place component
+        // state would live in a real runtime) — only the color-scheme
+        // signal changes between these two compute() calls.
+        timeline.set_prefers_dark_color_scheme(true);
+        let dark = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+            &mut timeline,
+        );
+        assert_eq!(
+            dark[&node].background_color,
+            Rgba::opaque(0, 0, 0),
+            "a theme change must actually take effect"
+        );
+    }
+
+    #[test]
     fn a_height_sensitive_stylesheet_is_reused_correctly_across_computes_at_different_heights() {
         let tree: Element = view! { <div class="card" /> };
         let arena = Arena::build(&tree);
