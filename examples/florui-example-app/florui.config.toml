@@ -7,5 +7,8 @@ identifier = "com.floregreen.florui-example-app"
 [app.icons]
 source = "assets/icons/app-icon.svg"
 
+[app.activation]
+single_instance = true
+
 [window.persistence]
 enabled = true
