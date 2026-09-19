@@ -36,6 +36,7 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
             id: ::std::concat!(::std::env!("CARGO_PKG_NAME"), ":", ::std::file!(), ":", #path),
             source_path: #path,
             css: ::std::include_str!(#path),
+            scope: ::std::option::Option::None,
         };
     })
 }

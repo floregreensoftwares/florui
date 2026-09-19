@@ -38,6 +38,7 @@ mod default_stylesheet;
 mod error;
 mod height_media_adapter;
 mod interaction;
+mod scope_adapter;
 mod stylesheet_parse;
 mod stylo;
 mod tree;
@@ -53,7 +54,7 @@ pub use color::{ColorParseError, Rgba, parse_hex_color};
 pub use container_query_adapter::{ContentBoxSize, resolve_container_query_signatures};
 pub use error::StyleError;
 pub use interaction::InteractionState;
-pub use stylesheet_parse::{Rule, parse_stylesheet};
+pub use stylesheet_parse::{Rule, compile_sources, parse_stylesheet};
 pub use tree::{Arena, InlineItem, NodeId};
 
 #[cfg(test)]

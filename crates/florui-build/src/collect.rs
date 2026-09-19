@@ -28,6 +28,10 @@ pub struct CollectedStylesheet {
     /// The resolved, absolute path to the CSS file.
     pub css_path: PathBuf,
     pub css: String,
+    /// Whether this came from `stylesheet_scoped!` rather than plain
+    /// `stylesheet!` — controls whether [`crate::codegen`] emits a
+    /// `StylesheetSource.scope` for it.
+    pub scoped: bool,
 }
 
 #[derive(Debug)]
@@ -206,6 +210,7 @@ fn visit(
             declaring_file,
             declaring_dir,
             &invocation.literal_path,
+            invocation.scoped,
         )?);
     }
 
@@ -279,12 +284,14 @@ fn subtree_has_stylesheet(
     Ok(false)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_entry(
     package_name: &str,
     package_root: &Path,
     declaring_file: &Path,
     declaring_dir: &Path,
     literal_path: &str,
+    scoped: bool,
 ) -> Result<CollectedStylesheet, CollectError> {
     let css_path = declaring_dir.join(literal_path);
     let css = fs::read_to_string(&css_path).map_err(|source| CollectError::ReadCss {
@@ -307,6 +314,7 @@ fn build_entry(
         literal_path: literal_path.to_string(),
         css_path,
         css,
+        scoped,
     })
 }
 
@@ -316,4 +324,100 @@ fn dedup(sources: Vec<CollectedStylesheet>) -> Vec<CollectedStylesheet> {
         .into_iter()
         .filter(|s| seen.insert(s.id.clone()))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "florui-build-collect-test-{name}-{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+
+        fn write(&self, relative: &str, contents: &str) -> PathBuf {
+            let path = self.0.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, contents).unwrap();
+            path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// `CollectedStylesheet::declared_at` is formatted with `Path::display`,
+    /// which uses the platform's native separator — exactly what a real
+    /// `file!()` invocation at that same source location also produces
+    /// (confirmed empirically for this Windows toolchain: `file!()` in a
+    /// nested module and `Path::join(...).display()` for that identical
+    /// file agree byte-for-byte, both using `\`). This equality is now a
+    /// real contract, not a historical curiosity — explicit style scoping
+    /// derives a runtime scope identity from the macro-side `file!()`-based
+    /// id and matches it against this build-side id, so the two formatting
+    /// schemes must keep agreeing. Pin the platform-native-separator
+    /// behavior here so a future change to this formatting doesn't silently
+    /// break that match.
+    #[test]
+    fn declared_at_uses_the_platform_native_separator() {
+        let dir = TempDir::new("separator");
+        dir.write("src/main.rs", "mod components;");
+        dir.write("src/components/mod.rs", "mod button;");
+        dir.write(
+            "src/components/button.rs",
+            r#"florui::stylesheet!("./button.css");"#,
+        );
+        dir.write("src/components/button.css", ".button { color: red; }");
+
+        let result = collect_stylesheets("pkg", &dir.0, &dir.0.join("src/main.rs"), &|_| false)
+            .expect("collection should succeed");
+
+        assert_eq!(result.stylesheets.len(), 1);
+        let sep = std::path::MAIN_SEPARATOR;
+        let expected = format!("src{sep}components{sep}button.rs");
+        assert_eq!(
+            result.stylesheets[0].declared_at.display().to_string(),
+            expected
+        );
+    }
+
+    #[test]
+    fn distinguishes_scoped_from_global_declarations() {
+        let dir = TempDir::new("scoped-flag");
+        dir.write("src/main.rs", "mod a;\nmod b;");
+        dir.write("src/a.rs", r#"florui::stylesheet!("./a.css");"#);
+        dir.write("src/a.css", ".a {}");
+        dir.write("src/b.rs", r#"florui::stylesheet_scoped!("./b.css");"#);
+        dir.write("src/b.css", ".b {}");
+
+        let result = collect_stylesheets("pkg", &dir.0, &dir.0.join("src/main.rs"), &|_| false)
+            .expect("collection should succeed");
+
+        assert_eq!(result.stylesheets.len(), 2);
+        let a = result
+            .stylesheets
+            .iter()
+            .find(|s| s.literal_path == "./a.css")
+            .unwrap();
+        let b = result
+            .stylesheets
+            .iter()
+            .find(|s| s.literal_path == "./b.css")
+            .unwrap();
+        assert!(!a.scoped);
+        assert!(b.scoped);
+    }
 }

@@ -28,11 +28,14 @@ pub use element::{Element, ElementNode};
 /// }
 /// ```
 pub use florui_macros::component;
-pub use florui_macros::{stylesheet, view};
+pub use florui_macros::{stylesheet, stylesheet_scoped, view};
 pub use florui_reactive as reactive;
 pub use handler::Handler;
 pub use into_nodes::IntoNodes;
-pub use stylesheets::{StylesheetSource, dedup as dedup_stylesheets};
+pub use stylesheets::{
+    StyleScope, StylesheetSource, apply_scope_to_class_attr, dedup as dedup_stylesheets,
+    style_scope_hash,
+};
 
 pub mod prelude {
     pub use crate::reactive::{
@@ -41,5 +44,8 @@ pub mod prelude {
         provide_context, render_once, use_attachment, use_child_scope, use_child_scope_keyed,
         use_context, use_effect, use_error_boundary, use_memo, use_ref, use_resource, use_signal,
     };
-    pub use crate::{Children, Element, Handler, IntoNodes, component, stylesheet, view};
+    pub use crate::{
+        Children, Element, Handler, IntoNodes, StyleScope, component, stylesheet,
+        stylesheet_scoped, view,
+    };
 }
