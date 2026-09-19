@@ -35,6 +35,24 @@ pub struct AppConfig {
     /// requests `{ workspace = true }`.
     pub version: String,
     pub icons: IconsConfig,
+    pub activation: ActivationConfig,
+}
+
+/// Typed declaration only -- no OS registration, no single-instance IPC.
+/// See `crate::schema::RawActivation`'s doc comment for why.
+#[derive(Debug, Clone, Default)]
+pub struct ActivationConfig {
+    pub single_instance: bool,
+    pub url_schemes: Vec<String>,
+    pub file_associations: Vec<FileAssociationConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileAssociationConfig {
+    pub extension: String,
+    pub mime_type: Option<String>,
+    pub description: Option<String>,
+    pub identity: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -59,6 +77,16 @@ pub struct WindowConfig {
     pub min_height: Option<f64>,
     pub decorations: DecorationsSetting,
     pub transparent: bool,
+    pub persistence: WindowPersistenceConfig,
+}
+
+/// Typed declaration only -- no bounds save/restore, no monitor
+/// revalidation. See `crate::schema::RawWindowPersistence`'s doc comment.
+#[derive(Debug, Clone)]
+pub struct WindowPersistenceConfig {
+    pub enabled: bool,
+    /// Defaults to `"main"` when `persistence` is declared without a key.
+    pub key: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

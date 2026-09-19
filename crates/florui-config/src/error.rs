@@ -103,6 +103,16 @@ pub enum SemanticConfigError {
         location: SourceLocation,
         allowed: &'static [&'static str],
     },
+    InvalidActivation {
+        config_path: PathBuf,
+        location: SourceLocation,
+        reason: ActivationError,
+    },
+    InvalidFileAssociation {
+        config_path: PathBuf,
+        location: SourceLocation,
+        reason: FileAssociationError,
+    },
 }
 
 impl fmt::Display for SemanticConfigError {
@@ -177,6 +187,69 @@ impl fmt::Display for SemanticConfigError {
                 config_path.display(),
                 allowed.join(", ")
             ),
+            SemanticConfigError::InvalidActivation {
+                config_path,
+                location,
+                reason,
+            } => write!(
+                f,
+                "{}:{location}: app.activation.url_schemes is invalid: {reason}",
+                config_path.display()
+            ),
+            SemanticConfigError::InvalidFileAssociation {
+                config_path,
+                location,
+                reason,
+            } => write!(
+                f,
+                "{}:{location}: app.activation.file_associations entry is invalid: {reason}",
+                config_path.display()
+            ),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ActivationError {
+    EmptyUrlScheme,
+    InvalidUrlSchemeCharacters { scheme: String },
+    DuplicateUrlScheme { scheme: String },
+}
+
+impl fmt::Display for ActivationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ActivationError::EmptyUrlScheme => write!(f, "a URL scheme cannot be empty"),
+            ActivationError::InvalidUrlSchemeCharacters { scheme } => write!(
+                f,
+                "\"{scheme}\" is not a valid URL scheme (must start with a letter, followed by letters, digits, `+`, `-`, or `.`)"
+            ),
+            ActivationError::DuplicateUrlScheme { scheme } => {
+                write!(f, "\"{scheme}\" is declared more than once")
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum FileAssociationError {
+    EmptyExtension,
+    EmptyIdentity,
+    DuplicateExtension { extension: String },
+    DuplicateIdentity { identity: String },
+}
+
+impl fmt::Display for FileAssociationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FileAssociationError::EmptyExtension => write!(f, "extension cannot be empty"),
+            FileAssociationError::EmptyIdentity => write!(f, "identity cannot be empty"),
+            FileAssociationError::DuplicateExtension { extension } => {
+                write!(f, "extension \"{extension}\" is declared more than once")
+            }
+            FileAssociationError::DuplicateIdentity { identity } => {
+                write!(f, "identity \"{identity}\" is declared more than once")
+            }
         }
     }
 }

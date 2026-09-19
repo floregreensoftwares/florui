@@ -4,18 +4,21 @@
 //! and non-fatal diagnostics.
 
 use crate::error::{
-    ConfigError, Diagnostic, SemanticConfigError, Severity, WindowSizeError,
-    WorkspaceInheritanceError,
+    ActivationError, ConfigError, Diagnostic, FileAssociationError, SemanticConfigError, Severity,
+    WindowSizeError, WorkspaceInheritanceError,
 };
 use crate::location::LineIndex;
 use crate::project::{CargoProjectFacts, config_file_path, parse_package_version};
 use crate::resolved::{
-    AppConfig, BundleConfig, DecorationsSetting, DevConfig, FieldProvenance, IconsConfig,
-    Provenance, ResolvedConfig, Target, WebConfig, WebIconsConfig, WindowConfig,
+    ActivationConfig, AppConfig, BundleConfig, DecorationsSetting, DevConfig, FieldProvenance,
+    FileAssociationConfig, IconsConfig, Provenance, ResolvedConfig, Target, WebConfig,
+    WebIconsConfig, WindowConfig, WindowPersistenceConfig,
 };
 use crate::schema::{
-    RawConfig, RawDecorations, RawVersion, RawWeb, SUPPORTED_SCHEMA_VERSION, SchemaVersionProbe,
+    RawActivation, RawConfig, RawDecorations, RawVersion, RawWeb, RawWindow,
+    SUPPORTED_SCHEMA_VERSION, SchemaVersionProbe,
 };
+use std::collections::BTreeSet;
 use std::path::Path;
 use toml::Spanned;
 
@@ -167,6 +170,15 @@ pub fn resolve(
         validate_web_icon_formats(web, &config_path, config_lines, &mut errors);
     }
 
+    if let Some(activation) = raw
+        .as_ref()
+        .and_then(|c| c.app.as_ref())
+        .and_then(|a| a.activation.as_ref())
+    {
+        let config_lines = lines.as_ref().unwrap();
+        validate_activation(activation, &config_path, config_lines, &mut errors);
+    }
+
     if !errors.is_empty() {
         return Err(ConfigError::Semantic(errors));
     }
@@ -234,12 +246,19 @@ pub fn resolve(
         &mut diagnostics,
     );
 
+    let activation = resolve_activation(
+        raw_app.and_then(|a| a.activation.as_ref()),
+        lines.as_ref(),
+        &mut provenance,
+    );
+
     let app = AppConfig {
         identifier,
         name,
         description,
         version,
         icons,
+        activation,
     };
 
     let web = resolve_web(
@@ -314,6 +333,8 @@ pub fn resolve(
         }
     };
 
+    let persistence = resolve_persistence(raw_window, &mut provenance);
+
     let window = WindowConfig {
         title,
         width,
@@ -322,6 +343,7 @@ pub fn resolve(
         min_height,
         decorations,
         transparent,
+        persistence,
     };
 
     let publisher = optional_string_field(
@@ -658,6 +680,207 @@ fn resolve_web(
         base_path,
         icons,
     }
+}
+
+fn validate_activation(
+    activation: &RawActivation,
+    config_path: &Path,
+    lines: &LineIndex<'_>,
+    errors: &mut Vec<SemanticConfigError>,
+) {
+    if let Some(schemes) = activation.url_schemes.as_ref() {
+        let location = lines.locate_start(schemes.span());
+        let mut seen = BTreeSet::new();
+        for scheme in schemes.get_ref() {
+            if scheme.is_empty() {
+                errors.push(SemanticConfigError::InvalidActivation {
+                    config_path: config_path.to_owned(),
+                    location,
+                    reason: ActivationError::EmptyUrlScheme,
+                });
+            } else if !is_valid_url_scheme(scheme) {
+                errors.push(SemanticConfigError::InvalidActivation {
+                    config_path: config_path.to_owned(),
+                    location,
+                    reason: ActivationError::InvalidUrlSchemeCharacters {
+                        scheme: scheme.clone(),
+                    },
+                });
+            } else if !seen.insert(scheme.to_ascii_lowercase()) {
+                errors.push(SemanticConfigError::InvalidActivation {
+                    config_path: config_path.to_owned(),
+                    location,
+                    reason: ActivationError::DuplicateUrlScheme {
+                        scheme: scheme.clone(),
+                    },
+                });
+            }
+        }
+    }
+
+    let Some(associations) = activation.file_associations.as_ref() else {
+        return;
+    };
+    let mut seen_extensions = BTreeSet::new();
+    let mut seen_identities = BTreeSet::new();
+    for association in associations {
+        let extension = association.extension.get_ref();
+        let extension_location = lines.locate_start(association.extension.span());
+        if extension.is_empty() {
+            errors.push(SemanticConfigError::InvalidFileAssociation {
+                config_path: config_path.to_owned(),
+                location: extension_location,
+                reason: FileAssociationError::EmptyExtension,
+            });
+        } else if !seen_extensions.insert(extension.to_ascii_lowercase()) {
+            errors.push(SemanticConfigError::InvalidFileAssociation {
+                config_path: config_path.to_owned(),
+                location: extension_location,
+                reason: FileAssociationError::DuplicateExtension {
+                    extension: extension.clone(),
+                },
+            });
+        }
+
+        let identity = association.identity.get_ref();
+        let identity_location = lines.locate_start(association.identity.span());
+        if identity.is_empty() {
+            errors.push(SemanticConfigError::InvalidFileAssociation {
+                config_path: config_path.to_owned(),
+                location: identity_location,
+                reason: FileAssociationError::EmptyIdentity,
+            });
+        } else if !seen_identities.insert(identity.clone()) {
+            errors.push(SemanticConfigError::InvalidFileAssociation {
+                config_path: config_path.to_owned(),
+                location: identity_location,
+                reason: FileAssociationError::DuplicateIdentity {
+                    identity: identity.clone(),
+                },
+            });
+        }
+    }
+}
+
+/// A URI scheme per RFC 3986: a letter, then letters/digits/`+`/`-`/`.`.
+fn is_valid_url_scheme(scheme: &str) -> bool {
+    let mut chars = scheme.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+/// No OS registration, no single-instance IPC -- see
+/// `crate::schema::RawActivation`'s own doc comment.
+fn resolve_activation(
+    raw: Option<&RawActivation>,
+    lines: Option<&LineIndex<'_>>,
+    provenance: &mut Vec<FieldProvenance>,
+) -> ActivationConfig {
+    let single_instance = match raw.and_then(|a| a.single_instance) {
+        Some(value) => {
+            provenance.push(field(
+                "app.activation.single_instance",
+                Provenance::ConfigFile(None),
+            ));
+            value
+        }
+        None => {
+            provenance.push(field(
+                "app.activation.single_instance",
+                Provenance::BuiltinDefault,
+            ));
+            false
+        }
+    };
+    let url_schemes = match raw.and_then(|a| a.url_schemes.as_ref()) {
+        Some(spanned) => {
+            provenance.push(field(
+                "app.activation.url_schemes",
+                Provenance::ConfigFile(Some(lines.unwrap().locate_start(spanned.span()))),
+            ));
+            spanned.get_ref().clone()
+        }
+        None => {
+            provenance.push(field(
+                "app.activation.url_schemes",
+                Provenance::BuiltinDefault,
+            ));
+            Vec::new()
+        }
+    };
+    let file_associations = match raw.and_then(|a| a.file_associations.as_ref()) {
+        Some(list) => {
+            provenance.push(field(
+                "app.activation.file_associations",
+                Provenance::ConfigFile(None),
+            ));
+            list.iter()
+                .map(|association| FileAssociationConfig {
+                    extension: association.extension.get_ref().clone(),
+                    mime_type: association.mime_type.clone(),
+                    description: association.description.clone(),
+                    identity: association.identity.get_ref().clone(),
+                })
+                .collect()
+        }
+        None => {
+            provenance.push(field(
+                "app.activation.file_associations",
+                Provenance::BuiltinDefault,
+            ));
+            Vec::new()
+        }
+    };
+
+    ActivationConfig {
+        single_instance,
+        url_schemes,
+        file_associations,
+    }
+}
+
+/// No bounds save/restore, no monitor revalidation -- see
+/// `crate::schema::RawWindowPersistence`'s own doc comment. `key` defaults
+/// to `"main"` (not `String::default()`'s empty string) so an
+/// enabled-without-a-key persistence declaration still has a usable key.
+fn resolve_persistence(
+    raw_window: Option<&RawWindow>,
+    provenance: &mut Vec<FieldProvenance>,
+) -> WindowPersistenceConfig {
+    let raw_persistence = raw_window.and_then(|w| w.persistence.as_ref());
+    let enabled = match raw_persistence.and_then(|p| p.enabled) {
+        Some(value) => {
+            provenance.push(field(
+                "window.persistence.enabled",
+                Provenance::ConfigFile(None),
+            ));
+            value
+        }
+        None => {
+            provenance.push(field(
+                "window.persistence.enabled",
+                Provenance::BuiltinDefault,
+            ));
+            false
+        }
+    };
+    let key = match raw_persistence.and_then(|p| p.key.as_deref()) {
+        Some(key) => {
+            provenance.push(field(
+                "window.persistence.key",
+                Provenance::ConfigFile(None),
+            ));
+            key.to_owned()
+        }
+        None => {
+            provenance.push(field("window.persistence.key", Provenance::BuiltinDefault));
+            "main".to_owned()
+        }
+    };
+    WindowPersistenceConfig { enabled, key }
 }
 
 /// Two-step parse: peeks `schema_version` first, so a genuinely newer or
@@ -1248,5 +1471,200 @@ mod tests {
         let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
         assert_eq!(resolution.config.web.icons.favicon, None);
         assert_eq!(resolution.config.web.icons.apple_touch_icon, None);
+    }
+
+    #[test]
+    fn activation_defaults_to_disabled_single_instance_and_empty_schemes_and_associations() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "florui.config.toml", "schema_version = 1\n");
+        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let activation = &resolution.config.app.activation;
+        assert!(!activation.single_instance);
+        assert!(activation.url_schemes.is_empty());
+        assert!(activation.file_associations.is_empty());
+    }
+
+    #[test]
+    fn activation_resolves_single_instance_and_url_schemes() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app.activation]\nsingle_instance = true\nurl_schemes = [\"garden\"]\n",
+        );
+        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let activation = &resolution.config.app.activation;
+        assert!(activation.single_instance);
+        assert_eq!(activation.url_schemes, vec!["garden".to_owned()]);
+    }
+
+    #[test]
+    fn empty_url_scheme_is_a_semantic_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app.activation]\nurl_schemes = [\"\"]\n",
+        );
+        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        match err {
+            ConfigError::Semantic(errors) => {
+                assert!(matches!(
+                    errors[0],
+                    SemanticConfigError::InvalidActivation {
+                        reason: ActivationError::EmptyUrlScheme,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected Semantic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn url_scheme_with_invalid_characters_is_a_semantic_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app.activation]\nurl_schemes = [\"1garden\"]\n",
+        );
+        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        match err {
+            ConfigError::Semantic(errors) => {
+                assert!(matches!(
+                    errors[0],
+                    SemanticConfigError::InvalidActivation {
+                        reason: ActivationError::InvalidUrlSchemeCharacters { .. },
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected Semantic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_url_scheme_is_a_semantic_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app.activation]\nurl_schemes = [\"garden\", \"Garden\"]\n",
+        );
+        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        match err {
+            ConfigError::Semantic(errors) => {
+                assert!(matches!(
+                    errors[0],
+                    SemanticConfigError::InvalidActivation {
+                        reason: ActivationError::DuplicateUrlScheme { .. },
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected Semantic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_association_resolves_all_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[[app.activation.file_associations]]\nextension = \"garden\"\nmime_type = \"application/x-garden\"\ndescription = \"Garden document\"\nidentity = \"com.floregreen.garden.document\"\n",
+        );
+        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let association = &resolution.config.app.activation.file_associations[0];
+        assert_eq!(association.extension, "garden");
+        assert_eq!(
+            association.mime_type.as_deref(),
+            Some("application/x-garden")
+        );
+        assert_eq!(association.description.as_deref(), Some("Garden document"));
+        assert_eq!(association.identity, "com.floregreen.garden.document");
+    }
+
+    #[test]
+    fn duplicate_file_association_identity_is_a_semantic_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n\
+             [[app.activation.file_associations]]\n\
+             extension = \"garden\"\n\
+             identity = \"com.floregreen.garden.document\"\n\
+             [[app.activation.file_associations]]\n\
+             extension = \"gdn\"\n\
+             identity = \"com.floregreen.garden.document\"\n",
+        );
+        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        match err {
+            ConfigError::Semantic(errors) => {
+                assert!(matches!(
+                    errors[0],
+                    SemanticConfigError::InvalidFileAssociation {
+                        reason: FileAssociationError::DuplicateIdentity { .. },
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected Semantic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_file_association_extension_is_a_semantic_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n\
+             [[app.activation.file_associations]]\n\
+             extension = \"garden\"\n\
+             identity = \"com.floregreen.garden.document\"\n\
+             [[app.activation.file_associations]]\n\
+             extension = \"Garden\"\n\
+             identity = \"com.floregreen.garden.other\"\n",
+        );
+        let err = resolve(&facts(dir.path(), ""), None).unwrap_err();
+        match err {
+            ConfigError::Semantic(errors) => {
+                assert!(matches!(
+                    errors[0],
+                    SemanticConfigError::InvalidFileAssociation {
+                        reason: FileAssociationError::DuplicateExtension { .. },
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected Semantic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn window_persistence_defaults_disabled_with_key_main() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "florui.config.toml", "schema_version = 1\n");
+        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let persistence = &resolution.config.window.persistence;
+        assert!(!persistence.enabled);
+        assert_eq!(persistence.key, "main");
+    }
+
+    #[test]
+    fn window_persistence_enabled_with_explicit_key_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[window.persistence]\nenabled = true\nkey = \"editor\"\n",
+        );
+        let resolution = resolve(&facts(dir.path(), ""), None).unwrap();
+        let persistence = &resolution.config.window.persistence;
+        assert!(persistence.enabled);
+        assert_eq!(persistence.key, "editor");
     }
 }
