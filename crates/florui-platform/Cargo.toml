@@ -15,7 +15,7 @@ default = ["desktop"]
 # driving UiRuntime on its own shouldn't have to pull them in.
 # `dep:windows-sys` is a no-op outside the Windows-only dependency table
 # below — every other target simply never has it in its resolved graph.
-desktop = ["dep:notify", "dep:softbuffer", "dep:winit", "dep:wgpu", "dep:pollster", "dep:windows-sys", "dep:florui-icon"]
+desktop = ["dep:notify", "dep:softbuffer", "dep:winit", "dep:wgpu", "dep:pollster", "dep:windows-sys", "dep:florui-icon", "dep:serde", "dep:serde_json"]
 
 [dependencies]
 florui = { path = "../florui" }
@@ -38,6 +38,14 @@ winit = { version = "0.30.13", optional = true }
 # across the workspace.
 wgpu = { version = "29.0.4", optional = true }
 pollster = { version = "1.0.1", optional = true }
+# `window_state`'s own persisted-file format -- versions match
+# `florui-config`'s own pins, for one resolved version across the
+# workspace.
+serde = { version = "1.0.229", features = ["derive"], optional = true }
+serde_json = { version = "1.0.151", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
 
 # `crate::os::windows`'s own dependency — real Win32 calls (DWM caption
 # color, click-through, tray icon). Target-scoped so every other

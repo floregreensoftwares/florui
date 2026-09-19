@@ -38,6 +38,7 @@ use crate::appearance::DecorationMode;
 use crate::dpi::{self, ViewportScale};
 use crate::gpu::{self, GpuPresenter};
 use crate::window_controls::{InputMode, ScreenRect, WindowControls};
+use crate::window_state::{self, WindowPersistence};
 
 #[derive(Debug)]
 pub enum RunError {
@@ -135,6 +136,10 @@ pub struct WindowOptions {
     pub icon: Option<florui_icon::RawIcon>,
     pub respect_reduced_motion: bool,
     pub theme: crate::theme::ThemePreference,
+    /// `None` (the default) persists nothing -- see
+    /// [`crate::WindowPersistence`]'s own doc for the app-side resolution
+    /// pattern.
+    pub persistence: Option<WindowPersistence>,
 }
 
 /// Not `#[derive(Default)]`: every field but `respect_reduced_motion`
@@ -156,6 +161,7 @@ impl Default for WindowOptions {
             icon: None,
             respect_reduced_motion: true,
             theme: crate::theme::ThemePreference::default(),
+            persistence: None,
         }
     }
 }
@@ -492,6 +498,10 @@ struct WindowState {
     /// override is set; see [`crate::theme`]'s own module doc), checked in
     /// [`Self::handle_theme_changed`].
     theme_preference: crate::theme::ThemePreference,
+    /// `Some` when this window opted into bounds persistence — read at
+    /// close time (see [`DesktopHost::close_if_confirmed`]) to flush a
+    /// final save.
+    persistence: Option<WindowPersistence>,
 }
 
 impl WindowState {
@@ -790,11 +800,18 @@ impl DesktopHost {
     /// [`WindowState::should_close`]. Removes just that window's entry;
     /// only exits the whole process once none are left.
     fn close_if_confirmed(&mut self, event_loop: &ActiveEventLoop, id: WindowId) {
-        if self.windows.get(&id).is_some_and(WindowState::should_close) {
-            self.windows.remove(&id);
-            if self.windows.is_empty() {
-                event_loop.exit();
-            }
+        let Some(state) = self.windows.get(&id) else {
+            return;
+        };
+        if !state.should_close() {
+            return;
+        }
+        if let Some(persistence) = &state.persistence {
+            window_state::capture_and_save(&state.window, persistence);
+        }
+        self.windows.remove(&id);
+        if self.windows.is_empty() {
+            event_loop.exit();
         }
     }
 }
@@ -836,12 +853,60 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                     }
                 }
             }
+            // Restores persisted bounds, revalidated against currently
+            // connected monitors -- a saved position that no longer
+            // overlaps any of them is a full miss, not partially honored,
+            // so a title/drag region is never left unreachable off-screen.
+            // A saved size with no saved position (never recorded, e.g. no
+            // `Moved` event ever fired) still applies -- losing position
+            // alone is a smaller compromise than losing everything.
+            let mut should_restore_maximized = false;
+            if let Some(persistence) = &spec.options.persistence {
+                let saved =
+                    window_state::window_state_path(&persistence.app_identifier, &persistence.key)
+                        .as_deref()
+                        .and_then(window_state::load_or_default);
+                if let Some(saved) = saved {
+                    let monitors: Vec<window_state::MonitorRect> = event_loop
+                        .available_monitors()
+                        .map(|monitor| window_state::MonitorRect {
+                            position: (monitor.position().x, monitor.position().y),
+                            physical_size: (monitor.size().width, monitor.size().height),
+                            scale_factor: monitor.scale_factor(),
+                        })
+                        .collect();
+                    let restorable_position = saved.position.filter(|&position| {
+                        window_state::overlapping_monitor(
+                            saved.logical_size,
+                            position,
+                            saved.monitor.scale_factor,
+                            &monitors,
+                        )
+                        .is_some()
+                    });
+                    if saved.position.is_none() || restorable_position.is_some() {
+                        let clamped =
+                            window_state::clamp_to_min(saved.logical_size, spec.options.min_size);
+                        attrs = attrs
+                            .with_inner_size(winit::dpi::LogicalSize::new(clamped.0, clamped.1));
+                        if let Some(position) = restorable_position {
+                            attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(
+                                position.0, position.1,
+                            ));
+                        }
+                        should_restore_maximized = saved.maximized;
+                    }
+                }
+            }
             let attrs = gpu::transparent_capable_attributes(attrs);
             let window = match event_loop.create_window(attrs) {
                 Ok(window) => Arc::new(window),
                 Err(error) => return self.fail(event_loop, RunError::WindowCreation(error)),
             };
             let window_id = window.id();
+            if should_restore_maximized {
+                window.set_maximized(true);
+            }
 
             // GPU-preferred, `softbuffer` fallback — see `crate::gpu`'s own
             // doc for the two-tier (three-way, counting this CPU path)
@@ -936,6 +1001,7 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 css_path: spec.css_path,
                 _css_watcher: css_watcher,
                 theme_preference,
+                persistence: spec.options.persistence.clone(),
             };
             state.redraw();
             // A `@keyframes` animation already running on mount (no `:hover`
