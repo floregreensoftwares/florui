@@ -1,0 +1,14 @@
+[package]
+license.workspace = true
+name = "florui-routing"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "florui_routing"
+
+[dependencies]
+florui = { path = "../florui" }
+florui-reactive = { path = "../florui-reactive" }
