@@ -1332,6 +1332,7 @@ dependencies = [
  "florui-paint",
  "florui-platform",
  "florui-reactive",
+ "florui-routing",
  "florui-style",
  "florui-text",
  "notify",
@@ -1432,6 +1433,14 @@ name = "florui-reactive"
 version = "0.1.0"
 dependencies = [
  "futures",
+]
+
+[[package]]
+name = "florui-routing"
+version = "0.1.0"
+dependencies = [
+ "florui",
+ "florui-reactive",
 ]
 
 [[package]]
