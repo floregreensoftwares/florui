@@ -9,8 +9,6 @@
 //! thread while a "caller" keeps running — was confirmed against a real,
 //! human-driven dialog in a disposable scratch experiment first.
 
-use std::ffi::c_void;
-
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
@@ -22,13 +20,13 @@ use windows::Win32::UI::Shell::{
     IShellItem, SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
 };
 use windows::core::{HSTRING, PCWSTR};
-use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
 use crate::file_dialog::{
     FileDialogFilter, OpenFileDialogOptions, OpenFileDialogOutcome, SaveFileDialogOptions,
     SaveFileDialogOutcome, filter_patterns,
 };
+use crate::os::windows::raw_hwnd;
 
 /// The exact HRESULT `IFileDialog::Show` returns when the user closes the
 /// dialog without choosing anything -- confirmed against a real Cancel
@@ -45,17 +43,6 @@ unsafe impl Send for SendableHwnd {}
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-/// The real platform window handle backing `window`, if any -- `None`
-/// (never a panic) when `winit` reports anything other than a real Win32
-/// handle, matching `caption.rs`'s own extraction pattern.
-fn raw_hwnd(window: &Window) -> Option<HWND> {
-    let handle = window.window_handle().ok()?;
-    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
-        return None;
-    };
-    Some(HWND(win32.hwnd.get() as *mut c_void))
 }
 
 pub(crate) fn spawn_open_dialog(

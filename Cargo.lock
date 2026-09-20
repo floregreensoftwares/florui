@@ -1419,6 +1419,7 @@ dependencies = [
  "tempfile",
  "wgpu",
  "windows",
+ "windows-core",
  "windows-sys 0.60.2",
  "winit",
 ]
