@@ -399,10 +399,18 @@ pub struct ComputedStyle {
     /// (a `visible` axis paired with a non-`visible` one computes to
     /// `auto`, not `visible`) — so this isn't a simplification of the
     /// clipping behavior itself, only of which of `hidden`/`scroll`/
-    /// `auto`/`clip` caused it. florui doesn't scroll yet, so every
-    /// clipping value renders identically: content clips to the padding
-    /// box with no scrollbar, as if already scrolled to the origin.
+    /// `auto`/`clip` caused it. See [`Self::overflow_scrolls_x`]/
+    /// [`Self::overflow_scrolls_y`] for which of those clipping causes also
+    /// makes the axis reachable via real scrolling.
     pub overflow_clips: bool,
+    /// Whether `overflow-x` is real CSS's `scroll`/`auto` — the two
+    /// keywords that make this axis's clipped-away content reachable again
+    /// by scrolling, rather than clipped away for good (`hidden`/`clip`).
+    /// Independent of [`Self::overflow_clips`], which only says an axis
+    /// clips, not whether it scrolls.
+    pub overflow_scrolls_x: bool,
+    /// Same as [`Self::overflow_scrolls_x`], for `overflow-y`.
+    pub overflow_scrolls_y: bool,
     /// `transform`'s own function list, in authored order — see
     /// [`TransformFunction`]'s own doc for the supported subset. An empty
     /// list is real CSS's own `none`, the initial value. Composing these
@@ -694,6 +702,47 @@ mod tests {
         );
         let node = arena.roots()[0];
         assert!(computed[&node].overflow_clips);
+    }
+
+    #[test]
+    fn overflow_hidden_clips_but_does_not_scroll() {
+        let tree: Element = view! { <div class="x" /> };
+        let (arena, computed) = styles(&tree, ".x { overflow: hidden; }", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert!(computed[&node].overflow_clips);
+        assert!(!computed[&node].overflow_scrolls_x);
+        assert!(!computed[&node].overflow_scrolls_y);
+    }
+
+    #[test]
+    fn overflow_scroll_and_auto_clip_and_scroll_independently_per_axis() {
+        let tree: Element = view! { <div class="x" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".x { overflow-x: scroll; overflow-y: auto; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert!(computed[&node].overflow_clips);
+        assert!(computed[&node].overflow_scrolls_x);
+        assert!(computed[&node].overflow_scrolls_y);
+
+        // `hidden` (unlike the unset default `visible`) isn't promoted to
+        // `auto` by the other axis's own non-`visible` value — see
+        // `overflow_clips`'s own doc on that promotion rule — so this pair
+        // stays a real per-axis split: `x` scrolls, `y` only clips.
+        let tree: Element = view! { <div class="y" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".y { overflow-x: scroll; overflow-y: hidden; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert!(computed[&node].overflow_scrolls_x);
+        assert!(
+            !computed[&node].overflow_scrolls_y,
+            "overflow-y: hidden must not report as scrollable just because overflow-x does"
+        );
     }
 
     #[test]
