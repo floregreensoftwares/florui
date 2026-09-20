@@ -6,7 +6,7 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -44,6 +44,80 @@ pub enum ActivationEvent {
     Launch { args: Vec<String> },
     OpenUrl { url: String },
     OpenFiles { paths: Vec<PathBuf> },
+}
+
+/// Classifies a process's own `argv` (`args[0]` still the executable path)
+/// into a typed [`ActivationEvent`], against the app's own declared
+/// `url_schemes`/`file_extensions` -- already-resolved plain values, the
+/// same "app resolves `florui-config` itself, hands over plain data"
+/// pattern [`SingleInstance`] uses, so this crate still never depends on
+/// `florui-config`. A single trailing argument whose scheme matches a
+/// declared one becomes [`ActivationEvent::OpenUrl`]; one or more trailing
+/// arguments that *all* match a declared extension become
+/// [`ActivationEvent::OpenFiles`]. Anything else -- no trailing arguments,
+/// an unrecognized scheme/extension, or a mix of the two -- stays
+/// [`ActivationEvent::Launch`], since it's an ordinary argument this crate
+/// has no business reinterpreting. Matching is case-insensitive on both
+/// sides, mirroring how `florui-config` itself dedupes a declared scheme
+/// or extension.
+///
+/// Never touches the filesystem or a URL's own validity beyond its
+/// scheme -- classification only says what *kind* of activation this is,
+/// not that the payload is safe to open; the association itself grants no
+/// filesystem permission, per the same rule `florui-config`'s own schema
+/// documents.
+pub fn classify_launch(
+    args: Vec<String>,
+    url_schemes: &[String],
+    file_extensions: &[String],
+) -> ActivationEvent {
+    let trailing = &args[1.min(args.len())..];
+    if let [single] = trailing
+        && let Some(scheme) = url_scheme(single)
+        && url_schemes
+            .iter()
+            .any(|declared| declared.eq_ignore_ascii_case(scheme))
+    {
+        return ActivationEvent::OpenUrl {
+            url: single.clone(),
+        };
+    }
+    if !trailing.is_empty()
+        && trailing
+            .iter()
+            .all(|arg| matches_known_extension(arg, file_extensions))
+    {
+        return ActivationEvent::OpenFiles {
+            paths: trailing.iter().map(PathBuf::from).collect(),
+        };
+    }
+    ActivationEvent::Launch { args }
+}
+
+/// The scheme portion of `value` (before `://`), only if that scheme is
+/// well-formed per RFC 3986 (a letter, then letters/digits/`+`/`-`/`.`) --
+/// the exact rule `florui-config` itself validates a declared scheme
+/// against, so a runtime value is held to the same standard a config
+/// author already is.
+fn url_scheme(value: &str) -> Option<&str> {
+    let (scheme, _rest) = value.split_once("://")?;
+    let mut chars = scheme.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() => {}
+        _ => return None,
+    }
+    chars
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        .then_some(scheme)
+}
+
+fn matches_known_extension(arg: &str, file_extensions: &[String]) -> bool {
+    let Some(extension) = Path::new(arg).extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+    file_extensions
+        .iter()
+        .any(|declared| declared.eq_ignore_ascii_case(extension))
 }
 
 /// Named-object charset for a Windows mutex/pipe name is broad, but kept
@@ -146,6 +220,147 @@ pub fn use_activation_events() -> Option<ActivationEvents> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn args(rest: &[&str]) -> Vec<String> {
+        std::iter::once("app.exe".to_owned())
+            .chain(rest.iter().map(|s| s.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn no_trailing_arguments_is_a_plain_launch() {
+        let event = classify_launch(args(&[]), &["florui".to_owned()], &["garden".to_owned()]);
+        assert_eq!(event, ActivationEvent::Launch { args: args(&[]) });
+    }
+
+    #[test]
+    fn ordinary_flags_stay_a_plain_launch() {
+        let event = classify_launch(
+            args(&["--flag", "value"]),
+            &["florui".to_owned()],
+            &["garden".to_owned()],
+        );
+        assert_eq!(
+            event,
+            ActivationEvent::Launch {
+                args: args(&["--flag", "value"])
+            }
+        );
+    }
+
+    #[test]
+    fn a_declared_scheme_becomes_open_url() {
+        let event = classify_launch(args(&["florui://open?id=42"]), &["florui".to_owned()], &[]);
+        assert_eq!(
+            event,
+            ActivationEvent::OpenUrl {
+                url: "florui://open?id=42".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn scheme_matching_is_case_insensitive_on_both_sides() {
+        let event = classify_launch(args(&["FLORUI://open?id=42"]), &["Florui".to_owned()], &[]);
+        assert_eq!(
+            event,
+            ActivationEvent::OpenUrl {
+                url: "FLORUI://open?id=42".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn an_undeclared_scheme_stays_a_plain_launch() {
+        let event = classify_launch(args(&["other://open?id=42"]), &["florui".to_owned()], &[]);
+        assert_eq!(
+            event,
+            ActivationEvent::Launch {
+                args: args(&["other://open?id=42"])
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_uri_like_text_stays_a_plain_launch() {
+        let event = classify_launch(args(&["not a url"]), &["florui".to_owned()], &[]);
+        assert_eq!(
+            event,
+            ActivationEvent::Launch {
+                args: args(&["not a url"])
+            }
+        );
+    }
+
+    #[test]
+    fn a_single_matching_file_becomes_open_files() {
+        let event = classify_launch(
+            args(&["C:\\docs\\plan.garden"]),
+            &[],
+            &["garden".to_owned()],
+        );
+        assert_eq!(
+            event,
+            ActivationEvent::OpenFiles {
+                paths: vec![PathBuf::from("C:\\docs\\plan.garden")]
+            }
+        );
+    }
+
+    #[test]
+    fn multiple_matching_files_all_become_open_files() {
+        let event = classify_launch(args(&["a.garden", "b.garden"]), &[], &["garden".to_owned()]);
+        assert_eq!(
+            event,
+            ActivationEvent::OpenFiles {
+                paths: vec![PathBuf::from("a.garden"), PathBuf::from("b.garden")]
+            }
+        );
+    }
+
+    #[test]
+    fn extension_matching_is_case_insensitive() {
+        let event = classify_launch(args(&["plan.GARDEN"]), &[], &["garden".to_owned()]);
+        assert_eq!(
+            event,
+            ActivationEvent::OpenFiles {
+                paths: vec![PathBuf::from("plan.GARDEN")]
+            }
+        );
+    }
+
+    #[test]
+    fn a_mix_of_matching_and_unmatching_files_stays_a_plain_launch() {
+        let event = classify_launch(args(&["a.garden", "b.txt"]), &[], &["garden".to_owned()]);
+        assert_eq!(
+            event,
+            ActivationEvent::Launch {
+                args: args(&["a.garden", "b.txt"])
+            }
+        );
+    }
+
+    #[test]
+    fn a_file_argument_with_no_extension_stays_a_plain_launch() {
+        let event = classify_launch(args(&["README"]), &[], &["garden".to_owned()]);
+        assert_eq!(
+            event,
+            ActivationEvent::Launch {
+                args: args(&["README"])
+            }
+        );
+    }
+
+    #[test]
+    fn no_declared_schemes_or_extensions_never_classifies_anything() {
+        let event = classify_launch(args(&["florui://open", "a.garden"]), &[], &[]);
+        assert_eq!(
+            event,
+            ActivationEvent::Launch {
+                args: args(&["florui://open", "a.garden"])
+            }
+        );
+    }
 
     #[test]
     fn mutex_and_pipe_names_are_scoped_to_local_session_namespace() {
