@@ -143,18 +143,37 @@ impl ScrollRegistry {
             .map_or((0.0, 0.0), |entry| entry.offset.get())
     }
 
-    fn viewport_size(&self, id: &str) -> (f32, f32) {
+    pub(crate) fn viewport_size(&self, id: &str) -> (f32, f32) {
         self.entries
             .borrow()
             .get(id)
             .map_or((0.0, 0.0), |entry| entry.viewport_size)
     }
 
-    fn content_size(&self, id: &str) -> (f32, f32) {
+    pub(crate) fn content_size(&self, id: &str) -> (f32, f32) {
         self.entries
             .borrow()
             .get(id)
             .map_or((0.0, 0.0), |entry| entry.content_size)
+    }
+
+    /// Every registered id's current offset, keyed by its *current*
+    /// [`NodeId`] rather than its stable string id — for
+    /// [`florui_layout::apply_scroll_offsets`], which walks the arena by
+    /// [`NodeId`] and has no reason to know about string ids at all. An id
+    /// that no longer resolves to any node this render (removed from the
+    /// tree, not yet mounted) is simply absent, the same as never having
+    /// scrolled.
+    pub(crate) fn offsets_by_node(&self, arena: &Arena) -> HashMap<NodeId, (f32, f32)> {
+        self.entries
+            .borrow()
+            .iter()
+            .filter_map(|(id, entry)| {
+                arena
+                    .find(|a, candidate| a.id_attr(candidate) == Some(id.as_str()))
+                    .map(|node| (node, entry.offset.get()))
+            })
+            .collect()
     }
 }
 

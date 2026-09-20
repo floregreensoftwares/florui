@@ -192,6 +192,14 @@ impl UiRuntime {
         self.dirty.clone()
     }
 
+    /// This runtime's own [`ScrollRegistry`] — the same instance every
+    /// render's [`crate::use_scroll_offset`] reaches via context, reachable
+    /// here too for a real host's own input handling (e.g. a wheel event)
+    /// to drive directly, without going through a component at all.
+    pub(crate) fn scroll_registry(&self) -> Rc<ScrollRegistry> {
+        Rc::clone(&self.scroll_registry)
+    }
+
     /// Replaces the stylesheet driving every subsequent [`Self::update`].
     /// Only `rules` changes — `scope` (every `Signal`, `use_memo`,
     /// `use_effect`, and the rest of a component's persistent state) is
