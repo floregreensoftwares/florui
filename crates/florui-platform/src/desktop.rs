@@ -30,7 +30,7 @@ use taffy::prelude::*;
 use winit::application::ApplicationHandler;
 #[cfg(test)]
 use winit::dpi::PhysicalSize;
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
@@ -640,6 +640,14 @@ struct WindowState {
 /// much. Not spec-mandated to an exact number, only "bounded/debounced."
 const WINDOW_STATE_SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// Logical pixels one wheel "line" (`MouseScrollDelta::LineDelta`'s own
+/// unit) scrolls — real mouse wheels report in lines, not pixels, so this
+/// is the conversion factor into the logical pixels a scroll offset is
+/// measured in. Not spec-mandated to an exact number, the same as
+/// [`WINDOW_STATE_SAVE_DEBOUNCE`]: browsers commonly use a value in this
+/// range for the same conversion.
+const WHEEL_LINE_HEIGHT: f32 = 40.0;
+
 impl WindowState {
     fn viewport_scale(&self) -> ViewportScale {
         dpi::viewport_scale(self.window.inner_size(), self.window.scale_factor())
@@ -652,6 +660,87 @@ impl WindowState {
         ((x / factor) as f32, (y / factor) as f32)
     }
 
+    /// A real wheel/trackpad event's delta, converted to the logical
+    /// pixels a scroll *offset* moves by — a real mouse wheel reports
+    /// whole "lines" ([`WHEEL_LINE_HEIGHT`] logical pixels each), a
+    /// trackpad reports already-fine-grained physical pixels needing only
+    /// the same physical-to-logical scale [`Self::to_logical_cursor`]
+    /// already applies to cursor positions.
+    ///
+    /// Negated on both axes: `winit`'s own `MouseScrollDelta` doc defines a
+    /// positive value as "content...should move right and down (revealing
+    /// more content left and up)" — the opposite of this offset's own
+    /// scroll-position convention (also the DOM's `wheel` event
+    /// convention), where a positive value reveals more content
+    /// right/down by *increasing* the offset, not moving the content
+    /// itself right/down. Scrolling down (revealing lower content) must
+    /// increase `offset.1`, not decrease it.
+    fn to_logical_scroll_delta(&self, delta: MouseScrollDelta) -> (f32, f32) {
+        match delta {
+            MouseScrollDelta::LineDelta(x, y) => (-x * WHEEL_LINE_HEIGHT, -y * WHEEL_LINE_HEIGHT),
+            MouseScrollDelta::PixelDelta(position) => {
+                let factor = self.viewport_scale().scale_factor;
+                ((-position.x / factor) as f32, (-position.y / factor) as f32)
+            }
+        }
+    }
+
+    /// The nearest ancestor of `node` (`node` itself included) that is
+    /// real CSS's `overflow: scroll`/`auto` on the axis `(dx, dy)` actually
+    /// moves along, has more real content than its own viewport on that
+    /// axis, and carries an `id` attribute with a live
+    /// [`crate::use_scroll_offset`] registration for it — real CSS lets an
+    /// `overflow: auto` element with nothing to scroll pass a wheel event
+    /// through to a further ancestor, and an ancestor this scroll registry
+    /// has never heard of (no matching `use_scroll_offset` call, not just
+    /// no `id`) has no offset to move in the first place. `None` when no
+    /// ancestor qualifies — the event is simply not a scroll anywhere.
+    fn scrollable_ancestor_id(&self, node: NodeId, dx: f32, dy: f32) -> Option<String> {
+        let (arena, styles, ..) = self.runtime.geometry();
+        let registry = self.runtime.scroll_registry();
+        let mut current = Some(node);
+        while let Some(id) = current {
+            if let Some(style) = styles.get(&id)
+                && let Some(attr_id) = arena.id_attr(id)
+            {
+                let wants_x = dx != 0.0 && style.overflow_scrolls_x;
+                let wants_y = dy != 0.0 && style.overflow_scrolls_y;
+                let (viewport_w, viewport_h) = registry.viewport_size(attr_id);
+                let (content_w, content_h) = registry.content_size(attr_id);
+                let scrolls_x = wants_x && content_w > viewport_w;
+                let scrolls_y = wants_y && content_h > viewport_h;
+                if scrolls_x || scrolls_y {
+                    return Some(attr_id.to_string());
+                }
+            }
+            current = arena.parent(id);
+        }
+        None
+    }
+
+    /// Real mouse-wheel/trackpad input, hit-tested and routed to whichever
+    /// scrollable ancestor actually owns it — see
+    /// [`Self::scrollable_ancestor_id`]. Keyboard-driven scrolling (arrow
+    /// keys, Page Up/Down, Home/End) is a real, documented gap: no focus
+    /// model exists anywhere in this crate yet for a keyboard event to
+    /// resolve *which* element it should even move.
+    fn handle_mouse_wheel(&mut self, delta: MouseScrollDelta) {
+        let (dx, dy) = self.to_logical_scroll_delta(delta);
+        let (x, y) = self.to_logical_cursor(self.last_cursor.0, self.last_cursor.1);
+        let Some(hit) = self.runtime.hit_test(x, y) else {
+            return;
+        };
+        let Some(id) = self.scrollable_ancestor_id(hit, dx, dy) else {
+            return;
+        };
+        if self.runtime.scroll_registry().scroll_by(&id, dx, dy) {
+            let viewport = layout_viewport(self.viewport_scale());
+            self.runtime.update(viewport);
+            self.window.request_redraw();
+            self.refresh_animation_schedule();
+        }
+    }
+
     fn redraw(&mut self) {
         let scale_factor = self.viewport_scale().scale_factor;
         let window = self.window.clone();
@@ -662,8 +751,11 @@ impl WindowState {
             return;
         };
 
+        let scroll_registry = self.runtime.scroll_registry();
         let (arena, styles, layouts, font) = self.runtime.geometry_and_font_mut();
-        let physical_layouts = scale_layouts(layouts, scale_factor as f32);
+        let scroll_offsets = scroll_registry.offsets_by_node(arena);
+        let scrolled_layouts = florui_layout::apply_scroll_offsets(arena, layouts, &scroll_offsets);
+        let physical_layouts = scale_layouts(&scrolled_layouts, scale_factor as f32);
         if self.controls.input_mode() == InputMode::Selective {
             sync_input_regions(&self.controls, &window, arena, &physical_layouts);
         }
@@ -1307,6 +1399,7 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 button: MouseButton::Left,
                 ..
             } => state.handle_release(),
+            WindowEvent::MouseWheel { delta, .. } => state.handle_mouse_wheel(delta),
             _ => {}
         }
     }
