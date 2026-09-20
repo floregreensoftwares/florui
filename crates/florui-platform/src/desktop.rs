@@ -38,6 +38,7 @@ use crate::UiRuntime;
 use crate::activation::{ActivationEvent, ActivationEvents, ActivationQueue, SingleInstance};
 use crate::appearance::DecorationMode;
 use crate::dpi::{self, ViewportScale};
+use crate::drag_drop::{self, DragDropRegistration};
 use crate::file_dialog::{OpenFileDialogOutcome, SaveFileDialogOutcome};
 use crate::gpu::{self, GpuPresenter};
 use crate::single_instance::{self, HandoffOutcome, InstanceRole};
@@ -610,6 +611,11 @@ struct WindowState {
     css_path: Option<PathBuf>,
     /// Kept alive only to keep watching; dropping it stops delivery.
     _css_watcher: Option<RecommendedWatcher>,
+    /// Kept alive only to keep this window's drop target registered;
+    /// dropping it revokes it. `None` when registration itself failed
+    /// (see `crate::drag_drop::register`'s own doc) — drag-and-drop is
+    /// then simply unavailable for this window, not a fatal error.
+    _drag_drop: Option<DragDropRegistration>,
     /// What this window asked for — an explicit `Light`/`Dark` override
     /// makes it correctly immune to a live `WindowEvent::ThemeChanged`
     /// (the window is already immune on the `winit` side too once an
@@ -1008,6 +1014,7 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 .with_title(spec.title.clone())
                 .with_decorations(matches!(spec.options.decorations, DecorationMode::System))
                 .with_theme(crate::theme::requested_winit_theme(spec.options.theme));
+            attrs = drag_drop::disable_builtin_drag_and_drop(attrs);
             if let Some((width, height)) = spec.options.size {
                 attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(width, height));
             }
@@ -1140,6 +1147,7 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                         .send_event(UserEvent::SaveFileDialogResult(window_id, outcome));
                 },
             ));
+            let drag_drop_registration = drag_drop::register(&window, Rc::clone(&controls));
             let mut context_providers: Vec<Box<dyn Fn()>> = {
                 let controls = Rc::clone(&controls);
                 vec![Box::new(move || {
@@ -1201,6 +1209,7 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 next_animation_wake: None,
                 css_path: spec.css_path,
                 _css_watcher: css_watcher,
+                _drag_drop: drag_drop_registration,
                 theme_preference,
                 persistence: spec.options.persistence.clone(),
                 pending_geometry_save: None,

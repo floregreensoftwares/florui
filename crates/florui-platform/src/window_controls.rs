@@ -29,6 +29,7 @@ use std::sync::Arc;
 use florui_reactive::use_context;
 use winit::window::{BadIcon, Icon, Window};
 
+use crate::drag_drop::{DragEvent, DragPayload};
 use crate::file_dialog::{
     OpenFileDialogOptions, OpenFileDialogOutcome, SaveFileDialogOptions, SaveFileDialogOutcome,
 };
@@ -118,6 +119,56 @@ impl CloseGuard {
 /// outcome data crosses over from the background thread.
 type PendingDialogCallback<Outcome> = RefCell<Option<Box<dyn FnOnce(Outcome)>>>;
 
+type DragAcceptCallback = RefCell<Option<Box<dyn Fn(&DragPayload) -> bool>>>;
+type DragEventCallback = RefCell<Option<Box<dyn Fn(DragEvent)>>>;
+
+/// Split out for parallel structure with [`CloseGuard`]. Unlike it,
+/// unset (no policy registered) rejects every drop rather than allowing
+/// it -- accepting an untrusted external payload must be opt-in.
+#[derive(Default)]
+struct DragAcceptPolicy(DragAcceptCallback);
+
+impl DragAcceptPolicy {
+    fn set(&self, policy: impl Fn(&DragPayload) -> bool + 'static) {
+        *self.0.borrow_mut() = Some(Box::new(policy));
+    }
+
+    fn clear(&self) {
+        *self.0.borrow_mut() = None;
+    }
+
+    fn evaluate(&self, payload: &DragPayload) -> bool {
+        match self.0.borrow().as_ref() {
+            Some(policy) => policy(payload),
+            None => false,
+        }
+    }
+}
+
+/// The app's own drag-event callback -- unlike the file-dialog callbacks
+/// above, called synchronously and directly from inside the OS's own
+/// drag callback (see `crate::os::windows::drag_drop`'s own doc), since
+/// that callback already runs on this same UI thread; no background
+/// thread or `UserEvent` hand-off is involved.
+#[derive(Default)]
+struct DragEventHandler(DragEventCallback);
+
+impl DragEventHandler {
+    fn set(&self, handler: impl Fn(DragEvent) + 'static) {
+        *self.0.borrow_mut() = Some(Box::new(handler));
+    }
+
+    fn clear(&self) {
+        *self.0.borrow_mut() = None;
+    }
+
+    fn dispatch(&self, event: DragEvent) {
+        if let Some(handler) = self.0.borrow().as_ref() {
+            handler(event);
+        }
+    }
+}
+
 /// A real, live handle to the window a [`crate::desktop::DesktopHost`] is
 /// running — every method here acts on the actual window immediately, not
 /// a request the host might defer or ignore.
@@ -135,6 +186,8 @@ pub struct WindowControls {
     /// called and its result arriving.
     pending_open_dialog: PendingDialogCallback<OpenFileDialogOutcome>,
     pending_save_dialog: PendingDialogCallback<SaveFileDialogOutcome>,
+    drag_accept_policy: DragAcceptPolicy,
+    drag_event_handler: DragEventHandler,
 }
 
 impl WindowControls {
@@ -153,6 +206,8 @@ impl WindowControls {
             notify_save_dialog_result: Arc::new(notify_save_dialog_result),
             pending_open_dialog: RefCell::new(None),
             pending_save_dialog: RefCell::new(None),
+            drag_accept_policy: DragAcceptPolicy::default(),
+            drag_event_handler: DragEventHandler::default(),
         }
     }
 
@@ -332,6 +387,45 @@ impl WindowControls {
     pub(crate) fn confirm_close(&self) -> bool {
         self.close_guard.confirm()
     }
+
+    /// `policy` decides whether a hovering external drag payload is
+    /// accepted -- called synchronously and directly from inside the OS's
+    /// own drag callback (see `crate::os::windows::drag_drop`'s own doc),
+    /// so it must not block. Unset (the default) rejects every drop,
+    /// since accepting an untrusted external payload must be opt-in --
+    /// the opposite default from [`Self::set_close_guard`]. Replaces any
+    /// previous policy.
+    pub fn set_drag_accept_policy(&self, policy: impl Fn(&DragPayload) -> bool + 'static) {
+        self.drag_accept_policy.set(policy);
+    }
+
+    /// Removes the policy; every drop is rejected again until a new one
+    /// is set.
+    pub fn clear_drag_accept_policy(&self) {
+        self.drag_accept_policy.clear();
+    }
+
+    /// `handler` receives every [`DragEvent`] for this window for as long
+    /// as it stays registered -- see [`DragEvent`]'s own doc for exactly
+    /// which variants fire for a payload
+    /// [`Self::set_drag_accept_policy`] rejected. Replaces any previous
+    /// handler.
+    pub fn on_drag_event(&self, handler: impl Fn(DragEvent) + 'static) {
+        self.drag_event_handler.set(handler);
+    }
+
+    /// Removes the handler; future drag events are silently dropped.
+    pub fn clear_drag_event_handler(&self) {
+        self.drag_event_handler.clear();
+    }
+
+    pub(crate) fn evaluate_drag_accept(&self, payload: &DragPayload) -> bool {
+        self.drag_accept_policy.evaluate(payload)
+    }
+
+    pub(crate) fn dispatch_drag_event(&self, event: DragEvent) {
+        self.drag_event_handler.dispatch(event);
+    }
 }
 
 impl Drop for WindowControls {
@@ -442,6 +536,80 @@ mod tests {
         guard.set(|| true);
         assert!(
             guard.confirm(),
+            "the second set() must fully replace the first, not combine with it"
+        );
+    }
+
+    fn files_payload() -> DragPayload {
+        DragPayload::Files(vec!["dropped.txt".into()])
+    }
+
+    #[test]
+    fn drag_accept_policy_rejects_by_default() {
+        let policy = DragAcceptPolicy::default();
+        assert!(
+            !policy.evaluate(&files_payload()),
+            "no policy registered must reject, unlike CloseGuard's default-allow"
+        );
+    }
+
+    #[test]
+    fn drag_accept_policy_can_accept() {
+        let policy = DragAcceptPolicy::default();
+        policy.set(|_| true);
+        assert!(policy.evaluate(&files_payload()));
+    }
+
+    #[test]
+    fn drag_accept_policy_clear_restores_the_default_reject() {
+        let policy = DragAcceptPolicy::default();
+        policy.set(|_| true);
+        policy.clear();
+        assert!(!policy.evaluate(&files_payload()));
+    }
+
+    #[test]
+    fn drag_accept_policy_replaces_not_combines() {
+        let policy = DragAcceptPolicy::default();
+        policy.set(|_| true);
+        policy.set(|_| false);
+        assert!(
+            !policy.evaluate(&files_payload()),
+            "the second set() must fully replace the first"
+        );
+    }
+
+    #[test]
+    fn drag_event_handler_is_a_silent_no_op_by_default() {
+        let handler = DragEventHandler::default();
+        handler.dispatch(DragEvent::Leave);
+    }
+
+    #[test]
+    fn drag_event_handler_dispatches_to_the_registered_handler() {
+        let seen = Rc::new(RefCell::new(None));
+        let handler = DragEventHandler::default();
+        let seen_in_handler = Rc::clone(&seen);
+        handler.set(move |event| *seen_in_handler.borrow_mut() = Some(event));
+
+        handler.dispatch(DragEvent::Leave);
+        assert_eq!(*seen.borrow(), Some(DragEvent::Leave));
+    }
+
+    #[test]
+    fn drag_event_handler_replaces_not_combines() {
+        let calls = Rc::new(RefCell::new(0));
+        let handler = DragEventHandler::default();
+
+        let first_calls = Rc::clone(&calls);
+        handler.set(move |_| *first_calls.borrow_mut() += 1);
+        let second_calls = Rc::clone(&calls);
+        handler.set(move |_| *second_calls.borrow_mut() += 10);
+
+        handler.dispatch(DragEvent::Leave);
+        assert_eq!(
+            *calls.borrow(),
+            10,
             "the second set() must fully replace the first, not combine with it"
         );
     }

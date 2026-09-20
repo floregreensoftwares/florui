@@ -15,7 +15,7 @@ default = ["desktop"]
 # driving UiRuntime on its own shouldn't have to pull them in.
 # `dep:windows-sys` is a no-op outside the Windows-only dependency table
 # below — every other target simply never has it in its resolved graph.
-desktop = ["dep:notify", "dep:softbuffer", "dep:winit", "dep:wgpu", "dep:pollster", "dep:windows-sys", "dep:windows", "dep:florui-icon", "dep:serde", "dep:serde_json"]
+desktop = ["dep:notify", "dep:softbuffer", "dep:winit", "dep:wgpu", "dep:pollster", "dep:windows-sys", "dep:windows", "dep:windows-core", "dep:florui-icon", "dep:serde", "dep:serde_json"]
 
 [dependencies]
 florui = { path = "../florui" }
@@ -79,10 +79,32 @@ windows-sys = { version = "0.60", optional = true, features = [
 # sibling instead. Not a new compilation unit in practice: `windows`
 # 0.62.2 is already resolved here via `fontique`/`gpu-allocator`/
 # `wgpu-hal`, all already in this crate's own dependency graph.
+# `os::windows::drag_drop`'s own dependency additions: `Win32_System_Ole`
+# (`IDropTarget`, `DROPEFFECT_*`, `RegisterDragDrop`/`RevokeDragDrop`,
+# `OleInitialize`, and `CF_HDROP` -- confirmed to live here, not
+# `Win32_UI_Shell` as might be assumed), `Win32_Graphics_Gdi`
+# (`ScreenToClient` -- confirmed to live here, not
+# `Win32_UI_WindowsAndMessaging`), `Win32_System_SystemServices`
+# (`IDropTarget_Impl::DragEnter`'s own `MODIFIERKEYS_FLAGS` parameter type),
+# and `Win32_System_Com_StructuredStorage` (required by this version for
+# `IDataObject::GetData` itself, confirmed by its own `#[cfg(...)]` gate in
+# the generated source) -- every one of these confirmed by grepping the
+# pinned version's own generated source before assuming a feature name,
+# not guessed.
 windows = { version = "0.62", optional = true, features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# `#[windows::core::implement(...)]` (used by `os::windows::drag_drop`)
+# expands to code referencing the literal crate path `windows_core::...`,
+# which only resolves with `windows-core` as a direct dependency here --
+# `windows::core` is merely a re-export, not the crate itself at the
+# extern prelude. Pinned to the exact same version as `windows` above.
+windows-core = { version = "0.62.2", optional = true }
