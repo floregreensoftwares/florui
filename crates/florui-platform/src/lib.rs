@@ -37,6 +37,15 @@ pub use activation::{
 mod single_instance;
 
 #[cfg(feature = "desktop")]
+mod file_dialog;
+
+#[cfg(feature = "desktop")]
+pub use file_dialog::{
+    FileDialogFilter, OpenFileDialogOptions, OpenFileDialogOutcome, SaveFileDialogOptions,
+    SaveFileDialogOutcome,
+};
+
+#[cfg(feature = "desktop")]
 pub mod accessibility;
 
 #[cfg(feature = "desktop")]

@@ -29,6 +29,10 @@ use std::sync::Arc;
 use florui_reactive::use_context;
 use winit::window::{BadIcon, Icon, Window};
 
+use crate::file_dialog::{
+    OpenFileDialogOptions, OpenFileDialogOutcome, SaveFileDialogOptions, SaveFileDialogOutcome,
+};
+
 /// See this module's own doc, "Marking a draggable region."
 pub const WINDOW_DRAG_REGION_ID: &str = "florui-window-drag-region";
 
@@ -108,6 +112,11 @@ impl CloseGuard {
     }
 }
 
+/// The app's own file-dialog callback, deliberately not `Send` (it may
+/// close over `Signal`s) -- never leaves the UI thread; only the plain
+/// outcome data crosses over from the background thread.
+type PendingDialogCallback<Outcome> = RefCell<Option<Box<dyn FnOnce(Outcome)>>>;
+
 /// A real, live handle to the window a [`crate::desktop::DesktopHost`] is
 /// running — every method here acts on the actual window immediately, not
 /// a request the host might defer or ignore.
@@ -116,15 +125,95 @@ pub struct WindowControls {
     request_close: Box<dyn Fn()>,
     close_guard: CloseGuard,
     input_mode: Cell<InputMode>,
+    /// `Arc`, not `Box` like `request_close` -- a *clone* of this needs to
+    /// move into the background thread [`Self::open_file_dialog`] spawns,
+    /// while the original stays here for the next call.
+    notify_open_dialog_result: Arc<dyn Fn(OpenFileDialogOutcome) + Send + Sync>,
+    notify_save_dialog_result: Arc<dyn Fn(SaveFileDialogOutcome) + Send + Sync>,
+    /// `Some` between [`Self::open_file_dialog`]/`save_file_dialog` being
+    /// called and its result arriving.
+    pending_open_dialog: PendingDialogCallback<OpenFileDialogOutcome>,
+    pending_save_dialog: PendingDialogCallback<SaveFileDialogOutcome>,
 }
 
 impl WindowControls {
-    pub(crate) fn new(window: Arc<Window>, request_close: impl Fn() + 'static) -> Self {
+    pub(crate) fn new(
+        window: Arc<Window>,
+        request_close: impl Fn() + 'static,
+        notify_open_dialog_result: impl Fn(OpenFileDialogOutcome) + Send + Sync + 'static,
+        notify_save_dialog_result: impl Fn(SaveFileDialogOutcome) + Send + Sync + 'static,
+    ) -> Self {
         Self {
             window,
             request_close: Box::new(request_close),
             close_guard: CloseGuard::default(),
             input_mode: Cell::new(InputMode::Normal),
+            notify_open_dialog_result: Arc::new(notify_open_dialog_result),
+            notify_save_dialog_result: Arc::new(notify_save_dialog_result),
+            pending_open_dialog: RefCell::new(None),
+            pending_save_dialog: RefCell::new(None),
+        }
+    }
+
+    /// Shows a real native "Open File" dialog, asynchronously: this
+    /// method returns immediately, and `on_result` runs later, on this
+    /// same UI thread, once the dialog closes -- safe to touch `Signal`s
+    /// or any other component state directly from `on_result`. If a
+    /// dialog is already pending for this window, `on_result` is called
+    /// immediately with [`OpenFileDialogOutcome::Failed`] rather than
+    /// silently replacing or queuing behind the first one.
+    pub fn open_file_dialog(
+        &self,
+        options: OpenFileDialogOptions,
+        on_result: impl FnOnce(OpenFileDialogOutcome) + 'static,
+    ) {
+        if self.pending_open_dialog.borrow().is_some() {
+            on_result(OpenFileDialogOutcome::Failed(
+                "another open-file dialog is already showing for this window".to_owned(),
+            ));
+            return;
+        }
+        *self.pending_open_dialog.borrow_mut() = Some(Box::new(on_result));
+        let notify = Arc::clone(&self.notify_open_dialog_result);
+        crate::file_dialog::spawn_open_dialog(&self.window, options, move |outcome| {
+            notify(outcome);
+        });
+    }
+
+    /// See [`Self::open_file_dialog`]'s own doc -- same contract, for a
+    /// native "Save File" dialog instead.
+    pub fn save_file_dialog(
+        &self,
+        options: SaveFileDialogOptions,
+        on_result: impl FnOnce(SaveFileDialogOutcome) + 'static,
+    ) {
+        if self.pending_save_dialog.borrow().is_some() {
+            on_result(SaveFileDialogOutcome::Failed(
+                "another save-file dialog is already showing for this window".to_owned(),
+            ));
+            return;
+        }
+        *self.pending_save_dialog.borrow_mut() = Some(Box::new(on_result));
+        let notify = Arc::clone(&self.notify_save_dialog_result);
+        crate::file_dialog::spawn_save_dialog(&self.window, options, move |outcome| {
+            notify(outcome);
+        });
+    }
+
+    /// Called by [`crate::desktop::DesktopHost`] once `outcome` arrives
+    /// via its own `UserEvent` -- takes and invokes whichever callback
+    /// [`Self::open_file_dialog`] stored, on this same UI thread.
+    pub(crate) fn deliver_open_dialog_result(&self, outcome: OpenFileDialogOutcome) {
+        if let Some(callback) = self.pending_open_dialog.borrow_mut().take() {
+            callback(outcome);
+        }
+    }
+
+    /// See [`Self::deliver_open_dialog_result`]'s own doc -- same
+    /// contract, for [`Self::save_file_dialog`] instead.
+    pub(crate) fn deliver_save_dialog_result(&self, outcome: SaveFileDialogOutcome) {
+        if let Some(callback) = self.pending_save_dialog.borrow_mut().take() {
+            callback(outcome);
         }
     }
 
