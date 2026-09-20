@@ -152,7 +152,9 @@ pub fn render_fixture(
         height: AvailableSpace::Definite(height_css_px as f32),
     };
     let mut font = florui_text::Font::load_embedded();
-    let (styles, layouts) = florui_layout::compute_with_style(
+    let florui_layout::LayoutResult {
+        styles, layouts, ..
+    } = florui_layout::compute_with_style(
         &mut font,
         &arena,
         &rules,

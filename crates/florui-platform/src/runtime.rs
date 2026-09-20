@@ -251,7 +251,9 @@ impl UiRuntime {
         self.arena = Arena::build(&tree);
         self.animation_timeline
             .advance_to(self.animation_epoch.elapsed().as_secs_f64());
-        (self.styles, self.layouts) = florui_layout::compute_with_style(
+        let florui_layout::LayoutResult {
+            styles, layouts, ..
+        } = florui_layout::compute_with_style(
             &mut self.font,
             &self.arena,
             &self.rules,
@@ -261,6 +263,8 @@ impl UiRuntime {
             viewport,
         )
         .expect("this tree's explicit sizes never produce a layout failure");
+        self.styles = styles;
+        self.layouts = layouts;
         // After layout, not before: a committed-size observer must see
         // this render's own real geometry, not the previous one's.
         self.size_observers.notify(&self.arena, &self.layouts);
