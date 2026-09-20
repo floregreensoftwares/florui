@@ -226,7 +226,122 @@ fn environment_checks() -> Vec<Check> {
         tool_version_check("rust.rustc", "rustc", true),
         tool_version_check("rust.rustfmt", "rustfmt", false),
         reduced_motion_check(),
+        single_instance_capability_check(),
+        window_persistence_capability_check(),
     ]
+}
+
+/// A dedicated, throwaway identifier -- never a real project's own -- so
+/// this probe can never collide with (or interfere with) an actually
+/// running instance of anything.
+const CAPABILITY_PROBE_IDENTIFIER: &str = "florui-doctor-probe";
+
+/// Real evidence (a real named mutex plus a security-descriptor-restricted
+/// named pipe, both created and released) that single-instance activation
+/// could actually work on this machine -- not an assumption from the OS
+/// merely being Windows. Machine-level, like [`reduced_motion_check`]:
+/// independent of whether the current project even opts into it.
+fn single_instance_capability_check() -> Check {
+    if !cfg!(target_os = "windows") {
+        return Check {
+            id: "environment.single_instance_capability",
+            category: "environment",
+            status: Status::NotApplicable,
+            required: false,
+            observed: None,
+            expected: None,
+            evidence: "no equivalent single-instance IPC mechanism exists for this platform yet"
+                .to_string(),
+            reason: None,
+            remediation: None,
+        };
+    }
+    if florui_platform::probe_single_instance_capability() {
+        Check {
+            id: "environment.single_instance_capability",
+            category: "environment",
+            status: Status::Pass,
+            required: false,
+            observed: Some("true".to_string()),
+            expected: None,
+            evidence: "a real named mutex and a security-descriptor-restricted named pipe were \
+                       both created and released successfully"
+                .to_string(),
+            reason: None,
+            remediation: None,
+        }
+    } else {
+        Check {
+            id: "environment.single_instance_capability",
+            category: "environment",
+            status: Status::Fail,
+            required: false,
+            observed: Some("false".to_string()),
+            expected: None,
+            evidence: "could not create the real named mutex and/or security-descriptor-\
+                       restricted named pipe single-instance activation depends on"
+                .to_string(),
+            reason: None,
+            remediation: Some(
+                "check local Windows security policy/permissions for named-object creation"
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+/// Real evidence (a window-state file actually written to and removed
+/// from the OS application-data location) that window persistence could
+/// actually work on this machine -- not an assumption from `LOCALAPPDATA`
+/// merely being set. Machine-level, like [`reduced_motion_check`]:
+/// independent of whether the current project even opts into it.
+fn window_persistence_capability_check() -> Check {
+    if !cfg!(target_os = "windows") {
+        return Check {
+            id: "environment.window_persistence_capability",
+            category: "environment",
+            status: Status::NotApplicable,
+            required: false,
+            observed: None,
+            expected: None,
+            evidence: "no OS application-data location convention is wired up for this platform \
+                       yet"
+            .to_string(),
+            reason: None,
+            remediation: None,
+        };
+    }
+    if florui_platform::probe_persistence_capability(CAPABILITY_PROBE_IDENTIFIER) {
+        Check {
+            id: "environment.window_persistence_capability",
+            category: "environment",
+            status: Status::Pass,
+            required: false,
+            observed: Some("true".to_string()),
+            expected: None,
+            evidence: "a window-state file was written to and removed from the OS \
+                       application-data location successfully"
+                .to_string(),
+            reason: None,
+            remediation: None,
+        }
+    } else {
+        Check {
+            id: "environment.window_persistence_capability",
+            category: "environment",
+            status: Status::Fail,
+            required: false,
+            observed: Some("false".to_string()),
+            expected: None,
+            evidence: "could not write a window-state file to the OS application-data location \
+                       (LOCALAPPDATA) window persistence depends on"
+                .to_string(),
+            reason: None,
+            remediation: Some(
+                "check that LOCALAPPDATA is set and writable for the current user".to_string(),
+            ),
+        }
+    }
 }
 
 /// A benign, synchronous, side-effect-free global-state read (unlike
@@ -451,6 +566,14 @@ fn project_checks_at(
     ));
     checks.push(config_environment_known_check(&resolution));
     checks.push(config_identity_collision_check(config_exists, &resolution));
+    checks.push(config_window_persistence_identity_check(
+        config_exists,
+        &resolution,
+    ));
+    checks.push(config_single_instance_identity_check(
+        config_exists,
+        &resolution,
+    ));
     checks.extend(config_icon_asset_checks(
         config_exists,
         config_target,
@@ -871,6 +994,98 @@ fn config_identity_collision_check(
              configuration"
                 .to_string(),
         ),
+    }
+}
+
+/// `[window.persistence]`/`[app.activation].single_instance` both key
+/// their real OS-side state (a `LOCALAPPDATA` path, a named mutex/pipe)
+/// off `app.identifier` -- enabling either one without also setting an
+/// identifier is not a schema-level error (both fields are independently
+/// optional), but it does mean the feature silently never does anything,
+/// exactly how `WindowPersistence`/`SingleInstance`'s own app-side
+/// resolution helpers already degrade (`None`, no diagnostic). This is
+/// the one place that silent gap becomes visible.
+fn config_window_persistence_identity_check(
+    config_exists: bool,
+    resolution: &Result<florui_config::Resolution, florui_config::ConfigError>,
+) -> Check {
+    const ID: &str = "config.window_persistence_identity";
+    if !config_exists {
+        return check_not_applicable(ID, "no florui.config.toml to check");
+    }
+    let resolution = match resolution {
+        Ok(resolution) => resolution,
+        Err(_) => {
+            return check_unknown(
+                ID,
+                "not evaluated: florui.config.toml failed to resolve".to_string(),
+            );
+        }
+    };
+    if !resolution.config.window.persistence.enabled {
+        return check_not_applicable(ID, "[window.persistence] is not enabled");
+    }
+    match &resolution.config.app.identifier {
+        Some(identifier) => check_pass(
+            ID,
+            format!("window persistence is enabled with app.identifier \"{identifier}\""),
+        ),
+        None => Check {
+            id: ID,
+            category: "config",
+            status: Status::Warning,
+            required: false,
+            observed: None,
+            expected: Some("app.identifier set".to_string()),
+            evidence: "[window.persistence] is enabled but app.identifier is unset -- \
+                       persistence silently never saves or restores anything without it"
+                .to_string(),
+            reason: None,
+            remediation: Some("set app.identifier in florui.config.toml".to_string()),
+        },
+    }
+}
+
+/// See [`config_window_persistence_identity_check`]'s own doc -- the same
+/// silent-no-op gap, for `[app.activation].single_instance` instead.
+fn config_single_instance_identity_check(
+    config_exists: bool,
+    resolution: &Result<florui_config::Resolution, florui_config::ConfigError>,
+) -> Check {
+    const ID: &str = "config.single_instance_identity";
+    if !config_exists {
+        return check_not_applicable(ID, "no florui.config.toml to check");
+    }
+    let resolution = match resolution {
+        Ok(resolution) => resolution,
+        Err(_) => {
+            return check_unknown(
+                ID,
+                "not evaluated: florui.config.toml failed to resolve".to_string(),
+            );
+        }
+    };
+    if !resolution.config.app.activation.single_instance {
+        return check_not_applicable(ID, "[app.activation].single_instance is not enabled");
+    }
+    match &resolution.config.app.identifier {
+        Some(identifier) => check_pass(
+            ID,
+            format!("single-instance activation is enabled with app.identifier \"{identifier}\""),
+        ),
+        None => Check {
+            id: ID,
+            category: "config",
+            status: Status::Warning,
+            required: false,
+            observed: None,
+            expected: Some("app.identifier set".to_string()),
+            evidence: "[app.activation].single_instance is enabled but app.identifier is unset \
+                       -- single-instance enforcement cannot derive a mutex/pipe name without it"
+                .to_string(),
+            reason: None,
+            remediation: Some("set app.identifier in florui.config.toml".to_string()),
+        },
     }
 }
 
@@ -1591,5 +1806,117 @@ mod tests {
             find(&checks, "config.identity_collision").status,
             Status::Fail
         );
+    }
+
+    #[test]
+    fn window_persistence_identity_check_is_not_applicable_when_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_project(dir.path());
+        std::fs::write(
+            dir.path().join("florui.config.toml"),
+            "schema_version = 1\n[app]\nidentifier = \"com.floregreen.garden\"\n",
+        )
+        .unwrap();
+        let checks = project_checks_at(dir.path(), None, None, "native");
+        assert_eq!(
+            find(&checks, "config.window_persistence_identity").status,
+            Status::NotApplicable
+        );
+    }
+
+    #[test]
+    fn window_persistence_identity_check_passes_with_an_identifier() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_project(dir.path());
+        std::fs::write(
+            dir.path().join("florui.config.toml"),
+            "schema_version = 1\n[app]\nidentifier = \"com.floregreen.garden\"\n\
+             [window.persistence]\nenabled = true\n",
+        )
+        .unwrap();
+        let checks = project_checks_at(dir.path(), None, None, "native");
+        assert_eq!(
+            find(&checks, "config.window_persistence_identity").status,
+            Status::Pass
+        );
+    }
+
+    #[test]
+    fn window_persistence_identity_check_warns_without_an_identifier() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_project(dir.path());
+        std::fs::write(
+            dir.path().join("florui.config.toml"),
+            "schema_version = 1\n[window.persistence]\nenabled = true\n",
+        )
+        .unwrap();
+        let checks = project_checks_at(dir.path(), None, None, "native");
+        assert_eq!(
+            find(&checks, "config.window_persistence_identity").status,
+            Status::Warning
+        );
+    }
+
+    #[test]
+    fn single_instance_identity_check_is_not_applicable_when_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_project(dir.path());
+        std::fs::write(
+            dir.path().join("florui.config.toml"),
+            "schema_version = 1\n[app]\nidentifier = \"com.floregreen.garden\"\n",
+        )
+        .unwrap();
+        let checks = project_checks_at(dir.path(), None, None, "native");
+        assert_eq!(
+            find(&checks, "config.single_instance_identity").status,
+            Status::NotApplicable
+        );
+    }
+
+    #[test]
+    fn single_instance_identity_check_passes_with_an_identifier() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_project(dir.path());
+        std::fs::write(
+            dir.path().join("florui.config.toml"),
+            "schema_version = 1\n[app]\nidentifier = \"com.floregreen.garden\"\n\
+             [app.activation]\nsingle_instance = true\n",
+        )
+        .unwrap();
+        let checks = project_checks_at(dir.path(), None, None, "native");
+        assert_eq!(
+            find(&checks, "config.single_instance_identity").status,
+            Status::Pass
+        );
+    }
+
+    #[test]
+    fn single_instance_identity_check_warns_without_an_identifier() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_project(dir.path());
+        std::fs::write(
+            dir.path().join("florui.config.toml"),
+            "schema_version = 1\n[app.activation]\nsingle_instance = true\n",
+        )
+        .unwrap();
+        let checks = project_checks_at(dir.path(), None, None, "native");
+        assert_eq!(
+            find(&checks, "config.single_instance_identity").status,
+            Status::Warning
+        );
+    }
+
+    #[test]
+    fn environment_checks_include_the_new_capability_probes() {
+        let checks = environment_checks();
+        let single_instance = find(&checks, "environment.single_instance_capability");
+        let persistence = find(&checks, "environment.window_persistence_capability");
+        if cfg!(target_os = "windows") {
+            assert_eq!(single_instance.status, Status::Pass);
+            assert_eq!(persistence.status, Status::Pass);
+        } else {
+            assert_eq!(single_instance.status, Status::NotApplicable);
+            assert_eq!(persistence.status, Status::NotApplicable);
+        }
     }
 }
