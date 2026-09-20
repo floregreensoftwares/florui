@@ -1120,6 +1120,39 @@ pub fn absolute_position(
     (x, y)
 }
 
+/// Shifts every node's own box by its *immediate* parent's scroll offset,
+/// if `scroll_offsets` has one — sufficient because [`absolute_position`]'s
+/// own ancestor-chain summation already propagates that one-level shift to
+/// every descendant beneath it once this returns. A scrolling node's own
+/// box (its clip boundary in its own parent's coordinates) is never
+/// shifted by its own offset, only by an ancestor's — scrolling moves a
+/// node's *content*, not the node itself.
+pub fn apply_scroll_offsets(
+    arena: &Arena,
+    layouts: &HashMap<NodeId, BoxLayout>,
+    scroll_offsets: &HashMap<NodeId, (f32, f32)>,
+) -> HashMap<NodeId, BoxLayout> {
+    layouts
+        .iter()
+        .map(|(&id, &layout)| {
+            let Some((offset_x, offset_y)) = arena
+                .parent(id)
+                .and_then(|parent| scroll_offsets.get(&parent).copied())
+            else {
+                return (id, layout);
+            };
+            (
+                id,
+                BoxLayout {
+                    x: layout.x - offset_x,
+                    y: layout.y - offset_y,
+                    ..layout
+                },
+            )
+        })
+        .collect()
+}
+
 /// The topmost node whose box contains `(x, y)` (both relative to the
 /// layout root, the same space [`absolute_position`] reports) — "topmost"
 /// meaning whichever one `florui_paint` would have painted last, since an
@@ -1579,6 +1612,49 @@ mod tests {
         let leaf = arena.children(inner)[0];
 
         assert_eq!(absolute_position(&arena, &layouts, leaf), (15.0, 15.0));
+    }
+
+    #[test]
+    fn apply_scroll_offsets_shifts_only_the_scrolled_node_s_direct_children() {
+        let tree: Element = view! {
+            <div class="card">
+                <div class="inner">
+                    <div class="leaf" />
+                </div>
+            </div>
+        };
+        let (arena, layouts) = layout_for(
+            &tree,
+            "
+            .card { width: 200px; height: 200px; padding-top: 10px; padding-left: 10px; }
+            .inner { width: 100px; height: 100px; padding-top: 5px; padding-left: 5px; }
+            .leaf { width: 10px; height: 10px; }
+            ",
+        );
+        let card = arena.roots()[0];
+        let inner = arena.children(card)[0];
+        let leaf = arena.children(inner)[0];
+
+        let mut scroll_offsets = HashMap::new();
+        scroll_offsets.insert(card, (3.0, 4.0));
+        let scrolled = apply_scroll_offsets(&arena, &layouts, &scroll_offsets);
+
+        // `card` is not itself anyone's scrolled child -- its own box is
+        // untouched.
+        assert_eq!(scrolled[&card].x, layouts[&card].x);
+        assert_eq!(scrolled[&card].y, layouts[&card].y);
+        // `inner` is `card`'s direct child -- shifted by `card`'s offset.
+        assert_eq!(scrolled[&inner].x, layouts[&inner].x - 3.0);
+        assert_eq!(scrolled[&inner].y, layouts[&inner].y - 4.0);
+        // `leaf` is a grandchild, not a direct child of the scrolled node --
+        // its own entry is untouched; `absolute_position` against `scrolled`
+        // still picks up the shift by summing through the already-shifted
+        // `inner`.
+        assert_eq!(scrolled[&leaf].x, layouts[&leaf].x);
+        assert_eq!(
+            absolute_position(&arena, &scrolled, leaf),
+            (15.0 - 3.0, 15.0 - 4.0)
+        );
     }
 
     /// Taffy rounds final layout to whole pixels by default, so a value
