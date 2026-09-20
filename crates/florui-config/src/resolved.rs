@@ -40,12 +40,63 @@ pub struct AppConfig {
     pub locales: LocalesConfig,
 }
 
+impl AppConfig {
+    /// Resolves the effective product name/description for `requested` (a
+    /// locale tag; matching is case-insensitive, since a caller and a
+    /// config author might reasonably disagree on casing) -- the identity
+    /// locale fallback contract `app.default_locale` configures. Falls
+    /// back per field, not per locale entry: a declared locale missing
+    /// one field (e.g. `[app.locales.pt-BR]` with a `name` but no
+    /// `description`) still contributes its own `name` while falling
+    /// back to a less-specific value for the missing field, rather than
+    /// discarding the whole match. The chain for each field is:
+    /// `requested`'s own entry, then `default_locale`'s entry, then the
+    /// base, locale-independent `app.name`/`app.description` -- never an
+    /// error, since requesting a locale nobody declared is an ordinary,
+    /// expected case, not a misconfiguration.
+    pub fn localized_identity(&self, requested: &str) -> LocalizedIdentity<'_> {
+        let requested_locale = self.locales.find(requested);
+        let default_locale = self.locales.find(&self.locales.default_locale);
+        let name = requested_locale
+            .and_then(|locale| locale.name.as_deref())
+            .or_else(|| default_locale.and_then(|locale| locale.name.as_deref()))
+            .unwrap_or(&self.name);
+        let description = requested_locale
+            .and_then(|locale| locale.description.as_deref())
+            .or_else(|| default_locale.and_then(|locale| locale.description.as_deref()))
+            .or(self.description.as_deref());
+        LocalizedIdentity { name, description }
+    }
+}
+
+/// The product name/description [`AppConfig::localized_identity`]
+/// resolved for one specific requested locale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalizedIdentity<'a> {
+    pub name: &'a str,
+    pub description: Option<&'a str>,
+}
+
 /// `default_locale` is always populated, defaulting to `"en"` even with no
 /// `[app.locales]` declared at all.
 #[derive(Debug, Clone)]
 pub struct LocalesConfig {
     pub default_locale: String,
     pub locales: BTreeMap<String, LocaleConfig>,
+}
+
+impl LocalesConfig {
+    /// Case-insensitive exact match against a declared locale tag -- not
+    /// a language-only ("pt" matching a declared "pt-BR") or CLDR-style
+    /// fallback; the contract this crate implements is deliberately just
+    /// "requested, else default_locale, else the base identity," per
+    /// `application-config.md`'s own text.
+    fn find(&self, tag: &str) -> Option<&LocaleConfig> {
+        self.locales
+            .iter()
+            .find(|(declared, _)| declared.eq_ignore_ascii_case(tag))
+            .map(|(_, locale)| locale)
+    }
 }
 
 #[derive(Debug, Clone)]

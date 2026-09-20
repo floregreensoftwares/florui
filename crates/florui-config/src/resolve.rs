@@ -2048,6 +2048,95 @@ mod tests {
     }
 
     #[test]
+    fn localized_identity_matches_the_requested_locale_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app.locales.en]\nname = \"Garden\"\ndescription = \"A workspace for your ideas\"\n[app.locales.pt-BR]\nname = \"Jardim\"\ndescription = \"Um espaco para suas ideias\"\n",
+        );
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
+        let identity = resolution.config.app.localized_identity("pt-BR");
+        assert_eq!(identity.name, "Jardim");
+        assert_eq!(identity.description, Some("Um espaco para suas ideias"));
+    }
+
+    #[test]
+    fn localized_identity_matching_is_case_insensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app.locales.pt-BR]\nname = \"Jardim\"\n",
+        );
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
+        assert_eq!(
+            resolution.config.app.localized_identity("PT-br").name,
+            "Jardim"
+        );
+    }
+
+    #[test]
+    fn localized_identity_falls_back_to_default_locale_when_requested_is_undeclared() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app]\ndefault_locale = \"en\"\n[app.locales.en]\nname = \"Garden\"\ndescription = \"A workspace for your ideas\"\n",
+        );
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
+        let identity = resolution.config.app.localized_identity("fr");
+        assert_eq!(identity.name, "Garden");
+        assert_eq!(identity.description, Some("A workspace for your ideas"));
+    }
+
+    #[test]
+    fn localized_identity_falls_back_to_the_base_identity_with_no_locales_declared() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "florui.config.toml", "schema_version = 1\n");
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
+        let identity = resolution.config.app.localized_identity("fr");
+        assert_eq!(identity.name, "app");
+        assert_eq!(identity.description, None);
+    }
+
+    #[test]
+    fn localized_identity_falls_back_to_default_locale_per_missing_field() {
+        // pt-BR declares only `name` -- its own missing `description`
+        // falls back to en's (the implicit default_locale), not straight
+        // to the base app.description, proving the fallback is per field
+        // within a locale that did partially match, not all-or-nothing.
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app]\ndescription = \"Base description\"\n[app.locales.en]\nname = \"Garden\"\ndescription = \"English description\"\n[app.locales.pt-BR]\nname = \"Jardim\"\n",
+        );
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
+        let identity = resolution.config.app.localized_identity("pt-BR");
+        assert_eq!(identity.name, "Jardim");
+        assert_eq!(identity.description, Some("English description"));
+    }
+
+    #[test]
+    fn localized_identity_falls_back_to_the_base_identity_when_default_locale_also_lacks_the_field()
+    {
+        // Neither pt-BR nor en (the default_locale) declares a
+        // description -- falls all the way through to the base
+        // app.description.
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app]\ndescription = \"Base description\"\n[app.locales.en]\nname = \"Garden\"\n[app.locales.pt-BR]\nname = \"Jardim\"\n",
+        );
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
+        let identity = resolution.config.app.localized_identity("pt-BR");
+        assert_eq!(identity.name, "Jardim");
+        assert_eq!(identity.description, Some("Base description"));
+    }
+
+    #[test]
     fn environment_overlay_merges_identifier_and_icons_by_field() {
         let dir = tempfile::tempdir().unwrap();
         write(
