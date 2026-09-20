@@ -85,10 +85,27 @@ pub struct BoxLayout {
     pub height: f32,
 }
 
-/// [`compute_with_style`]'s own return shape — resolved styles alongside
-/// the geometry they produced, the same pairing `UiRuntime::geometry`
-/// already hands callers.
-pub type StyleAndLayout = (HashMap<NodeId, ComputedStyle>, HashMap<NodeId, BoxLayout>);
+/// A node's real scrollable content extent — its reachable size along each
+/// axis, which for a node with overflowing children is larger than its own
+/// [`BoxLayout`] box. Comes straight from Taffy's own
+/// `Layout::scrollable_overflow_rect` (already computed as part of every
+/// layout pass; this is a read of existing data, not new layout work), so
+/// it is always at least the node's own box size — a non-overflowing node
+/// simply reports its own size back.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContentExtent {
+    pub width: f32,
+    pub height: f32,
+}
+
+/// [`compute_with_style`]'s own return shape — resolved styles and geometry
+/// alongside each node's real scrollable content extent, the same trio
+/// `UiRuntime::geometry` hands callers.
+pub struct LayoutResult {
+    pub styles: HashMap<NodeId, ComputedStyle>,
+    pub layouts: HashMap<NodeId, BoxLayout>,
+    pub content_extents: HashMap<NodeId, ContentExtent>,
+}
 
 #[derive(Debug)]
 pub struct LayoutError(taffy::TaffyError);
@@ -386,6 +403,23 @@ pub fn compute_layout(
     styles: &HashMap<NodeId, ComputedStyle>,
     available: Size<AvailableSpace>,
 ) -> Result<HashMap<NodeId, BoxLayout>, LayoutError> {
+    compute_layout_with_content_extents(font, arena, styles, available).map(|(layouts, _)| layouts)
+}
+
+type LayoutsAndContentExtents = (HashMap<NodeId, BoxLayout>, HashMap<NodeId, ContentExtent>);
+
+/// Same as [`compute_layout`], plus each node's real [`ContentExtent`] —
+/// kept as a separate function, rather than changing [`compute_layout`]'s
+/// own return shape, since content extent is only needed by
+/// [`compute_with_style`]'s own callers (a scroll container) and
+/// [`compute_layout`] alone already has dozens of call sites across this
+/// workspace's own tests and benches that have no use for it.
+fn compute_layout_with_content_extents(
+    font: &mut florui_text::Font,
+    arena: &Arena,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    available: Size<AvailableSpace>,
+) -> Result<LayoutsAndContentExtents, LayoutError> {
     let mut tree: TaffyTree<LeafContext> = TaffyTree::new();
     let mut taffy_ids: HashMap<NodeId, taffy::NodeId> = HashMap::new();
     // Every inline-formatting-context leaf built below, so the second pass
@@ -530,6 +564,7 @@ pub fn compute_layout(
     .map_err(LayoutError)?;
 
     let mut result = HashMap::with_capacity(taffy_ids.len());
+    let mut content_extents = HashMap::with_capacity(taffy_ids.len());
     for (&node_id, &tid) in &taffy_ids {
         let layout = tree.layout(tid).map_err(LayoutError)?;
         result.insert(
@@ -539,6 +574,14 @@ pub fn compute_layout(
                 y: layout.location.y,
                 width: layout.size.width,
                 height: layout.size.height,
+            },
+        );
+        content_extents.insert(
+            node_id,
+            ContentExtent {
+                width: layout.scrollable_overflow_rect.right - layout.scrollable_overflow_rect.left,
+                height: layout.scrollable_overflow_rect.bottom
+                    - layout.scrollable_overflow_rect.top,
             },
         );
     }
@@ -593,11 +636,16 @@ pub fn compute_layout(
                         height,
                     },
                 );
+                // Not an independent Taffy node — see this pass's own
+                // comment above — so it has no `scrollable_overflow_rect`
+                // of its own; its content extent is just its own box size,
+                // the correct value for a leaf that never overflows itself.
+                content_extents.insert(child, ContentExtent { width, height });
             }
         }
     }
 
-    Ok(result)
+    Ok((result, content_extents))
 }
 
 /// Same job as calling [`florui_style::compute`] then [`compute_layout`] in
@@ -644,12 +692,17 @@ pub fn compute_with_style(
     viewport: Viewport,
     timeline: &mut AnimationTimeline,
     available: Size<AvailableSpace>,
-) -> Result<StyleAndLayout, LayoutError> {
+) -> Result<LayoutResult, LayoutError> {
     let base_styles = florui_style::compute(arena, rules, state, viewport, timeline);
-    let base_layouts = compute_layout(font, arena, &base_styles, available)?;
+    let (base_layouts, base_content_extents) =
+        compute_layout_with_content_extents(font, arena, &base_styles, available)?;
 
     if !rules.iter().any(Rule::has_container_queries) {
-        return Ok((base_styles, base_layouts));
+        return Ok(LayoutResult {
+            styles: base_styles,
+            layouts: base_layouts,
+            content_extents: base_content_extents,
+        });
     }
 
     let sizes: HashMap<NodeId, ContentBoxSize> = base_layouts
@@ -694,8 +747,13 @@ pub fn compute_with_style(
         }
     }
 
-    let final_layouts = compute_layout(font, arena, &final_styles, available)?;
-    Ok((final_styles, final_layouts))
+    let (final_layouts, final_content_extents) =
+        compute_layout_with_content_extents(font, arena, &final_styles, available)?;
+    Ok(LayoutResult {
+        styles: final_styles,
+        layouts: final_layouts,
+        content_extents: final_content_extents,
+    })
 }
 
 /// A leaf with no text measures at `0x0` — `compute_leaf_layout` only
@@ -2545,7 +2603,7 @@ mod tests {
             let rules = florui_style::parse_stylesheet(css).unwrap();
             let mut font = florui_text::Font::load_embedded();
             let mut timeline = florui_style::AnimationTimeline::default();
-            let (styles, layouts) = compute_with_style(
+            let result = compute_with_style(
                 &mut font,
                 &arena,
                 &rules,
@@ -2555,7 +2613,7 @@ mod tests {
                 available,
             )
             .unwrap();
-            (arena, styles, layouts)
+            (arena, result.styles, result.layouts)
         }
 
         /// The real, end-to-end path: an outer explicitly-narrow container
