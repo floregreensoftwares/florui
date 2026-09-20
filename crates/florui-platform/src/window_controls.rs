@@ -32,6 +32,7 @@ use winit::window::{BadIcon, Icon, Window};
 use crate::file_dialog::{
     OpenFileDialogOptions, OpenFileDialogOutcome, SaveFileDialogOptions, SaveFileDialogOutcome,
 };
+use crate::menu::{ContextMenuOutcome, MenuEntry};
 
 /// See this module's own doc, "Marking a draggable region."
 pub const WINDOW_DRAG_REGION_ID: &str = "florui-window-drag-region";
@@ -222,6 +223,17 @@ impl WindowControls {
     /// differently either way.
     pub fn drag(&self) {
         let _ = self.window.drag_window();
+    }
+
+    /// Shows a real native context menu at the current cursor position,
+    /// blocking this thread until it closes -- the same synchronous shape
+    /// as [`Self::drag`], not the async open/save-dialog pattern: a
+    /// context menu is a short OS-pumped modal gesture, not something that
+    /// can be left open indefinitely. See [`crate::menu`]'s own doc for
+    /// what `items` can express and its documented limits (display-only
+    /// shortcuts, no CSS styling).
+    pub fn show_context_menu(&self, items: &[MenuEntry]) -> ContextMenuOutcome {
+        crate::menu::show_context_menu(&self.window, items)
     }
 
     /// Live query, not a cached guess — picks up snap/double-click too.
