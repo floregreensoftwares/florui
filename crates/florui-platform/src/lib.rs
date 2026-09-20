@@ -61,6 +61,12 @@ pub mod dpi;
 pub mod gpu;
 
 #[cfg(feature = "desktop")]
+mod menu;
+
+#[cfg(feature = "desktop")]
+pub use menu::{ContextMenuOutcome, MenuCommandId, MenuEntry};
+
+#[cfg(feature = "desktop")]
 mod os;
 
 #[cfg(feature = "desktop")]
