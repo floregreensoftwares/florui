@@ -150,6 +150,10 @@ fixture_test!(
     overflow_hidden_clip_matches_chromium,
     "overflow-hidden-clip"
 );
+fixture_test!(
+    overflow_scroll_clip_at_origin_matches_chromium,
+    "overflow-scroll-clip-at-origin"
+);
 fixture_test!(filter_blur_matches_chromium, "filter-blur");
 fixture_test!(filter_adjustments_matches_chromium, "filter-adjustments");
 fixture_test!(backdrop_filter_matches_chromium, "backdrop-filter");

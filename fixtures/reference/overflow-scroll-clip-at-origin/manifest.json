@@ -1,0 +1,22 @@
+{
+  "id": "overflow-scroll-clip-at-origin",
+  "description": "A 20x20 overflow-y: auto frame containing a 40x40 child, at rest (no scroll performed) -- a real browser renders scroll/auto identically to hidden before anything scrolls: the child clips to the frame's own padding box, same as overflow-hidden-clip, with no scrollbar rendered in a headless capture.",
+  "html": "index.html",
+  "css": "style.css",
+  "element_id": "el",
+  "viewport": { "width_css_px": 60, "height_css_px": 60, "device_pixel_ratio": 1.0 },
+  "canvas_color": "#ffffff",
+  "florui": {
+    "tag": "div",
+    "class": "frame",
+    "css": ".frame { width: 20px; height: 20px; overflow-y: auto; } .content { width: 40px; height: 40px; background-color: #ff0000; }",
+    "children": [
+      { "tag": "div", "class": "content", "css": "" }
+    ]
+  },
+  "classification": {
+    "kind": "tolerant",
+    "threshold_percent": 3.0,
+    "reason": "Same anti-aliasing/hinting mismatch already calibrated for overflow-hidden-clip -- this fixture only adds overflow-y: auto in place of hidden, with no scroll ever applied, so it should classify identically."
+  }
+}
