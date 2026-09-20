@@ -7,7 +7,7 @@ use crate::error::{
     ActivationError, ConfigError, Diagnostic, FileAssociationError, SemanticConfigError, Severity,
     WindowSizeError, WorkspaceInheritanceError,
 };
-use crate::location::LineIndex;
+use crate::location::{LineIndex, SourceLocation};
 use crate::project::{CargoProjectFacts, config_file_path, parse_package_version};
 use crate::resolved::{
     ActivationConfig, AppConfig, BundleConfig, DecorationsSetting, DevConfig, FieldProvenance,
@@ -16,11 +16,11 @@ use crate::resolved::{
 };
 use crate::schema::{
     RawActivation, RawApp, RawConfig, RawDecorations, RawEnvironmentOverlay,
-    RawEnvironmentOverlayApp, RawIcons, RawVersion, RawWeb, RawWindow, SUPPORTED_SCHEMA_VERSION,
-    SchemaVersionProbe,
+    RawEnvironmentOverlayApp, RawIcons, RawLocale, RawVersion, RawWeb, RawWindow,
+    SUPPORTED_SCHEMA_VERSION, SchemaVersionProbe,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use toml::Spanned;
 
 #[derive(Debug)]
@@ -84,6 +84,18 @@ pub fn resolve(
     let raw_environments = raw.as_ref().and_then(|c| c.environments.as_ref());
 
     let mut errors: Vec<SemanticConfigError> = Vec::new();
+
+    // Resolved before any other validation -- see
+    // `resolve_external_locales_file`'s own doc for why a missing file
+    // joins `errors` below but malformed TOML in an existing one fails
+    // immediately instead.
+    let external_locales = resolve_external_locales_file(
+        raw.as_ref().and_then(|c| c.app.as_ref()),
+        &config_path,
+        &facts.package_root,
+        lines.as_ref(),
+        &mut errors,
+    )?;
 
     let new_dev_example = raw
         .as_ref()
@@ -203,7 +215,13 @@ pub fn resolve(
         if let Some(activation) = app.activation.as_ref() {
             validate_activation(activation, &config_path, config_lines, &mut errors);
         }
-        validate_locales(app, &config_path, config_lines, &mut errors);
+        validate_locales(
+            app,
+            &config_path,
+            config_lines,
+            external_locales.as_ref(),
+            &mut errors,
+        );
     }
 
     if let Some(selection) = environment.as_ref().filter(|s| s.explicit) {
@@ -331,7 +349,12 @@ pub fn resolve(
         lines.as_ref(),
         &mut provenance,
     );
-    let locales = resolve_locales(raw_app, lines.as_ref(), &mut provenance);
+    let locales = resolve_locales(
+        raw_app,
+        lines.as_ref(),
+        external_locales.as_ref(),
+        &mut provenance,
+    );
 
     let app = AppConfig {
         identifier,
@@ -1021,42 +1044,149 @@ fn resolve_persistence(
     WindowPersistenceConfig { enabled, key }
 }
 
+/// The conventional filename an external locales file is auto-discovered
+/// under (sitting next to `florui.config.toml`) when `app.locales_file`
+/// doesn't explicitly name a different one.
+const LOCALES_FILE_NAME: &str = "florui.locales.toml";
+
+/// An external locales file's own path plus its parsed, not-yet-validated
+/// top-level table.
+type ExternalLocales = (PathBuf, BTreeMap<String, RawLocale>);
+
+/// A locale-set validated against exactly one source: either the inline
+/// `[app.locales]` table, or an external file's own top-level table --
+/// never both, and never neither once at least one is present. Carries
+/// whichever location every entry's own errors should cite, and (for
+/// `External`) the file's own path, since that's what actually declared
+/// the offending tag.
+enum LocaleSource<'a> {
+    Inline {
+        entries: &'a BTreeMap<String, RawLocale>,
+        location: SourceLocation,
+    },
+    External {
+        entries: &'a BTreeMap<String, RawLocale>,
+        path: &'a Path,
+    },
+    None,
+}
+
+/// Determines whether `app.locales_file` (explicit) or the conventional
+/// [`LOCALES_FILE_NAME`] (auto-discovered, only when `locales_file` isn't
+/// set) supplies this app's locale entries instead of the inline
+/// `[app.locales]` table -- and if so, reads and parses it immediately.
+///
+/// A referenced-but-missing file is an ordinary semantic mistake (pushed
+/// into `errors`, alongside everything else this config might also get
+/// wrong); malformed TOML in a file that does exist is as fundamental as
+/// the main config's own malformed TOML and fails immediately, before any
+/// other check even runs -- `Ok(None)` from the `NotFound` branch below is
+/// never actually used to build a real `Resolution`, since `resolve`
+/// bails as soon as `errors` is non-empty regardless.
+///
+/// `Ok(None)` with no error at all means neither `locales_file` nor the
+/// conventional filename applies: `[app.locales]` (if any) is the only
+/// source, exactly today's existing behavior.
+fn resolve_external_locales_file(
+    raw_app: Option<&RawApp>,
+    config_path: &Path,
+    package_root: &Path,
+    lines: Option<&LineIndex<'_>>,
+    errors: &mut Vec<SemanticConfigError>,
+) -> Result<Option<ExternalLocales>, ConfigError> {
+    let explicit = raw_app.and_then(|a| a.locales_file.as_ref());
+    let path = match explicit {
+        Some(spanned) => package_root.join(spanned.get_ref()),
+        None => {
+            let conventional = package_root.join(LOCALES_FILE_NAME);
+            if !conventional.is_file() {
+                return Ok(None);
+            }
+            conventional
+        }
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            // Only reachable for an *explicit* reference -- the
+            // auto-discovery branch above already checked existence.
+            let spanned = explicit.expect("only an explicit reference reaches this branch");
+            errors.push(SemanticConfigError::LocalesFileNotFound {
+                config_path: config_path.to_owned(),
+                referenced_path: path,
+                location: lines.unwrap().locate_start(spanned.span()),
+            });
+            return Ok(None);
+        }
+        Err(err) => return Err(ConfigError::Io { path, source: err }),
+    };
+    let file_lines = LineIndex::new(&text);
+    let entries: BTreeMap<String, RawLocale> =
+        toml::from_str(&text).map_err(|err| toml_error(&path, &file_lines, err))?;
+    Ok(Some((path, entries)))
+}
+
 fn validate_locales(
     app: &RawApp,
     config_path: &Path,
     lines: &LineIndex<'_>,
+    external: Option<&ExternalLocales>,
     errors: &mut Vec<SemanticConfigError>,
 ) {
-    if let Some(locales) = app.locales.as_ref() {
-        let location = lines.locate_start(locales.span());
-        for tag in locales.get_ref().keys() {
-            if !is_valid_locale_tag(tag) {
-                errors.push(SemanticConfigError::InvalidLocaleTag {
-                    config_path: config_path.to_owned(),
-                    tag: tag.clone(),
-                    location,
-                });
-            }
+    let inline = app
+        .locales
+        .as_ref()
+        .filter(|spanned| !spanned.get_ref().is_empty());
+    let source = match (inline, external) {
+        (Some(inline), Some((external_path, _))) => {
+            errors.push(SemanticConfigError::ConflictingLocalesSource {
+                config_path: config_path.to_owned(),
+                external_path: external_path.clone(),
+                location: lines.locate_start(inline.span()),
+            });
+            return;
+        }
+        (Some(inline), None) => LocaleSource::Inline {
+            entries: inline.get_ref(),
+            location: lines.locate_start(inline.span()),
+        },
+        (None, Some((path, entries))) => LocaleSource::External { entries, path },
+        (None, None) => LocaleSource::None,
+    };
+    let (entries, entries_path, entries_location) = match &source {
+        LocaleSource::Inline { entries, location } => (*entries, config_path, *location),
+        // A generic "start of file" location: the inline table only ever
+        // reports table-level precision too (see `LocaleSource::Inline`'s
+        // own construction above), so this loses nothing an external file
+        // would otherwise have offered.
+        LocaleSource::External { entries, path } => {
+            (*entries, *path, SourceLocation { line: 1, column: 1 })
+        }
+        LocaleSource::None => return,
+    };
+    for tag in entries.keys() {
+        if !is_valid_locale_tag(tag) {
+            errors.push(SemanticConfigError::InvalidLocaleTag {
+                config_path: entries_path.to_owned(),
+                tag: tag.clone(),
+                location: entries_location,
+            });
         }
     }
 
     let Some(default_locale) = app.default_locale.as_ref() else {
         return;
     };
-    // Only validated against a declared, non-empty [app.locales] -- an
-    // undeclared default_locale is just an inert string today (nothing
-    // resolves runtime locale content yet), so it's accepted as-is.
-    let Some(locales) = app.locales.as_ref() else {
-        return;
-    };
-    if locales.get_ref().is_empty() {
+    // Only validated against a declared, non-empty locale set -- an
+    // undeclared default_locale is just an inert string otherwise.
+    if entries.is_empty() {
         return;
     }
-    if !locales.get_ref().contains_key(default_locale.get_ref()) {
+    if !entries.contains_key(default_locale.get_ref()) {
         errors.push(SemanticConfigError::InvalidDefaultLocale {
             config_path: config_path.to_owned(),
             requested: default_locale.get_ref().clone(),
-            available: locales.get_ref().keys().cloned().collect(),
+            available: entries.keys().cloned().collect(),
             location: lines.locate_start(default_locale.span()),
         });
     }
@@ -1082,20 +1212,19 @@ fn is_valid_locale_tag(tag: &str) -> bool {
 
 /// No runtime locale switching -- `default_locale` only scopes the
 /// identity locale fallback contract; nothing here consumes a "current
-/// locale."
+/// locale." `external`'s entries (already validated by [`validate_locales`]
+/// against exactly the same rules as the inline table) take priority over
+/// `[app.locales]` -- `validate_locales` already rejected declaring both,
+/// so at most one is ever actually populated here.
 fn resolve_locales(
     raw_app: Option<&RawApp>,
     lines: Option<&LineIndex<'_>>,
+    external: Option<&ExternalLocales>,
     provenance: &mut Vec<FieldProvenance>,
 ) -> LocalesConfig {
-    let locales = match raw_app.and_then(|a| a.locales.as_ref()) {
-        Some(spanned) => {
-            provenance.push(field(
-                "app.locales",
-                Provenance::ConfigFile(Some(lines.unwrap().locate_start(spanned.span()))),
-            ));
-            spanned
-                .get_ref()
+    let to_locales_config =
+        |entries: &BTreeMap<String, RawLocale>| -> BTreeMap<String, LocaleConfig> {
+            entries
                 .iter()
                 .map(|(tag, locale)| {
                     (
@@ -1107,10 +1236,25 @@ fn resolve_locales(
                     )
                 })
                 .collect()
+        };
+    let locales = match (external, raw_app.and_then(|a| a.locales.as_ref())) {
+        (Some((_path, entries)), _) => {
+            provenance.push(field(
+                "app.locales",
+                Provenance::ConfigFile(Some(SourceLocation { line: 1, column: 1 })),
+            ));
+            to_locales_config(entries)
         }
-        None => {
+        (None, Some(spanned)) => {
+            provenance.push(field(
+                "app.locales",
+                Provenance::ConfigFile(Some(lines.unwrap().locate_start(spanned.span()))),
+            ));
+            to_locales_config(spanned.get_ref())
+        }
+        (None, None) => {
             provenance.push(field("app.locales", Provenance::BuiltinDefault));
-            std::collections::BTreeMap::new()
+            BTreeMap::new()
         }
     };
     let default_locale = match raw_app.and_then(|a| a.default_locale.as_ref()) {
@@ -2134,6 +2278,125 @@ mod tests {
         let identity = resolution.config.app.localized_identity("pt-BR");
         assert_eq!(identity.name, "Jardim");
         assert_eq!(identity.description, Some("Base description"));
+    }
+
+    #[test]
+    fn a_conventional_locales_file_is_auto_discovered_with_no_main_config_change() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "florui.config.toml", "schema_version = 1\n");
+        write(
+            dir.path(),
+            "florui.locales.toml",
+            "[en]\nname = \"Garden\"\ndescription = \"A workspace for your ideas\"\n[pt-BR]\nname = \"Jardim\"\n",
+        );
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
+        let locales = &resolution.config.app.locales.locales;
+        assert_eq!(locales.len(), 2);
+        assert_eq!(locales["en"].name.as_deref(), Some("Garden"));
+        assert_eq!(
+            resolution.config.app.localized_identity("pt-BR").name,
+            "Jardim"
+        );
+    }
+
+    #[test]
+    fn an_explicit_locales_file_reference_is_honored() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app]\nlocales_file = \"translations/app.toml\"\n",
+        );
+        std::fs::create_dir_all(dir.path().join("translations")).unwrap();
+        write(
+            &dir.path().join("translations"),
+            "app.toml",
+            "[en]\nname = \"Garden\"\n",
+        );
+        let resolution = resolve(&facts(dir.path(), ""), None, None).unwrap();
+        assert_eq!(
+            resolution.config.app.locales.locales["en"].name.as_deref(),
+            Some("Garden")
+        );
+    }
+
+    #[test]
+    fn an_explicit_locales_file_that_does_not_exist_is_a_semantic_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app]\nlocales_file = \"missing.toml\"\n",
+        );
+        let err = resolve(&facts(dir.path(), ""), None, None).unwrap_err();
+        match err {
+            ConfigError::Semantic(errors) => {
+                assert!(matches!(
+                    errors[0],
+                    SemanticConfigError::LocalesFileNotFound { .. }
+                ));
+            }
+            other => panic!("expected Semantic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_toml_in_an_external_locales_file_fails_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "florui.config.toml", "schema_version = 1\n");
+        write(dir.path(), "florui.locales.toml", "not valid toml [[[");
+        let err = resolve(&facts(dir.path(), ""), None, None).unwrap_err();
+        assert!(matches!(err, ConfigError::Toml { .. }));
+    }
+
+    #[test]
+    fn declaring_locales_both_inline_and_in_an_external_file_is_a_semantic_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app.locales.en]\nname = \"Garden\"\n",
+        );
+        write(
+            dir.path(),
+            "florui.locales.toml",
+            "[en]\nname = \"Garden\"\n",
+        );
+        let err = resolve(&facts(dir.path(), ""), None, None).unwrap_err();
+        match err {
+            ConfigError::Semantic(errors) => {
+                assert!(matches!(
+                    errors[0],
+                    SemanticConfigError::ConflictingLocalesSource { .. }
+                ));
+            }
+            other => panic!("expected Semantic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn default_locale_is_validated_against_an_external_file_too() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "florui.config.toml",
+            "schema_version = 1\n[app]\ndefault_locale = \"fr\"\n",
+        );
+        write(
+            dir.path(),
+            "florui.locales.toml",
+            "[en]\nname = \"Garden\"\n",
+        );
+        let err = resolve(&facts(dir.path(), ""), None, None).unwrap_err();
+        match err {
+            ConfigError::Semantic(errors) => {
+                assert!(matches!(
+                    errors[0],
+                    SemanticConfigError::InvalidDefaultLocale { .. }
+                ));
+            }
+            other => panic!("expected Semantic, got {other:?}"),
+        }
     }
 
     #[test]

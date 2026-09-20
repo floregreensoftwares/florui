@@ -124,6 +124,24 @@ pub enum SemanticConfigError {
         tag: String,
         location: SourceLocation,
     },
+    /// `app.locales_file` names a file that does not exist -- distinct
+    /// from a malformed file at a path that does exist, which is as
+    /// fundamental as the main config's own malformed TOML and fails
+    /// immediately rather than joining this batch.
+    LocalesFileNotFound {
+        config_path: PathBuf,
+        referenced_path: PathBuf,
+        location: SourceLocation,
+    },
+    /// Both the inline `[app.locales]` table and an external locales file
+    /// (explicit or auto-discovered) declared entries -- exactly one
+    /// source is allowed, so it's never ambiguous which one a reader
+    /// should trust.
+    ConflictingLocalesSource {
+        config_path: PathBuf,
+        external_path: PathBuf,
+        location: SourceLocation,
+    },
     UnknownEnvironment {
         config_path: PathBuf,
         requested: String,
@@ -256,6 +274,27 @@ impl fmt::Display for SemanticConfigError {
                 f,
                 "{}:{location}: \"{tag}\" is not a valid locale tag",
                 config_path.display()
+            ),
+            SemanticConfigError::LocalesFileNotFound {
+                config_path,
+                referenced_path,
+                location,
+            } => write!(
+                f,
+                "{}:{location}: app.locales_file points to {}, which does not exist",
+                config_path.display(),
+                referenced_path.display()
+            ),
+            SemanticConfigError::ConflictingLocalesSource {
+                config_path,
+                external_path,
+                location,
+            } => write!(
+                f,
+                "{}:{location}: [app.locales] is declared here, but {} also declares locales -- \
+                 declare them in exactly one place",
+                config_path.display(),
+                external_path.display()
             ),
             SemanticConfigError::UnknownEnvironment {
                 config_path,

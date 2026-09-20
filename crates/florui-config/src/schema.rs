@@ -90,6 +90,14 @@ pub(crate) struct RawApp {
     /// key, so every locale error cites the table's own location.
     pub(crate) locales: Option<Spanned<BTreeMap<String, RawLocale>>>,
     pub(crate) default_locale: Option<Spanned<String>>,
+    /// An explicit reference to an external TOML file (relative to this
+    /// config's own directory, like every other path here) supplying
+    /// `[app.locales]`'s entries instead of declaring them inline --
+    /// mutually exclusive with `locales`. See
+    /// `resolve::resolve_external_locales_file`'s own doc for the
+    /// conventional filename (`florui.locales.toml`) this can be omitted
+    /// in favor of, auto-discovered when present.
+    pub(crate) locales_file: Option<Spanned<String>>,
 }
 
 #[derive(Deserialize, Debug)]
