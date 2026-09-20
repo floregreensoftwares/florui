@@ -1,18 +1,13 @@
 //! Physical-to-logical pixel conversion for a HiDPI-aware desktop host.
 //!
-//! **Not yet wired into [`crate::run`]'s desktop host.** Converting only
-//! the layout viewport to logical pixels would shrink everything the
-//! tree paints into a corner of an unchanged, still-physical-resolution
-//! canvas — layout and painting both need to move to a consistent unit
-//! together, or neither should. This module carries the arithmetic
-//! (already correct, already tested against `winit`'s own conversion) so
-//! it can be reviewed on its own before that wiring lands, rather than as
-//! one large, harder-to-review change mixing the two.
-//!
-//! See `florui-platform`'s crate-level scope note for the underlying gap
-//! this is tracking: the desktop host currently passes physical pixels
-//! straight through as the layout viewport, with no device-pixel-ratio
-//! scaling at all.
+//! Wired into [`crate::run`]'s desktop host (see `desktop.rs`'s own module
+//! doc): layout runs against [`viewport_scale`]'s logical size, committed
+//! boxes are scaled back up to physical pixels for painting, and cursor
+//! positions are converted the other way before hit-testing — one
+//! consistent unit on each side of the boundary, never a mix. A live
+//! `WindowEvent::ScaleFactorChanged` (moving the window to a
+//! differently-scaled monitor, or an OS scale setting change) triggers a
+//! fresh call here rather than caching a stale factor.
 
 use winit::dpi::{LogicalSize, PhysicalSize};
 
