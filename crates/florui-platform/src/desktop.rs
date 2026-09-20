@@ -38,6 +38,7 @@ use crate::UiRuntime;
 use crate::activation::{ActivationEvent, ActivationEvents, ActivationQueue, SingleInstance};
 use crate::appearance::DecorationMode;
 use crate::dpi::{self, ViewportScale};
+use crate::file_dialog::{OpenFileDialogOutcome, SaveFileDialogOutcome};
 use crate::gpu::{self, GpuPresenter};
 use crate::single_instance::{self, HandoffOutcome, InstanceRole};
 use crate::window_controls::{InputMode, ScreenRect, WindowControls};
@@ -112,6 +113,12 @@ enum UserEvent {
     /// application — see [`run_single_instance`]. Not per-window, unlike
     /// every other variant here: activation isn't scoped to one window.
     Activation(ActivationEvent),
+    /// A [`crate::WindowControls::open_file_dialog`]/`save_file_dialog`
+    /// call's background thread finished — routed back through the event
+    /// loop so the app's own `on_result` callback runs on the UI thread,
+    /// where touching `Signal`s is safe.
+    OpenFileDialogResult(WindowId, OpenFileDialogOutcome),
+    SaveFileDialogResult(WindowId, SaveFileDialogOutcome),
 }
 
 /// What [`run_with_options`]/[`run_with_css_reload_and_options`] ask for
@@ -1117,9 +1124,22 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
             // to be a constructor argument rather than registered afterward.
             let controls_window = window.clone();
             let close_proxy = self.proxy.clone();
-            let controls = Rc::new(WindowControls::new(controls_window, move || {
-                let _ = close_proxy.send_event(UserEvent::RequestClose(window_id));
-            }));
+            let open_dialog_proxy = self.proxy.clone();
+            let save_dialog_proxy = self.proxy.clone();
+            let controls = Rc::new(WindowControls::new(
+                controls_window,
+                move || {
+                    let _ = close_proxy.send_event(UserEvent::RequestClose(window_id));
+                },
+                move |outcome| {
+                    let _ = open_dialog_proxy
+                        .send_event(UserEvent::OpenFileDialogResult(window_id, outcome));
+                },
+                move |outcome| {
+                    let _ = save_dialog_proxy
+                        .send_event(UserEvent::SaveFileDialogResult(window_id, outcome));
+                },
+            ));
             let mut context_providers: Vec<Box<dyn Fn()>> = {
                 let controls = Rc::clone(&controls);
                 vec![Box::new(move || {
@@ -1308,6 +1328,18 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 if let Some(id) = self.primary_window_id
                     && let Some(state) = self.windows.get_mut(&id)
                 {
+                    state.update_and_request_redraw();
+                }
+            }
+            UserEvent::OpenFileDialogResult(id, outcome) => {
+                if let Some(state) = self.windows.get_mut(&id) {
+                    state.controls.deliver_open_dialog_result(outcome);
+                    state.update_and_request_redraw();
+                }
+            }
+            UserEvent::SaveFileDialogResult(id, outcome) => {
+                if let Some(state) = self.windows.get_mut(&id) {
+                    state.controls.deliver_save_dialog_result(outcome);
                     state.update_and_request_redraw();
                 }
             }

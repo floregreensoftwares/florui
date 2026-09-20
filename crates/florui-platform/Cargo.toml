@@ -15,7 +15,7 @@ default = ["desktop"]
 # driving UiRuntime on its own shouldn't have to pull them in.
 # `dep:windows-sys` is a no-op outside the Windows-only dependency table
 # below — every other target simply never has it in its resolved graph.
-desktop = ["dep:notify", "dep:softbuffer", "dep:winit", "dep:wgpu", "dep:pollster", "dep:windows-sys", "dep:florui-icon", "dep:serde", "dep:serde_json"]
+desktop = ["dep:notify", "dep:softbuffer", "dep:winit", "dep:wgpu", "dep:pollster", "dep:windows-sys", "dep:windows", "dep:florui-icon", "dep:serde", "dep:serde_json"]
 
 [dependencies]
 florui = { path = "../florui" }
@@ -71,4 +71,18 @@ windows-sys = { version = "0.60", optional = true, features = [
     "Win32_Security_Authorization",
     "Win32_System_IO",
     "Win32_Storage_FileSystem",
+] }
+# `os::windows::file_dialog`'s own dependency -- `windows-sys` has no COM
+# interface support at all (confirmed by grepping its generated source:
+# no `IFileOpenDialog`/`IFileSaveDialog`/`IShellItem`, no `Interface`
+# trait), so the modern Common Item Dialog needs this crate's COM-capable
+# sibling instead. Not a new compilation unit in practice: `windows`
+# 0.62.2 is already resolved here via `fontique`/`gpu-allocator`/
+# `wgpu-hal`, all already in this crate's own dependency graph.
+windows = { version = "0.62", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
 ] }
