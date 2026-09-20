@@ -9,6 +9,12 @@ source = "assets/icons/app-icon.svg"
 
 [app.activation]
 single_instance = true
+url_schemes = ["florui-demo"]
+
+[[app.activation.file_associations]]
+extension = "floruidemo"
+description = "Florui single-instance demo document"
+identity = "com.floregreen.florui-example-app.document"
 
 [window.persistence]
 enabled = true
