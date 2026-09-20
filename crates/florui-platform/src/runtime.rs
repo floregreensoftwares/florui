@@ -19,6 +19,7 @@ use florui_style::{
 };
 use taffy::prelude::*;
 
+use crate::scroll::ScrollRegistry;
 use crate::size_observer::SizeObserverRegistry;
 
 pub struct UiRuntime {
@@ -59,6 +60,10 @@ pub struct UiRuntime {
     /// way `executor` is. Notified after each [`Self::update`]'s own
     /// layout, once real geometry for that render exists.
     size_observers: Rc<SizeObserverRegistry>,
+    /// Reachable by [`crate::use_scroll_offset`] via context, the same way
+    /// `size_observers` is — synced right after it, once this render's own
+    /// real layout and content extents exist.
+    scroll_registry: Rc<ScrollRegistry>,
     /// Extra `provide_context` calls a host supplied at construction — run
     /// every [`Self::update`] (including the very first one, inside
     /// [`Self::with_rules`] itself) alongside `executor`/`size_observers`,
@@ -150,6 +155,7 @@ impl UiRuntime {
             font: florui_text::Font::load_embedded(),
             executor: Rc::new(LocalExecutor::new()),
             size_observers: Rc::new(SizeObserverRegistry::new()),
+            scroll_registry: Rc::new(ScrollRegistry::new()),
             extra_context_providers,
         };
         runtime.update(viewport);
@@ -237,9 +243,11 @@ impl UiRuntime {
     pub fn update(&mut self, viewport: Size<AvailableSpace>) {
         let executor = Rc::clone(&self.executor);
         let size_observers = Rc::clone(&self.size_observers);
+        let scroll_registry = Rc::clone(&self.scroll_registry);
         let tree = self.scope.render(|| {
             provide_context(Rc::clone(&executor) as Rc<dyn Executor>);
             provide_context(Rc::clone(&size_observers));
+            provide_context(Rc::clone(&scroll_registry));
             for provider in &self.extra_context_providers {
                 provider();
             }
@@ -252,7 +260,9 @@ impl UiRuntime {
         self.animation_timeline
             .advance_to(self.animation_epoch.elapsed().as_secs_f64());
         let florui_layout::LayoutResult {
-            styles, layouts, ..
+            styles,
+            layouts,
+            content_extents,
         } = florui_layout::compute_with_style(
             &mut self.font,
             &self.arena,
@@ -268,6 +278,8 @@ impl UiRuntime {
         // After layout, not before: a committed-size observer must see
         // this render's own real geometry, not the previous one's.
         self.size_observers.notify(&self.arena, &self.layouts);
+        self.scroll_registry
+            .sync(&self.arena, &self.layouts, &content_extents);
     }
 
     /// Whether the most recent [`Self::update`] left any `transition`/
