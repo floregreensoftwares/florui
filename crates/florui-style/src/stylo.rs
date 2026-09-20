@@ -1305,6 +1305,8 @@ fn to_computed_style(values: &ComputedValues) -> ComputedStyle {
         // that upstream guarantee holding across a future Stylo upgrade.
         opacity: effects.opacity.clamp(0.0, 1.0),
         overflow_clips: to_overflow_clips(box_style.overflow_x, box_style.overflow_y),
+        overflow_scrolls_x: to_overflow_scrolls_x(box_style.overflow_x),
+        overflow_scrolls_y: to_overflow_scrolls_y(box_style.overflow_y),
         font_family: to_font_family(&font.font_family),
         border: Edges {
             top: to_border_side(
@@ -1678,6 +1680,23 @@ fn to_overflow_clips(
     use style::computed_values::overflow_x::T as OverflowX;
     use style::computed_values::overflow_y::T as OverflowY;
     !matches!(overflow_x, OverflowX::Visible) || !matches!(overflow_y, OverflowY::Visible)
+}
+
+/// Whether this axis's `overflow` is real CSS's `scroll`/`auto` — the two
+/// keywords that make an axis's clipped-away content reachable again via
+/// scrolling, unlike `hidden`/`clip` which clip it away for good. Each axis
+/// is independent here, unlike [`to_overflow_clips`]'s deliberate OR across
+/// both: an element can scroll on one axis while clipping-only on the
+/// other.
+fn to_overflow_scrolls_x(overflow_x: style::computed_values::overflow_x::T) -> bool {
+    use style::computed_values::overflow_x::T as OverflowX;
+    matches!(overflow_x, OverflowX::Scroll | OverflowX::Auto)
+}
+
+/// Same as [`to_overflow_scrolls_x`], for the `overflow-y` axis.
+fn to_overflow_scrolls_y(overflow_y: style::computed_values::overflow_y::T) -> bool {
+    use style::computed_values::overflow_y::T as OverflowY;
+    matches!(overflow_y, OverflowY::Scroll | OverflowY::Auto)
 }
 
 fn to_flex_direction(value: style::computed_values::flex_direction::T) -> FlexDirection {
