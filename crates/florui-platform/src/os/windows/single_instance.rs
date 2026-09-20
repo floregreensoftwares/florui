@@ -336,3 +336,48 @@ pub(crate) fn handoff(
         Ok(false) | Err(_) => HandoffOutcome::Failed,
     }
 }
+
+/// A dedicated identifier `florui doctor`'s own capability probe uses --
+/// never a real app's own identifier, so this can never collide with (or
+/// interfere with) an actually-running instance of anything.
+const PROBE_IDENTIFIER: &str = "florui-doctor-capability-probe";
+
+/// Real, observed evidence that the named-mutex and named-pipe mechanisms
+/// this module depends on actually work on this machine -- not an
+/// assumption from the OS merely being Windows. Leaves nothing behind:
+/// any acquired mutex releases via [`MutexOwnership`]'s own `Drop`, and
+/// the probe pipe is closed immediately, before ever accepting a
+/// connection.
+pub(crate) fn probe_capability() -> bool {
+    let mutex_ok = match acquire(PROBE_IDENTIFIER) {
+        // Either this call became owner (and releases on drop below) or
+        // found a real existing owner (another concurrent probe, or --
+        // vanishingly unlikely -- a real app coincidentally sharing this
+        // exact identifier) -- both prove the mechanism itself works.
+        Ok(_role) => true,
+        Err(_) => false,
+    };
+    let pipe_ok = match create_pipe_instance(&activation::pipe_name(PROBE_IDENTIFIER)) {
+        Ok(handle) => {
+            // Safety: handle was just created above by this same call and
+            // is closed immediately -- this probe never accepts a real
+            // connection.
+            unsafe {
+                CloseHandle(handle);
+            }
+            true
+        }
+        Err(_) => false,
+    };
+    mutex_ok && pipe_ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_capability_succeeds_on_a_real_windows_session() {
+        assert!(probe_capability());
+    }
+}

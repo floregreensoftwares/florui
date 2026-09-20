@@ -29,7 +29,8 @@ mod activation;
 
 #[cfg(feature = "desktop")]
 pub use activation::{
-    ActivationEvent, ActivationEvents, SingleInstance, classify_launch, use_activation_events,
+    ActivationEvent, ActivationEvents, SingleInstance, classify_launch,
+    probe_single_instance_capability, use_activation_events,
 };
 
 #[cfg(feature = "desktop")]
@@ -69,7 +70,7 @@ mod window_controls;
 mod window_state;
 
 #[cfg(feature = "desktop")]
-pub use window_state::{WindowPersistence, reset_window_state};
+pub use window_state::{WindowPersistence, probe_persistence_capability, reset_window_state};
 
 #[cfg(feature = "desktop")]
 pub use window_controls::{
