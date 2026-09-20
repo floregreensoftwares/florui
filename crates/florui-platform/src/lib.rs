@@ -28,7 +28,9 @@ pub use desktop::{
 mod activation;
 
 #[cfg(feature = "desktop")]
-pub use activation::{ActivationEvent, ActivationEvents, SingleInstance, use_activation_events};
+pub use activation::{
+    ActivationEvent, ActivationEvents, SingleInstance, classify_launch, use_activation_events,
+};
 
 #[cfg(feature = "desktop")]
 mod single_instance;
