@@ -31,6 +31,6 @@ pub use project::{
 pub use resolve::{EnvironmentResolution, EnvironmentSelection, Resolution, resolve};
 pub use resolved::{
     ActivationConfig, AppConfig, BundleConfig, DecorationsSetting, DevConfig, FieldProvenance,
-    FileAssociationConfig, IconsConfig, LocaleConfig, LocalesConfig, Provenance, ResolvedConfig,
-    Target, WebConfig, WebIconsConfig, WindowConfig, WindowPersistenceConfig,
+    FileAssociationConfig, IconsConfig, LocaleConfig, LocalesConfig, LocalizedIdentity, Provenance,
+    ResolvedConfig, Target, WebConfig, WebIconsConfig, WindowConfig, WindowPersistenceConfig,
 };
