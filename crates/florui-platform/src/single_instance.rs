@@ -7,11 +7,13 @@
 
 #[cfg(target_os = "windows")]
 pub(crate) use crate::os::windows::single_instance::{
-    HandoffOutcome, InstanceRole, acquire, handoff, spawn_activation_listener,
+    HandoffOutcome, InstanceRole, acquire, handoff, probe_capability, spawn_activation_listener,
 };
 
 #[cfg(not(target_os = "windows"))]
-pub(crate) use stub::{HandoffOutcome, InstanceRole, acquire, handoff, spawn_activation_listener};
+pub(crate) use stub::{
+    HandoffOutcome, InstanceRole, acquire, handoff, probe_capability, spawn_activation_listener,
+};
 
 #[cfg(not(target_os = "windows"))]
 mod stub {
@@ -49,5 +51,11 @@ mod stub {
         _timeout: Duration,
     ) -> HandoffOutcome {
         HandoffOutcome::Failed
+    }
+
+    /// No equivalent mechanism exists on this platform yet -- see this
+    /// module's own doc.
+    pub(crate) fn probe_capability() -> bool {
+        false
     }
 }

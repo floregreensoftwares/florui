@@ -251,6 +251,38 @@ pub fn reset_window_state(persistence: &WindowPersistence) -> std::io::Result<()
     }
 }
 
+/// A dedicated key `florui doctor`'s own capability probe writes under --
+/// never a real window's own key, so this can never collide with (or
+/// disturb) anything actually persisted.
+const PROBE_KEY: &str = "florui-doctor-probe";
+
+/// Real, observed evidence -- not an assumption from `LOCALAPPDATA` merely
+/// being set -- that a window-state file can actually be written to and
+/// removed from the OS application-data location for `app_identifier`.
+/// Used by `florui doctor` to report actual capability rather than
+/// inferring it from configuration alone; leaves nothing behind on either
+/// success or failure.
+pub fn probe_persistence_capability(app_identifier: &str) -> bool {
+    let Some(path) = window_state_path(app_identifier, PROBE_KEY) else {
+        return false;
+    };
+    let probe_state = PersistedWindowState {
+        version: SUPPORTED_WINDOW_STATE_VERSION,
+        logical_size: (1.0, 1.0),
+        position: None,
+        monitor: MonitorContext {
+            name: None,
+            position: (0, 0),
+            physical_size: (1, 1),
+            scale_factor: 1.0,
+        },
+        maximized: false,
+    };
+    let wrote = save(&path, &probe_state).is_ok();
+    let _ = remove_if_present(&path);
+    wrote
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,5 +459,15 @@ mod tests {
         let path = dir.path().join("never-saved.json");
         remove_if_present(&path).unwrap();
         remove_if_present(&path).unwrap();
+    }
+
+    #[test]
+    fn probe_persistence_capability_writes_and_cleans_up_after_itself() {
+        let identifier = "florui-platform-test-probe";
+        assert!(probe_persistence_capability(identifier));
+        // Leaves nothing behind -- a second probe run must not find a
+        // stale file from the first.
+        let path = window_state_path(identifier, PROBE_KEY).unwrap();
+        assert!(!path.exists());
     }
 }

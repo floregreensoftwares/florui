@@ -217,6 +217,16 @@ pub fn use_activation_events() -> Option<ActivationEvents> {
     use_context::<ActivationEvents>()
 }
 
+/// Real, observed evidence -- not an assumption from the OS merely being
+/// Windows -- that the named-mutex and named-pipe mechanisms
+/// [`crate::run_single_instance`] depends on actually work on this
+/// machine. `false` on any other platform, since no equivalent mechanism
+/// exists there yet. Used by `florui doctor` to report actual capability
+/// rather than assuming it; leaves nothing behind either way.
+pub fn probe_single_instance_capability() -> bool {
+    crate::single_instance::probe_capability()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
