@@ -48,6 +48,15 @@ struct ArenaNode {
 pub struct Arena {
     nodes: Vec<ArenaNode>,
     roots: Vec<NodeId>,
+    /// How many of `roots`' leading entries are document roots — the
+    /// rest (built by [`Self::build_with_overlays`], if any) are portal
+    /// overlay roots. `roots()` itself stays one flat, ordered list on
+    /// purpose: paint (later root paints on top, unclipped) and hit-test
+    /// (later root wins) both already treat a later root as "above" an
+    /// earlier one with no changes needed — only layout needs to tell
+    /// the two groups apart, via [`Self::document_roots`]/
+    /// [`Self::overlay_roots`].
+    document_root_count: usize,
 }
 
 /// One still-unprocessed slice of sibling [`Element`]s, and where their
@@ -63,8 +72,27 @@ impl Arena {
         let mut arena = Arena {
             nodes: Vec::new(),
             roots: Vec::new(),
+            document_root_count: 0,
         };
         arena.push_all(std::slice::from_ref(root));
+        arena.document_root_count = arena.roots.len();
+        arena
+    }
+
+    /// Like [`Self::build`], but `overlays` becomes a second group of
+    /// roots — [`Self::overlay_roots`] — appended after `document`'s own.
+    /// A portal-hosting runtime builds `overlays` from whatever its own
+    /// portal registry collected this render; every other caller keeps
+    /// using [`Self::build`], which leaves [`Self::overlay_roots`] empty.
+    pub fn build_with_overlays(document: &Element, overlays: &Element) -> Self {
+        let mut arena = Arena {
+            nodes: Vec::new(),
+            roots: Vec::new(),
+            document_root_count: 0,
+        };
+        arena.push_all(std::slice::from_ref(document));
+        arena.document_root_count = arena.roots.len();
+        arena.push_all(std::slice::from_ref(overlays));
         arena
     }
 
@@ -135,6 +163,19 @@ impl Arena {
 
     pub fn roots(&self) -> &[NodeId] {
         &self.roots
+    }
+
+    /// The ordinary document roots — everything [`Self::build`] always
+    /// produces, and the leading part of [`Self::build_with_overlays`]'s
+    /// own result.
+    pub fn document_roots(&self) -> &[NodeId] {
+        &self.roots[..self.document_root_count]
+    }
+
+    /// Portal overlay roots, if any — empty for anything built via
+    /// [`Self::build`]. See [`Self::build_with_overlays`].
+    pub fn overlay_roots(&self) -> &[NodeId] {
+        &self.roots[self.document_root_count..]
     }
 
     pub fn parent(&self, id: NodeId) -> Option<NodeId> {
@@ -302,6 +343,44 @@ mod tests {
         let arena = Arena::build(&tree);
         assert_eq!(arena.roots().len(), 2);
         assert_eq!(arena.parent(arena.roots()[0]), None);
+    }
+
+    #[test]
+    fn build_alone_reports_every_root_as_a_document_root() {
+        let tree: Element = view! {
+            <div />
+            <div />
+        };
+        let arena = Arena::build(&tree);
+        assert_eq!(arena.document_roots().len(), 2);
+        assert!(arena.overlay_roots().is_empty());
+    }
+
+    #[test]
+    fn build_with_overlays_partitions_document_and_overlay_roots_in_order() {
+        let document: Element = view! {
+            <div class="doc-a" />
+            <div class="doc-b" />
+        };
+        let overlays: Element = view! { <div class="overlay-a" /> };
+        let arena = Arena::build_with_overlays(&document, &overlays);
+
+        assert_eq!(
+            arena.roots().len(),
+            3,
+            "roots() stays one flat, ordered list"
+        );
+        assert_eq!(arena.document_roots().len(), 2);
+        assert_eq!(arena.overlay_roots().len(), 1);
+        assert_eq!(
+            arena.classes(arena.overlay_roots()[0]),
+            &["overlay-a".to_string()]
+        );
+        assert_eq!(
+            arena.roots()[2],
+            arena.overlay_roots()[0],
+            "overlay roots come after every document root in roots()"
+        );
     }
 
     #[test]
