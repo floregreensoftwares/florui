@@ -10,10 +10,12 @@
 //! `notify` at all, can disable it (`default-features = false`).
 
 mod focus;
+mod portal;
 mod runtime;
 mod scroll;
 mod size_observer;
 
+pub use portal::{Portal, PortalProps, PortalRegistry};
 pub use runtime::UiRuntime;
 pub use scroll::{ScrollHandle, ScrollRegistry, use_scroll_offset};
 pub use size_observer::{SizeObserverRegistry, use_committed_size};
