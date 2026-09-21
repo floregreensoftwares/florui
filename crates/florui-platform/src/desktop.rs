@@ -914,7 +914,10 @@ impl WindowState {
     fn handle_cursor_moved(&mut self, x: f64, y: f64) {
         self.last_cursor = (x, y);
         let (x, y) = self.to_logical_cursor(x, y);
-        let hit = self.runtime.hit_test(x, y);
+        let hit = self
+            .runtime
+            .hit_test(x, y)
+            .filter(|&node| !self.is_disabled(node));
         self.set_hovered_and_redraw(hit);
     }
 
@@ -979,12 +982,29 @@ impl WindowState {
             self.controls.drag();
             return;
         }
-        self.pressed = hit;
+        // A disabled button must not become `pressed`: `handle_release`
+        // sets focus purely from `pressed` being `Some`, before it ever
+        // calls `dispatch_click` -- excluding it here is what stops a
+        // mouse click from focusing a disabled button, which gating
+        // `dispatch_click` alone can't (that only stops the click's own
+        // handler from firing).
+        self.pressed = hit.filter(|&node| !self.is_disabled(node));
     }
 
     fn is_drag_region(&self, node: NodeId) -> bool {
         let (arena, ..) = self.runtime.geometry();
         arena.id_attr(node) == Some(crate::WINDOW_DRAG_REGION_ID)
+    }
+
+    /// Tag-gated the same as `florui_platform::focus::is_focusable` and
+    /// `UiRuntime::dispatch_click`: `disabled` has no wired behavior
+    /// outside `<button>` in v1. Used to keep a disabled button out of
+    /// `pressed` (see `handle_press`) and out of `:hover` (see
+    /// `handle_cursor_moved`) -- real browsers don't deliver pointer
+    /// events to a disabled control either.
+    fn is_disabled(&self, node: NodeId) -> bool {
+        let (arena, ..) = self.runtime.geometry();
+        arena.tag(node) == "button" && arena.is_disabled(node)
     }
 
     fn should_close(&self) -> bool {
