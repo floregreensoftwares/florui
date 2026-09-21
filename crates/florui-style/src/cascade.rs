@@ -654,6 +654,51 @@ mod tests {
     }
 
     #[test]
+    fn focus_visible_matches_only_when_the_caller_marks_it_so() {
+        let tree: Element = view! { <button class="primary">{"Go"}</button> };
+        let css = ".primary { background-color: #42734f; } .primary:focus-visible { background-color: #345c3e; }";
+        let rules = crate::stylesheet_parse::parse_stylesheet(css).unwrap();
+
+        let (arena, base) = styles(&tree, css, &InteractionState::new());
+        let button = arena.roots()[0];
+        assert_eq!(
+            base[&button].background_color,
+            Rgba::opaque(0x42, 0x73, 0x4f)
+        );
+
+        // Focused via a mouse click: :focus matches, :focus-visible must not.
+        let mouse_focused_state = InteractionState::new().with_focused(button);
+        let mouse_focused = compute(
+            &arena,
+            &rules,
+            &mouse_focused_state,
+            Viewport::default(),
+            &mut crate::AnimationTimeline::default(),
+        );
+        assert_eq!(
+            mouse_focused[&button].background_color,
+            Rgba::opaque(0x42, 0x73, 0x4f),
+            ":focus-visible must not match a pointer-origin focus"
+        );
+
+        // Focused via keyboard traversal: both :focus and :focus-visible match.
+        let keyboard_focused_state = InteractionState::new()
+            .with_focused(button)
+            .with_focus_visible(button);
+        let keyboard_focused = compute(
+            &arena,
+            &rules,
+            &keyboard_focused_state,
+            Viewport::default(),
+            &mut crate::AnimationTimeline::default(),
+        );
+        assert_eq!(
+            keyboard_focused[&button].background_color,
+            Rgba::opaque(0x34, 0x5c, 0x3e)
+        );
+    }
+
+    #[test]
     fn unmatched_node_gets_initial_values() {
         let tree: Element = view! { <div /> };
         let (arena, computed) = styles(

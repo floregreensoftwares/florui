@@ -25,10 +25,10 @@
 //! `auto`, matching real CSS). Growing this list is a `florui-style`
 //! change only — Stylo already computes every property real CSS defines.
 //!
-//! `:hover`/`:focus`/`:active` are matched against an
+//! `:hover`/`:focus`/`:focus-visible`/`:active` are matched against an
 //! [`InteractionState`](interaction::InteractionState) the caller builds
-//! directly (see its docs) — there is no pointer/keyboard event system
-//! here to derive it from yet.
+//! directly (see its docs) — this crate has no pointer/keyboard event
+//! system of its own to derive it from.
 
 mod animation;
 mod cascade;
@@ -36,6 +36,7 @@ mod color;
 mod container_query_adapter;
 mod default_stylesheet;
 mod error;
+mod focus;
 mod height_media_adapter;
 mod interaction;
 mod reduced_motion_adapter;
@@ -54,6 +55,7 @@ pub use cascade::{
 pub use color::{ColorParseError, Rgba, parse_hex_color};
 pub use container_query_adapter::{ContentBoxSize, resolve_container_query_signatures};
 pub use error::StyleError;
+pub use focus::FocusPath;
 pub use interaction::InteractionState;
 pub use stylesheet_parse::{Rule, compile_sources, parse_stylesheet};
 pub use tree::{Arena, InlineItem, NodeId};

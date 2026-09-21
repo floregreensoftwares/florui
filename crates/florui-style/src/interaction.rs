@@ -1,4 +1,5 @@
-//! Which nodes `:hover`/`:focus`/`:active` currently match.
+//! Which nodes `:hover`/`:focus`/`:focus-visible`/`:active` currently
+//! match.
 //!
 //! This is deliberately not wired to real pointer/keyboard events: no
 //! event system exists yet. A caller (today, a test; eventually a real
@@ -14,6 +15,7 @@ pub struct InteractionState {
     hovered: HashSet<NodeId>,
     focused: HashSet<NodeId>,
     active: HashSet<NodeId>,
+    focus_visible: HashSet<NodeId>,
 }
 
 impl InteractionState {
@@ -36,6 +38,15 @@ impl InteractionState {
         self
     }
 
+    /// A subset of `focused`: whether `:focus-visible` (not just `:focus`)
+    /// should match — real CSS shows this only for keyboard-driven focus,
+    /// not a mouse click. The caller is responsible for keeping this a
+    /// subset; nothing here enforces it.
+    pub fn with_focus_visible(mut self, id: NodeId) -> Self {
+        self.focus_visible.insert(id);
+        self
+    }
+
     pub fn is_hovered(&self, id: NodeId) -> bool {
         self.hovered.contains(&id)
     }
@@ -46,6 +57,10 @@ impl InteractionState {
 
     pub fn is_active(&self, id: NodeId) -> bool {
         self.active.contains(&id)
+    }
+
+    pub fn is_focus_visible(&self, id: NodeId) -> bool {
+        self.focus_visible.contains(&id)
     }
 }
 
@@ -64,5 +79,18 @@ mod tests {
         assert!(state.is_focused(2));
         assert!(state.is_active(3));
         assert!(!state.is_active(1));
+    }
+
+    #[test]
+    fn focus_visible_is_independent_of_focused() {
+        let state = InteractionState::new()
+            .with_focused(1)
+            .with_focus_visible(1);
+        assert!(state.is_focused(1));
+        assert!(state.is_focus_visible(1));
+
+        let mouse_focused = InteractionState::new().with_focused(2);
+        assert!(mouse_focused.is_focused(2));
+        assert!(!mouse_focused.is_focus_visible(2));
     }
 }

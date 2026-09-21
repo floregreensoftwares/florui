@@ -197,6 +197,21 @@ impl Arena {
         }
         None
     }
+
+    /// Like [`Self::find`], but collects every match in document order
+    /// instead of stopping at the first — the shared primitive both tab
+    /// order and [`crate::focus::FocusPath::resolve`] need.
+    pub fn find_all(&self, mut predicate: impl FnMut(&Self, NodeId) -> bool) -> Vec<NodeId> {
+        let mut matches = Vec::new();
+        let mut stack: Vec<NodeId> = self.roots.iter().rev().copied().collect();
+        while let Some(id) = stack.pop() {
+            if predicate(self, id) {
+                matches.push(id);
+            }
+            stack.extend(self.children(id).iter().rev());
+        }
+        matches
+    }
 }
 
 fn class_list(attrs: &[(String, String)]) -> Vec<String> {
@@ -294,6 +309,22 @@ mod tests {
         let arena = Arena::build(&tree);
         let found = arena.find(|arena, id| arena.tag(id) == "button").unwrap();
         assert_eq!(arena.tag(found), "button");
+    }
+
+    #[test]
+    fn find_all_collects_every_match_in_document_order() {
+        let tree: Element = view! {
+            <div>
+                <button>{"First"}</button>
+                <span>{"Not a match"}</span>
+                <button>{"Second"}</button>
+            </div>
+        };
+        let arena = Arena::build(&tree);
+        let buttons = arena.find_all(|arena, id| arena.tag(id) == "button");
+        assert_eq!(buttons.len(), 2);
+        assert_eq!(arena.text_content(buttons[0]), "First");
+        assert_eq!(arena.text_content(buttons[1]), "Second");
     }
 
     #[test]
