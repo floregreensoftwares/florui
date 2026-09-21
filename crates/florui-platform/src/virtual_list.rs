@@ -744,4 +744,271 @@ mod tests {
             "the corrected (not estimated) total extent must be what scrolling clamps against"
         );
     }
+
+    #[test]
+    fn rapid_scrolling_always_mounts_exactly_the_current_window_plus_overscan() {
+        let item_height = 20.0;
+        let mut runtime = build_runtime(1000, item_height, 100.0, Overscan::Items(2));
+        // Five strictly visible rows, extended by 2 on each side once
+        // there's room -- jump the scroll position around (not a smooth
+        // sweep) the way a real fast fling would, and check every step
+        // lands on exactly window+overscan, never a stale or partial set.
+        for &start in &[0usize, 500, 50, 990, 200] {
+            let target = (start as f32) * item_height;
+            runtime.scroll_registry().scroll_to("list", 0.0, target);
+            runtime.update(viewport());
+            let expected: Vec<String> = (start.saturating_sub(2)..(start + 5 + 2).min(1000))
+                .map(|i| i.to_string())
+                .collect();
+            assert_eq!(
+                mounted_row_texts(&runtime),
+                expected,
+                "at scroll start {start}"
+            );
+        }
+    }
+
+    #[test]
+    fn reordering_the_same_visible_keys_mounts_and_unmounts_nothing() {
+        let log: std::rc::Rc<std::cell::RefCell<Vec<String>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let order: std::rc::Rc<std::cell::RefCell<Vec<usize>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(vec![0, 1, 2, 3, 4]));
+        let root = {
+            let log = std::rc::Rc::clone(&log);
+            let order = std::rc::Rc::clone(&order);
+            move || {
+                let order = order.borrow().clone();
+                let log = std::rc::Rc::clone(&log);
+                let order_for_render = order.clone();
+                let (content, _handle) = use_virtual_list(
+                    "list",
+                    5,
+                    order.clone(),
+                    ItemHeight::Fixed(20.0),
+                    Overscan::Items(0),
+                    move |i| Key::from(order[i]),
+                    move |i| {
+                        let real_key = order_for_render[i];
+                        let log = std::rc::Rc::clone(&log);
+                        florui_reactive::use_effect((), move || {
+                            log.borrow_mut().push(format!("mount {real_key}"));
+                            let log = std::rc::Rc::clone(&log);
+                            Some(Box::new(move || {
+                                log.borrow_mut().push(format!("unmount {real_key}"))
+                            }) as florui_reactive::Cleanup)
+                        });
+                        row(real_key)
+                    },
+                );
+                Element::node(
+                    "div",
+                    vec![
+                        ("id".to_string(), "list".to_string()),
+                        ("class".to_string(), "viewport".to_string()),
+                    ],
+                    vec![content],
+                )
+            }
+        };
+        let css = ".viewport { width: 100px; height: 100px; overflow-y: auto; } \
+                    .row { height: 20px; }"
+            .to_string();
+        let mut runtime =
+            UiRuntime::new(&css, root, viewport()).expect("this test's own CSS always parses");
+        runtime.update(viewport());
+        assert_eq!(
+            log.borrow().as_slice(),
+            &["mount 0", "mount 1", "mount 2", "mount 3", "mount 4"]
+        );
+
+        // Swaps the *middle* two items only -- the window's own first key
+        // (index 0's own item, "0") stays exactly where it was. Moving it
+        // instead would be a real identity change at the anchor position
+        // itself, which this list's own anchor-preservation logic (see
+        // the measurement-correction/insertion tests) *correctly* follows
+        // by adjusting the scroll offset -- intentional, tested behavior
+        // elsewhere, not something this test is about.
+        log.borrow_mut().clear();
+        *order.borrow_mut() = vec![0, 3, 2, 1, 4];
+        runtime.update(viewport());
+        assert!(
+            log.borrow().is_empty(),
+            "reordering keys within the same window, without moving the anchor, must not \
+             mount or unmount any of them, got {:?}",
+            log.borrow()
+        );
+    }
+
+    #[test]
+    fn a_resize_recomputes_the_mounted_window() {
+        let item_height = 20.0;
+        let mut runtime = build_runtime(100, item_height, 100.0, Overscan::Items(0));
+        assert_eq!(mounted_row_texts(&runtime).len(), 5);
+
+        let taller_rules = florui_style::parse_stylesheet(
+            ".viewport { width: 100px; height: 240px; overflow-y: auto; } .row { height: 20px; }",
+        )
+        .expect("this test's own CSS always parses");
+        runtime.set_rules(taller_rules);
+        // Same one-render lag as everywhere else here: the first pass
+        // after the rule change still renders against the *old* committed
+        // height (`use_committed_size`'s own callback only fires, and
+        // schedules a render, once *this* pass's real layout commits);
+        // only the second pass actually sees it.
+        runtime.update(viewport());
+        runtime.update(viewport());
+
+        assert_eq!(
+            mounted_row_texts(&runtime).len(),
+            12,
+            "a taller real viewport must mount more rows, not keep the old window"
+        );
+    }
+
+    #[test]
+    fn unmounting_the_whole_list_disposes_every_currently_mounted_row() {
+        let log: std::rc::Rc<std::cell::RefCell<Vec<String>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let show_list = std::rc::Rc::new(std::cell::Cell::new(true));
+        let root = {
+            let log = std::rc::Rc::clone(&log);
+            let show_list = std::rc::Rc::clone(&show_list);
+            move || {
+                if !show_list.get() {
+                    return Element::node("div", Vec::new(), Vec::new());
+                }
+                let log = std::rc::Rc::clone(&log);
+                let (content, _handle) = use_virtual_list(
+                    "list",
+                    5,
+                    (),
+                    ItemHeight::Fixed(20.0),
+                    Overscan::Items(0),
+                    Key::from,
+                    move |i| {
+                        let log = std::rc::Rc::clone(&log);
+                        florui_reactive::use_effect((), move || {
+                            let log = std::rc::Rc::clone(&log);
+                            Some(
+                                Box::new(move || log.borrow_mut().push(format!("unmount {i}")))
+                                    as florui_reactive::Cleanup,
+                            )
+                        });
+                        row(i)
+                    },
+                );
+                Element::node(
+                    "div",
+                    vec![
+                        ("id".to_string(), "list".to_string()),
+                        ("class".to_string(), "viewport".to_string()),
+                    ],
+                    vec![content],
+                )
+            }
+        };
+        let css = ".viewport { width: 100px; height: 100px; overflow-y: auto; } \
+                    .row { height: 20px; }"
+            .to_string();
+        let mut runtime =
+            UiRuntime::new(&css, root, viewport()).expect("this test's own CSS always parses");
+        runtime.update(viewport());
+        assert_eq!(mounted_row_texts(&runtime).len(), 5);
+
+        show_list.set(false);
+        runtime.update(viewport());
+
+        let mut unmounted = log.borrow().clone();
+        unmounted.sort();
+        assert_eq!(
+            unmounted,
+            vec![
+                "unmount 0",
+                "unmount 1",
+                "unmount 2",
+                "unmount 3",
+                "unmount 4"
+            ],
+            "every row mounted at the moment the whole list unmounts must dispose"
+        );
+    }
+
+    #[test]
+    fn ten_thousand_items_still_mount_only_the_window_plus_overscan() {
+        let runtime = build_runtime(10_000, 20.0, 100.0, Overscan::Items(3));
+        assert_eq!(
+            mounted_row_texts(&runtime).len(),
+            8,
+            "5 strictly visible + 3 overscan, regardless of the dataset being 10,000 long"
+        );
+    }
+
+    #[test]
+    fn fixed_mode_never_measures_and_ignores_a_rows_real_rendered_size() {
+        // Row 0 renders 100px tall for real, but Fixed(20.0) declares
+        // every item 20px regardless -- if Fixed mode ever measured, the
+        // total (and therefore the scroll clamp) would reflect the real
+        // 100px; it must not.
+        let handle_slot: std::rc::Rc<std::cell::RefCell<Option<VirtualListHandle>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let root = {
+            let handle_slot = std::rc::Rc::clone(&handle_slot);
+            move || {
+                let (content, handle) = use_virtual_list(
+                    "list",
+                    100,
+                    (),
+                    ItemHeight::Fixed(20.0),
+                    Overscan::Items(0),
+                    Key::from,
+                    |i| {
+                        let class = if i == 0 { "tall-row" } else { "row" };
+                        Element::node(
+                            "div",
+                            vec![("class".to_string(), class.to_string())],
+                            vec![Element::text(i.to_string())],
+                        )
+                    },
+                );
+                *handle_slot.borrow_mut() = Some(handle);
+                Element::node(
+                    "div",
+                    vec![
+                        ("id".to_string(), "list".to_string()),
+                        ("class".to_string(), "viewport".to_string()),
+                    ],
+                    vec![content],
+                )
+            }
+        };
+        let css = ".viewport { width: 100px; height: 100px; overflow-y: auto; } \
+                    .row { height: 20px; } .tall-row { height: 100px; }"
+            .to_string();
+        let mut runtime =
+            UiRuntime::new(&css, root, viewport()).expect("this test's own CSS always parses");
+        for _ in 0..4 {
+            runtime.update(viewport());
+        }
+
+        runtime
+            .scroll_registry()
+            .scroll_to("list", 0.0, 1_000_000.0);
+        runtime.update(viewport());
+        let handle = handle_slot.borrow().clone().unwrap();
+        let (x, y) = handle.offset();
+        assert_eq!(x, 0.0);
+        // Real Taffy layout rounds to whole pixels, so 100 rows declared
+        // at exactly 20px each doesn't always land on exactly 2000px of
+        // real content -- a few pixels of slack either way is that
+        // rounding, not evidence either way about measurement. What this
+        // test actually checks is the *order of magnitude*: if Fixed mode
+        // ever measured the real 100px row, the clamp would land near
+        // 1980 (2080 total - 100 viewport), not near 1900.
+        assert!(
+            (y - 1900.0).abs() < 10.0,
+            "Fixed mode must clamp near the declared 20px-per-item total (~1900), \
+             not near a real rendered size it never measured (~1980), got {y}"
+        );
+    }
 }
