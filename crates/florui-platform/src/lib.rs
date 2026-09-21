@@ -9,6 +9,7 @@
 //! wants [`UiRuntime`] alone, without pulling in `winit`/`softbuffer`/
 //! `notify` at all, can disable it (`default-features = false`).
 
+mod focus;
 mod runtime;
 mod scroll;
 mod size_observer;

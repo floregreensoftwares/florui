@@ -15,10 +15,11 @@ use florui_layout::BoxLayout;
 use florui_reactive::executor::{Executor, LocalExecutor};
 use florui_reactive::{ComponentScope, DirtyFlag, provide_context};
 use florui_style::{
-    AnimationTimeline, Arena, ComputedStyle, InteractionState, NodeId, Rule, StyleError,
+    AnimationTimeline, Arena, ComputedStyle, FocusPath, InteractionState, NodeId, Rule, StyleError,
 };
 use taffy::prelude::*;
 
+use crate::focus;
 use crate::scroll::ScrollRegistry;
 use crate::size_observer::SizeObserverRegistry;
 
@@ -29,6 +30,17 @@ pub struct UiRuntime {
     root: Box<dyn Fn() -> Element>,
     interaction: InteractionState,
     hovered: Option<NodeId>,
+    /// Persistent across renders — see [`FocusPath`]'s own doc for why a
+    /// plain [`NodeId`] can't fill this role. `None` means nothing is
+    /// focused.
+    focused_path: Option<FocusPath>,
+    /// [`Self::focused_path`] resolved against the current [`Self::arena`]
+    /// — valid only within the arena generation it was resolved in, the
+    /// same contract [`Self::hovered`] already has.
+    focused_node: Option<NodeId>,
+    /// Whether the current focus is keyboard-driven (`:focus-visible`
+    /// should match) rather than a mouse click.
+    focus_visible: bool,
     arena: Arena,
     styles: HashMap<NodeId, ComputedStyle>,
     layouts: HashMap<NodeId, BoxLayout>,
@@ -147,6 +159,9 @@ impl UiRuntime {
             root: Box::new(root),
             interaction: InteractionState::new(),
             hovered: None,
+            focused_path: None,
+            focused_node: None,
+            focus_visible: false,
             arena: Arena::build(&Element::Fragment(Vec::new())),
             styles: HashMap::new(),
             layouts: HashMap::new(),
@@ -265,6 +280,7 @@ impl UiRuntime {
         // waker already requeued) make progress before this frame commits.
         self.executor.run_until_stalled();
         self.arena = Arena::build(&tree);
+        self.resolve_focus();
         self.animation_timeline
             .advance_to(self.animation_epoch.elapsed().as_secs_f64());
         let florui_layout::LayoutResult {
@@ -339,11 +355,111 @@ impl UiRuntime {
             return false;
         }
         self.hovered = node;
-        self.interaction = match node {
-            Some(id) => InteractionState::new().with_hovered(id),
-            None => InteractionState::new(),
-        };
+        self.rebuild_interaction();
         true
+    }
+
+    /// The currently focused node, against the last computed geometry —
+    /// `None` if nothing is focused.
+    pub fn focused(&self) -> Option<NodeId> {
+        self.focused_node
+    }
+
+    /// Sets (or, for `None`, clears) keyboard focus. Returns whether that
+    /// actually changed anything — `:focus`/`:focus-visible` can affect
+    /// computed style, so a caller should follow a `true` result with a
+    /// fresh [`Self::update`]. `via_keyboard` decides whether
+    /// `:focus-visible` matches alongside `:focus` — real Tab traversal
+    /// passes `true`; a mouse click setting focus (matching real HTML
+    /// `:focus` behavior, not `:focus-visible`) passes `false`.
+    pub fn set_focused(&mut self, node: Option<NodeId>, via_keyboard: bool) -> bool {
+        let focus_visible = via_keyboard && node.is_some();
+        if node == self.focused_node && focus_visible == self.focus_visible {
+            return false;
+        }
+        self.focused_node = node;
+        self.focused_path = node.map(|id| FocusPath::of(&self.arena, id));
+        self.focus_visible = focus_visible;
+        self.rebuild_interaction();
+        true
+    }
+
+    /// Moves keyboard focus to the next focusable element in document
+    /// order, wrapping to the first after the last — always keyboard-
+    /// origin, so `:focus-visible` matches. Returns whether focus
+    /// actually changed (`false` when there is nothing focusable at all).
+    pub fn focus_next(&mut self) -> bool {
+        self.step_focus(1)
+    }
+
+    /// Same as [`Self::focus_next`], stepping backward and wrapping to
+    /// the last element after the first.
+    pub fn focus_previous(&mut self) -> bool {
+        self.step_focus(-1)
+    }
+
+    fn step_focus(&mut self, direction: isize) -> bool {
+        let order = focus::focus_order(&self.arena);
+        if order.is_empty() {
+            return self.set_focused(None, true);
+        }
+        let next_index = match self
+            .focused_node
+            .and_then(|id| order.iter().position(|&candidate| candidate == id))
+        {
+            Some(index) => {
+                let len = order.len() as isize;
+                (index as isize + direction).rem_euclid(len) as usize
+            }
+            None => {
+                if direction >= 0 {
+                    0
+                } else {
+                    order.len() - 1
+                }
+            }
+        };
+        self.set_focused(Some(order[next_index]), true)
+    }
+
+    /// Re-resolves [`Self::focused_path`] against this render's freshly
+    /// rebuilt [`Self::arena`] — a [`NodeId`] from the previous arena
+    /// generation isn't safe to reuse directly (see [`FocusPath`]'s own
+    /// doc). Clears focus outright if the focused element is no longer
+    /// present; deliberately no "restore to trigger" fallback, which is
+    /// an overlay-specific concern this slice doesn't attempt.
+    fn resolve_focus(&mut self) {
+        self.focused_node = match &self.focused_path {
+            Some(path) => {
+                let candidates = focus::focus_order(&self.arena);
+                let resolved = path.resolve(&self.arena, &candidates);
+                if resolved.is_none() {
+                    self.focused_path = None;
+                    self.focus_visible = false;
+                }
+                resolved
+            }
+            None => None,
+        };
+        self.rebuild_interaction();
+    }
+
+    /// Rebuilds `self.interaction` from whatever's currently live
+    /// (`hovered`, `focused_node`, `focus_visible`) — the single place
+    /// that assembles it, so setting one doesn't silently clobber the
+    /// others the way replacing it wholesale would.
+    fn rebuild_interaction(&mut self) {
+        let mut state = InteractionState::new();
+        if let Some(id) = self.hovered {
+            state = state.with_hovered(id);
+        }
+        if let Some(id) = self.focused_node {
+            state = state.with_focused(id);
+            if self.focus_visible {
+                state = state.with_focus_visible(id);
+            }
+        }
+        self.interaction = state;
     }
 
     /// Calls `node`'s `click` handler, if it declared one, against the
@@ -904,6 +1020,146 @@ mod tests {
             *sizes.borrow(),
             1,
             "unmounting the observing scope must dispose its attachment, not fire it again"
+        );
+    }
+
+    fn three_buttons_runtime() -> UiRuntime {
+        UiRuntime::with_rules(
+            Vec::new(),
+            || {
+                view! {
+                    <div>
+                        <button id="a">{"A"}</button>
+                        <button id="b">{"B"}</button>
+                        <button id="c">{"C"}</button>
+                    </div>
+                }
+            },
+            viewport(),
+        )
+    }
+
+    fn node_id(runtime: &UiRuntime, id_attr: &str) -> NodeId {
+        let (arena, ..) = runtime.geometry();
+        arena
+            .find(|arena, node| arena.id_attr(node) == Some(id_attr))
+            .unwrap()
+    }
+
+    #[test]
+    fn focus_next_moves_forward_through_document_order_and_wraps() {
+        let mut runtime = three_buttons_runtime();
+        let (a, b, c) = (
+            node_id(&runtime, "a"),
+            node_id(&runtime, "b"),
+            node_id(&runtime, "c"),
+        );
+
+        assert!(runtime.focus_next());
+        assert_eq!(runtime.focused(), Some(a));
+        assert!(runtime.focus_next());
+        assert_eq!(runtime.focused(), Some(b));
+        assert!(runtime.focus_next());
+        assert_eq!(runtime.focused(), Some(c));
+        assert!(
+            runtime.focus_next(),
+            "tabbing past the last element must wrap back to the first"
+        );
+        assert_eq!(runtime.focused(), Some(a));
+    }
+
+    #[test]
+    fn focus_previous_moves_backward_and_wraps() {
+        let mut runtime = three_buttons_runtime();
+        let (a, c) = (node_id(&runtime, "a"), node_id(&runtime, "c"));
+
+        assert!(
+            runtime.focus_previous(),
+            "shift-tabbing with nothing focused must land on the last element"
+        );
+        assert_eq!(runtime.focused(), Some(c));
+        assert!(runtime.focus_previous());
+        assert_eq!(runtime.focused(), Some(node_id(&runtime, "b")));
+        assert!(runtime.focus_previous());
+        assert_eq!(runtime.focused(), Some(a));
+        assert!(
+            runtime.focus_previous(),
+            "shift-tabbing past the first element must wrap to the last"
+        );
+        assert_eq!(runtime.focused(), Some(c));
+    }
+
+    #[test]
+    fn focus_applies_only_to_the_focused_button() {
+        let mut runtime = three_buttons_runtime();
+        runtime.set_rules(
+            florui_style::parse_stylesheet(
+                "button { background-color: #111111; } button:focus { background-color: #222222; }",
+            )
+            .unwrap(),
+        );
+        let a = node_id(&runtime, "a");
+        let b = node_id(&runtime, "b");
+        runtime.set_focused(Some(a), true);
+        runtime.update(viewport());
+
+        let (_, styles, _) = runtime.geometry();
+        assert_eq!(styles[&a].background_color, Rgba::opaque(0x22, 0x22, 0x22));
+        assert_eq!(styles[&b].background_color, Rgba::opaque(0x11, 0x11, 0x11));
+    }
+
+    #[test]
+    fn focus_visible_applies_after_keyboard_focus_but_not_a_pointer_click() {
+        let mut runtime = three_buttons_runtime();
+        runtime.set_rules(
+            florui_style::parse_stylesheet(
+                "button { background-color: #111111; } button:focus-visible { background-color: #333333; }",
+            )
+            .unwrap(),
+        );
+        let a = node_id(&runtime, "a");
+
+        runtime.set_focused(Some(a), false);
+        runtime.update(viewport());
+        let (_, styles, _) = runtime.geometry();
+        assert_eq!(
+            styles[&a].background_color,
+            Rgba::opaque(0x11, 0x11, 0x11),
+            ":focus-visible must not match a pointer-origin focus"
+        );
+
+        runtime.set_focused(Some(a), true);
+        runtime.update(viewport());
+        let (_, styles, _) = runtime.geometry();
+        assert_eq!(styles[&a].background_color, Rgba::opaque(0x33, 0x33, 0x33));
+    }
+
+    #[test]
+    fn removing_the_focused_element_clears_focus_without_panicking() {
+        let show = Rc::new(Cell::new(true));
+        let show_for_root = Rc::clone(&show);
+        let mut runtime = UiRuntime::with_rules(
+            Vec::new(),
+            move || {
+                if show_for_root.get() {
+                    view! { <button id="target">{"Go"}</button> }
+                } else {
+                    view! { <div /> }
+                }
+            },
+            viewport(),
+        );
+        let target = node_id(&runtime, "target");
+        runtime.set_focused(Some(target), true);
+        assert_eq!(runtime.focused(), Some(target));
+
+        show.set(false);
+        runtime.update(viewport());
+
+        assert_eq!(
+            runtime.focused(),
+            None,
+            "focus must clear outright once its element is gone"
         );
     }
 }

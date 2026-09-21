@@ -30,8 +30,9 @@ use taffy::prelude::*;
 use winit::application::ApplicationHandler;
 #[cfg(test)]
 use winit::dpi::PhysicalSize;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::UiRuntime;
@@ -632,6 +633,10 @@ struct WindowState {
     /// out — a true debounce, not a fixed-interval throttle — instead of
     /// saving mid-drag on every qualifying tick.
     pending_geometry_save: Option<std::time::Instant>,
+    /// Updated only by a live `WindowEvent::ModifiersChanged` — a real
+    /// `KeyEvent` carries no modifier state of its own, so Shift+Tab needs
+    /// this to distinguish itself from a plain Tab.
+    modifiers: ModifiersState,
 }
 
 /// Long enough that a drag-resize (many `Resized`/`Moved` events per
@@ -1024,7 +1029,43 @@ impl WindowState {
         if let (Some(pressed), Some(released_over)) = (pressed, released_over)
             && pressed == released_over
         {
+            // Matches real HTML: a click sets keyboard focus to its
+            // target too, just not :focus-visible (via_keyboard: false).
+            let focus_changed = self.runtime.set_focused(Some(pressed), false);
             self.runtime.dispatch_click(pressed);
+            if focus_changed {
+                self.update_and_request_redraw();
+            }
+        }
+    }
+
+    /// The real handler for `WindowEvent::KeyboardInput`. Only a fresh
+    /// key-down does anything: a held key's own repeat must not re-fire
+    /// activation, and a key-up carries no action of its own here. Tab/
+    /// Shift+Tab move focus; Enter/Space activate whatever is currently
+    /// focused through the same [`UiRuntime::dispatch_click`] a real
+    /// mouse click already uses — no second event name invented.
+    fn handle_keyboard_input(&mut self, event: KeyEvent) {
+        if event.state != ElementState::Pressed || event.repeat {
+            return;
+        }
+        match event.logical_key {
+            Key::Named(NamedKey::Tab) => {
+                let moved = if self.modifiers.shift_key() {
+                    self.runtime.focus_previous()
+                } else {
+                    self.runtime.focus_next()
+                };
+                if moved {
+                    self.update_and_request_redraw();
+                }
+            }
+            Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
+                if let Some(focused) = self.runtime.focused() {
+                    self.runtime.dispatch_click(focused);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -1305,6 +1346,7 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 theme_preference,
                 persistence: spec.options.persistence.clone(),
                 pending_geometry_save: None,
+                modifiers: ModifiersState::empty(),
             };
             state.redraw();
             // A `@keyframes` animation already running on mount (no `:hover`
@@ -1400,6 +1442,15 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 ..
             } => state.handle_release(),
             WindowEvent::MouseWheel { delta, .. } => state.handle_mouse_wheel(delta),
+            WindowEvent::ModifiersChanged(modifiers) => state.modifiers = modifiers.state(),
+            // `is_synthetic: true` is winit re-synthesizing "this key was
+            // already held" on focus gain/loss — must not trigger
+            // activation, only a genuine key-down the user just pressed.
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic: false,
+                ..
+            } => state.handle_keyboard_input(event),
             _ => {}
         }
     }
