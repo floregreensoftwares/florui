@@ -81,6 +81,11 @@ struct NodeSlot {
     /// — see [`crate::animation`]'s module doc.
     stable_id: usize,
     id_attr: Option<String>,
+    /// This element's real inline `style="..."` declaration, parsed once
+    /// at construction — see [`style_attribute`](TElement::style_attribute)'s
+    /// own doc for why this is the highest-specificity input the cascade
+    /// sees, not an inert string.
+    style_pdb: Option<Arc<Locked<PropertyDeclarationBlock>>>,
     /// Same value as `id_attr`, pre-interned — `TElement::id` needs this
     /// exact type back, and it's also what Stylo's selector map uses to
     /// bucket `#id` rules by hash before ever calling `has_id`, so a
@@ -175,6 +180,7 @@ impl StyloTree {
                 stable_id,
                 id_attr: arena.id_attr(id).map(str::to_owned),
                 id_atom: arena.id_attr(id).map(WeakAtom::from),
+                style_pdb: arena.style_attr(id).map(parse_inline_style),
                 state: node_state,
                 data: AtomicRefCell::new(ElementData::default()),
                 dirty_descendants: Cell::new(false),
@@ -585,7 +591,7 @@ impl<'a> TElement for StyloNode<'a> {
     }
 
     fn style_attribute(&self) -> Option<ArcBorrow<'_, Locked<PropertyDeclarationBlock>>> {
-        None
+        self.0.style_pdb.as_ref().map(Arc::borrow_arc)
     }
 
     fn animation_rule(
@@ -833,6 +839,27 @@ impl RegisteredSpeculativePainters for NoPainters {
 pub(crate) fn shared_lock() -> &'static SharedRwLock {
     static LOCK: std::sync::LazyLock<SharedRwLock> = std::sync::LazyLock::new(SharedRwLock::new);
     &LOCK
+}
+
+/// Parses `css` (a `style="..."` attribute's own text — a plain
+/// declaration list, never a selector) into a real `PropertyDeclarationBlock`
+/// under this crate's one shared lock — the same fixed `about:florui` URL
+/// and `NoQuirks` mode every other parse in this crate already uses (see
+/// [`crate::stylesheet_parse::parse_str`]), and no error reporter: a
+/// malformed inline declaration is dropped silently, the same as any other
+/// unsupported declaration this crate's cascade already tolerates.
+fn parse_inline_style(css: &str) -> Arc<Locked<PropertyDeclarationBlock>> {
+    let url_data: style::stylesheets::UrlExtraData = url::Url::parse("about:florui")
+        .expect("a fixed, valid URL literal")
+        .into();
+    let block = style::properties::parse_style_attribute(
+        css,
+        &url_data,
+        None,
+        QuirksMode::NoQuirks,
+        style::stylesheets::CssRuleType::Style,
+    );
+    Arc::new(shared_lock().wrap(block))
 }
 
 fn device(viewport: FlorViewport, prefers_color_scheme: PrefersColorScheme) -> Device {

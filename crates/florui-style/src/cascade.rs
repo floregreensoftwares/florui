@@ -928,6 +928,28 @@ mod tests {
     }
 
     #[test]
+    fn a_real_inline_style_attribute_resolves_and_wins_over_a_class_rule() {
+        let tree: Element = view! { <div class="card" style="height: 1900px;" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".card { width: 200px; height: 100px; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(
+            computed[&node].width,
+            Some(200.0),
+            "an unrelated class rule still applies"
+        );
+        assert_eq!(
+            computed[&node].height,
+            Some(1900.0),
+            "a real style=\"...\" attribute is the highest-specificity declaration, \
+             it must win over a class rule for the same property"
+        );
+    }
+
+    #[test]
     fn explicit_size_and_box_model_resolve_correctly() {
         let tree: Element = view! { <div class="card" /> };
         let (arena, computed) = styles(
