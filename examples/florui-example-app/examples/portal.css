@@ -1,0 +1,75 @@
+.page {
+    display: flex;
+    flex-direction: column;
+    padding-top: 24px;
+    padding-right: 24px;
+    padding-bottom: 24px;
+    padding-left: 24px;
+    background-color: #1e1e22;
+    color: #ffffff;
+}
+
+.instructions {
+    margin-bottom: 8px;
+    font-size: 16px;
+}
+
+.status {
+    margin-bottom: 20px;
+    font-size: 16px;
+}
+
+.action {
+    padding-top: 10px;
+    padding-right: 20px;
+    padding-bottom: 10px;
+    padding-left: 20px;
+    background-color: #26262c;
+    color: #ffffff;
+    border-width: 2px;
+    border-style: solid;
+    border-color: #26262c;
+}
+
+.action:focus-visible {
+    border-color: #4c8bf5;
+}
+
+/* A fixed, generously sized backdrop -- this foundation slice has no
+   viewport-fill mechanism yet (no percentage/vh CSS units), so it
+   approximates full coverage rather than tracking the real window
+   size exactly; real anchor/viewport-fill behavior is later work. A
+   real translucent fill (not a simulated dim) -- the overlay paints
+   after the document into the same buffer, so this blends with
+   whatever's already there. */
+.backdrop {
+    width: 700px;
+    height: 500px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: rgba(0, 0, 0, 0.55);
+}
+
+.dialog {
+    width: 320px;
+    padding-top: 24px;
+    padding-right: 24px;
+    padding-bottom: 24px;
+    padding-left: 24px;
+    background-color: #26262c;
+    color: #ffffff;
+    border-width: 2px;
+    border-style: solid;
+    border-color: #4c4c56;
+}
+
+.dialog-title {
+    margin-bottom: 12px;
+    font-size: 18px;
+}
+
+.dialog-body {
+    margin-bottom: 20px;
+    font-size: 14px;
+}
