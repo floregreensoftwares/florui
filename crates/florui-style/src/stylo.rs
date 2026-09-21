@@ -139,6 +139,9 @@ impl StyloTree {
             if state.is_active(id) {
                 node_state |= ElementState::ACTIVE;
             }
+            if state.is_focus_visible(id) {
+                node_state |= ElementState::FOCUSRING;
+            }
             let parent_stable = arena
                 .parent(id)
                 .map(|parent_id| stable_ids[index_of[&parent_id]]);
