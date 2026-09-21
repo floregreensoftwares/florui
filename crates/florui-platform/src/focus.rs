@@ -1,14 +1,14 @@
 //! Which nodes participate in keyboard focus traversal, and in what order.
 //!
-//! v1 is deliberately narrow: `<button>` only, document order, no
-//! `tabindex` — the only primitive with any real interactive behavior
-//! today. Extending this to `a`/`input`/`select`/`textarea` later is one
-//! more `||` in [`is_focusable`], not a redesign.
+//! v1 is deliberately narrow: `<button>` only, not disabled, document
+//! order, no `tabindex` — the only primitive with any real interactive
+//! behavior today. Extending this to `a`/`input`/`select`/`textarea`
+//! later is one more clause in [`is_focusable`], not a redesign.
 
 use florui_style::{Arena, NodeId};
 
 pub(crate) fn is_focusable(arena: &Arena, id: NodeId) -> bool {
-    arena.tag(id) == "button"
+    arena.tag(id) == "button" && !arena.is_disabled(id)
 }
 
 /// Every focusable node, in document order — both the tab-traversal
@@ -46,5 +46,26 @@ mod tests {
         let arena = Arena::build(&tree);
         let span = arena.roots()[0];
         assert!(!is_focusable(&arena, span));
+    }
+
+    #[test]
+    fn a_disabled_button_is_not_focusable() {
+        let tree: Element = view! { <button disabled="true">{"Go"}</button> };
+        let arena = Arena::build(&tree);
+        assert!(!is_focusable(&arena, arena.roots()[0]));
+    }
+
+    #[test]
+    fn focus_order_excludes_disabled_buttons() {
+        let tree: Element = view! {
+            <div>
+                <button>{"First"}</button>
+                <button disabled="true">{"Second"}</button>
+            </div>
+        };
+        let arena = Arena::build(&tree);
+        let order = focus_order(&arena);
+        assert_eq!(order.len(), 1);
+        assert_eq!(arena.text_content(order[0]), "First");
     }
 }

@@ -155,7 +155,7 @@ pub const PRIMITIVES: &[Primitive] = &[
     primitive!(
         "button",
         Content::Normal,
-        "needs focus, keyboard activation, and disabled state once interaction exists"
+        "the only primitive with real focus, keyboard activation, and disabled-state behavior"
     ),
     primitive!(
         "a",

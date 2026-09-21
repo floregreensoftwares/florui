@@ -467,7 +467,21 @@ impl UiRuntime {
     /// handler that writes more than one `Signal` (or writes the same one
     /// more than once) wakes this runtime's host exactly once for the
     /// whole click, not once per write.
+    ///
+    /// A disabled button's handler never fires, regardless of caller:
+    /// real mouse clicks and Enter/Space activation both already funnel
+    /// through here (`desktop.rs`'s own `handle_release`/
+    /// `handle_keyboard_input`), so gating here is the one place that has
+    /// to know about `disabled` at all — and it also catches a button
+    /// that becomes disabled between press and release, which
+    /// `desktop.rs`'s own press-time filtering alone can't (that only
+    /// prevents the separate focus-on-click issue; see `handle_press`'s
+    /// own doc). Tag-gated the same as [`crate::focus::is_focusable`]:
+    /// `disabled` has no wired behavior outside `<button>` in v1.
     pub fn dispatch_click(&self, node: NodeId) {
+        if self.arena.tag(node) == "button" && self.arena.is_disabled(node) {
+            return;
+        }
         if let Some(handler) = self.arena.handler(node, "click") {
             florui_reactive::batch(|| handler.call());
         }
@@ -802,6 +816,49 @@ mod tests {
 
         // Must not panic — the whole point of the test.
         runtime.dispatch_click(node);
+    }
+
+    #[test]
+    fn dispatch_click_on_a_disabled_button_does_not_call_its_handler() {
+        let clicked = Rc::new(Cell::new(false));
+        let clicked_in_handler = Rc::clone(&clicked);
+        let runtime = UiRuntime::with_rules(
+            Vec::new(),
+            move || {
+                let clicked = Rc::clone(&clicked_in_handler);
+                view! { <button disabled="true" onclick={move || clicked.set(true)} /> }
+            },
+            Size::MAX_CONTENT,
+        );
+        let button = runtime.geometry().0.roots()[0];
+
+        runtime.dispatch_click(button);
+
+        assert!(
+            !clicked.get(),
+            "a disabled button's click handler must not fire"
+        );
+    }
+
+    #[test]
+    fn dispatch_click_ignores_disabled_on_a_non_button_element() {
+        // v1 scope: disabled has no wired behavior outside <button> --
+        // see focus::is_focusable's own doc.
+        let clicked = Rc::new(Cell::new(false));
+        let clicked_in_handler = Rc::clone(&clicked);
+        let runtime = UiRuntime::with_rules(
+            Vec::new(),
+            move || {
+                let clicked = Rc::clone(&clicked_in_handler);
+                view! { <div disabled="true" onclick={move || clicked.set(true)} /> }
+            },
+            Size::MAX_CONTENT,
+        );
+        let div = runtime.geometry().0.roots()[0];
+
+        runtime.dispatch_click(div);
+
+        assert!(clicked.get());
     }
 
     #[test]
@@ -1160,6 +1217,60 @@ mod tests {
             runtime.focused(),
             None,
             "focus must clear outright once its element is gone"
+        );
+    }
+
+    #[test]
+    fn focus_next_skips_a_disabled_button() {
+        let mut runtime = UiRuntime::with_rules(
+            Vec::new(),
+            || {
+                view! {
+                    <div>
+                        <button id="a">{"A"}</button>
+                        <button id="b" disabled="true">{"B"}</button>
+                        <button id="c">{"C"}</button>
+                    </div>
+                }
+            },
+            viewport(),
+        );
+        let (a, c) = (node_id(&runtime, "a"), node_id(&runtime, "c"));
+
+        assert!(runtime.focus_next());
+        assert_eq!(runtime.focused(), Some(a));
+        assert!(runtime.focus_next());
+        assert_eq!(
+            runtime.focused(),
+            Some(c),
+            "tab must skip the disabled button in between"
+        );
+    }
+
+    #[test]
+    fn a_button_disabled_at_runtime_loses_focus() {
+        let disabled = Rc::new(Cell::new(false));
+        let disabled_for_root = Rc::clone(&disabled);
+        let mut runtime = UiRuntime::with_rules(
+            Vec::new(),
+            move || {
+                let disabled = disabled_for_root.get();
+                view! { <button id="target" disabled={disabled}>{"Go"}</button> }
+            },
+            viewport(),
+        );
+        let target = node_id(&runtime, "target");
+        runtime.set_focused(Some(target), true);
+        assert_eq!(runtime.focused(), Some(target));
+
+        disabled.set(true);
+        runtime.update(viewport());
+
+        assert_eq!(
+            runtime.focused(),
+            None,
+            "a button must lose focus the instant it becomes disabled -- resolve_focus's \
+             existing no-longer-resolves clearing already covers this"
         );
     }
 }
