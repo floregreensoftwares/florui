@@ -30,6 +30,9 @@ struct ArenaNode {
     /// [`crate::InteractionState`] (see `stylo.rs`'s own `StyloTree::new`
     /// for why).
     disabled: bool,
+    /// The raw, unparsed `style="..."` attribute text, if declared — see
+    /// [`Arena::style_attr`].
+    style: Option<String>,
     /// The node's own direct text, for text measurement — not inherited
     /// from or propagated to any other node.
     text: String,
@@ -121,6 +124,7 @@ impl Arena {
                         classes: class_list(&node.attrs),
                         id: attr_value(&node.attrs, "id"),
                         disabled: attr_bool(&node.attrs, "disabled"),
+                        style: attr_value(&node.attrs, "style"),
                         text: collect_text(&node.children),
                         inline_items: Vec::new(),
                         handlers: node.handlers.clone(),
@@ -206,6 +210,15 @@ impl Arena {
     /// explicit `"true"`/`"false"` is ever seen in practice.
     pub fn is_disabled(&self, id: NodeId) -> bool {
         self.nodes[id].disabled
+    }
+
+    /// This node's raw, unparsed `style="..."` attribute text, if it
+    /// declared one — a real, cascade-honoring inline declaration (highest
+    /// specificity, same as real CSS), not an inert string; see
+    /// [`crate::stylo`]'s `style_attribute` for where it's actually
+    /// parsed and merged in.
+    pub fn style_attr(&self, id: NodeId) -> Option<&str> {
+        self.nodes[id].style.as_deref()
     }
 
     /// This node's own direct text, for measurement: its direct
