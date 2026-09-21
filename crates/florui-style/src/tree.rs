@@ -25,6 +25,11 @@ struct ArenaNode {
     tag: &'static str,
     classes: Vec<String>,
     id: Option<String>,
+    /// Whether the `disabled` attribute is present and `"true"` — markup
+    /// state, computed once here exactly like `id`/`classes`, not through
+    /// [`crate::InteractionState`] (see `stylo.rs`'s own `StyloTree::new`
+    /// for why).
+    disabled: bool,
     /// The node's own direct text, for text measurement — not inherited
     /// from or propagated to any other node.
     text: String,
@@ -87,6 +92,7 @@ impl Arena {
                         tag: node.tag,
                         classes: class_list(&node.attrs),
                         id: attr_value(&node.attrs, "id"),
+                        disabled: attr_bool(&node.attrs, "disabled"),
                         text: collect_text(&node.children),
                         inline_items: Vec::new(),
                         handlers: node.handlers.clone(),
@@ -149,6 +155,16 @@ impl Arena {
 
     pub fn id_attr(&self, id: NodeId) -> Option<&str> {
         self.nodes[id].id.as_deref()
+    }
+
+    /// Whether this node's `disabled` attribute is present and `"true"` —
+    /// e.g. `<button disabled={is_disabled}>` where `is_disabled: bool`
+    /// lowers via `ToString` (see `view!`'s own attribute lowering).
+    /// `false` for any other value or an absent attribute — bare
+    /// `<button disabled>` isn't parseable `view!` syntax, so only an
+    /// explicit `"true"`/`"false"` is ever seen in practice.
+    pub fn is_disabled(&self, id: NodeId) -> bool {
+        self.nodes[id].disabled
     }
 
     /// This node's own direct text, for measurement: its direct
@@ -227,6 +243,10 @@ fn attr_value(attrs: &[(String, String)], name: &str) -> Option<String> {
         .map(|(_, value)| value.clone())
 }
 
+fn attr_bool(attrs: &[(String, String)], name: &str) -> bool {
+    attr_value(attrs, name).as_deref() == Some("true")
+}
+
 fn collect_text(children: &[Element]) -> String {
     let mut text = String::new();
     for child in children {
@@ -297,6 +317,27 @@ mod tests {
         let tree: Element = view! { <div id="main" /> };
         let arena = Arena::build(&tree);
         assert_eq!(arena.id_attr(arena.roots()[0]), Some("main"));
+    }
+
+    #[test]
+    fn disabled_attribute_true_is_read() {
+        let tree: Element = view! { <button disabled="true" /> };
+        let arena = Arena::build(&tree);
+        assert!(arena.is_disabled(arena.roots()[0]));
+    }
+
+    #[test]
+    fn disabled_attribute_false_is_read_as_not_disabled() {
+        let tree: Element = view! { <button disabled="false" /> };
+        let arena = Arena::build(&tree);
+        assert!(!arena.is_disabled(arena.roots()[0]));
+    }
+
+    #[test]
+    fn disabled_attribute_absent_defaults_to_not_disabled() {
+        let tree: Element = view! { <button /> };
+        let arena = Arena::build(&tree);
+        assert!(!arena.is_disabled(arena.roots()[0]));
     }
 
     #[test]

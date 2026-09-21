@@ -142,6 +142,22 @@ impl StyloTree {
             if state.is_focus_visible(id) {
                 node_state |= ElementState::FOCUSRING;
             }
+            // Markup state, not runtime interaction state like hover/
+            // focus above -- read straight from `arena` rather than
+            // threaded through `InteractionState`. Tag-gated to match
+            // `florui_platform::focus::is_focusable`'s own v1 scope:
+            // `disabled` has no wired behavior on anything but <button>
+            // yet, and leaving `state` untouched for every other tag
+            // means neither :disabled nor :enabled ever matches there
+            // either -- the same as real HTML, where both pseudo-classes
+            // only apply to form controls.
+            if arena.tag(id) == "button" {
+                if arena.is_disabled(id) {
+                    node_state |= ElementState::DISABLED;
+                } else {
+                    node_state |= ElementState::ENABLED;
+                }
+            }
             let parent_stable = arena
                 .parent(id)
                 .map(|parent_id| stable_ids[index_of[&parent_id]]);
