@@ -1,0 +1,47 @@
+.page {
+    display: flex;
+    flex-direction: column;
+    padding-top: 24px;
+    padding-right: 24px;
+    padding-bottom: 24px;
+    padding-left: 24px;
+    background-color: #1e1e22;
+    color: #ffffff;
+}
+
+.instructions {
+    margin-bottom: 8px;
+    font-size: 16px;
+}
+
+.status {
+    margin-bottom: 20px;
+    font-size: 16px;
+}
+
+.row {
+    display: flex;
+}
+
+.action {
+    margin-right: 12px;
+    padding-top: 10px;
+    padding-right: 20px;
+    padding-bottom: 10px;
+    padding-left: 20px;
+    background-color: #26262c;
+    color: #ffffff;
+    border-width: 2px;
+    border-style: solid;
+    border-color: #26262c;
+}
+
+.action:focus-visible {
+    border-color: #4c8bf5;
+}
+
+.target:disabled {
+    background-color: #1a1a1d;
+    color: #6b6b73;
+    border-color: #1a1a1d;
+}
