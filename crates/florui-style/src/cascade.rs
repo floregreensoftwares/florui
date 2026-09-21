@@ -699,6 +699,50 @@ mod tests {
     }
 
     #[test]
+    fn disabled_and_enabled_match_a_buttons_markup_state_directly() {
+        let tree: Element = view! {
+            <div>
+                <button disabled="true" class="a">{"A"}</button>
+                <button class="b">{"B"}</button>
+            </div>
+        };
+        let css = ".a, .b { background-color: #111111; } \
+                   button:disabled { background-color: #ff0000; } \
+                   button:enabled { background-color: #00ff00; }";
+        let (arena, computed) = styles(&tree, css, &InteractionState::new());
+        let disabled_button = arena
+            .find(|a, id| a.classes(id).iter().any(|c| c == "a"))
+            .unwrap();
+        let enabled_button = arena
+            .find(|a, id| a.classes(id).iter().any(|c| c == "b"))
+            .unwrap();
+
+        assert_eq!(
+            computed[&disabled_button].background_color,
+            Rgba::opaque(0xff, 0, 0),
+            ":disabled must match a button with disabled=\"true\", with no InteractionState involved"
+        );
+        assert_eq!(
+            computed[&enabled_button].background_color,
+            Rgba::opaque(0, 0xff, 0),
+            ":enabled must match a button that isn't disabled"
+        );
+    }
+
+    #[test]
+    fn disabled_has_no_effect_on_a_non_button_element() {
+        let tree: Element = view! { <div disabled="true" class="a" /> };
+        let css = ".a { background-color: #111111; } div:disabled { background-color: #ff0000; }";
+        let (arena, computed) = styles(&tree, css, &InteractionState::new());
+        let node = arena.roots()[0];
+        assert_eq!(
+            computed[&node].background_color,
+            Rgba::opaque(0x11, 0x11, 0x11),
+            "v1 scope: disabled is only wired into ElementState on <button>"
+        );
+    }
+
+    #[test]
     fn unmatched_node_gets_initial_values() {
         let tree: Element = view! { <div /> };
         let (arena, computed) = styles(
