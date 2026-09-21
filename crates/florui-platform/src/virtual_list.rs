@@ -25,7 +25,7 @@ use std::rc::Rc;
 
 use florui::Element;
 use florui_reactive::{
-    Key, KeyedExtents, ScrollAnchor, use_child_scope_keyed, use_memo, use_ref, use_signal,
+    Key, KeyedExtents, Ref, ScrollAnchor, use_child_scope_keyed, use_memo, use_ref, use_signal,
 };
 
 use crate::scroll::ScrollHandle;
@@ -143,11 +143,14 @@ fn visible_range(
     }
 }
 
-/// A mounted virtualized list's live offset — returned by
-/// [`use_virtual_list`] alongside the [`Element`] it actually renders.
+/// A mounted virtualized list's live offset and imperative controls —
+/// returned by [`use_virtual_list`] alongside the [`Element`] it actually
+/// renders.
 #[derive(Clone)]
 pub struct VirtualListHandle {
     scroll: ScrollHandle,
+    extents: Ref<KeyedExtents>,
+    layout: Ref<Option<Rc<ListLayout>>>,
 }
 
 impl VirtualListHandle {
@@ -155,6 +158,24 @@ impl VirtualListHandle {
     /// [`crate::scroll::ScrollHandle::offset`].
     pub fn offset(&self) -> (f32, f32) {
         self.scroll.offset()
+    }
+
+    /// Scrolls so `key`'s own top edge is at the top of the viewport, if
+    /// it's currently part of the dataset — a key no longer present is a
+    /// silent no-op, the same "caller decides the fallback" contract
+    /// [`ScrollAnchor::resolve`] already has; [`ScrollHandle::scroll_to`]'s
+    /// own clamping still protects against any stale offset regardless.
+    /// Top-edge only in this first pass — start/center/end alignment is a
+    /// small, additive follow-up on this same mechanism, not built here.
+    pub fn scroll_to_item(&self, key: impl Into<Key>) {
+        let Some(layout) = self.layout.get() else {
+            return;
+        };
+        let anchor = ScrollAnchor::new(key.into(), 0.0);
+        if let Some(target_y) = self.extents.with(|e| anchor.resolve(&layout.keys, e)) {
+            let (x, _) = self.scroll.offset();
+            self.scroll.scroll_to(x, target_y);
+        }
     }
 }
 
@@ -300,7 +321,14 @@ pub fn use_virtual_list(
     }
     children.push(spacer(after.max(0.0)));
 
-    (Element::Fragment(children), VirtualListHandle { scroll })
+    (
+        Element::Fragment(children),
+        VirtualListHandle {
+            scroll,
+            extents,
+            layout: last_layout,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -455,6 +483,41 @@ mod tests {
             mounted_row_texts(&runtime),
             vec!["10", "11", "12", "13", "14"],
             "scrolling must dispose the old window's rows and mount the new one"
+        );
+    }
+
+    #[test]
+    fn scroll_to_item_moves_to_the_targets_real_position() {
+        let item_height = 20.0;
+        let (mut runtime, handle_slot) =
+            build_runtime_with_handle(100, item_height, 100.0, Overscan::Items(0));
+        let handle = handle_slot.borrow().clone().unwrap();
+
+        handle.scroll_to_item(Key::from(42usize));
+        runtime.update(viewport());
+
+        assert_eq!(
+            handle.offset(),
+            (0.0, 42.0 * item_height),
+            "scroll_to_item must resolve the target key's own real cumulative offset"
+        );
+        assert_eq!(mounted_row_texts(&runtime)[0], "42");
+    }
+
+    #[test]
+    fn scroll_to_item_on_a_key_no_longer_present_is_a_silent_no_op() {
+        let item_height = 20.0;
+        let (mut runtime, handle_slot) =
+            build_runtime_with_handle(100, item_height, 100.0, Overscan::Items(0));
+        let handle = handle_slot.borrow().clone().unwrap();
+
+        handle.scroll_to_item(Key::from("not-a-real-key"));
+        runtime.update(viewport());
+
+        assert_eq!(
+            handle.offset(),
+            (0.0, 0.0),
+            "a key that was never in the dataset must not move the offset at all"
         );
     }
 
