@@ -24,7 +24,9 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use florui::Element;
-use florui_reactive::{Key, KeyedExtents, use_child_scope_keyed, use_memo, use_ref, use_signal};
+use florui_reactive::{
+    Key, KeyedExtents, ScrollAnchor, use_child_scope_keyed, use_memo, use_ref, use_signal,
+};
 
 use crate::scroll::ScrollHandle;
 use crate::size_observer::use_committed_size;
@@ -201,7 +203,27 @@ pub fn use_virtual_list(
     };
 
     let scroll = use_scroll_offset(id.clone(), |_, _| {});
-    let (_, scroll_top) = scroll.offset();
+    let (scroll_x, mut scroll_top) = scroll.offset();
+
+    // Keeps whatever item is currently topmost pinned across a structural
+    // change (a measurement correcting an estimate, an insertion or
+    // removal ahead of the viewport) -- `last_layout` is compared by *Rc
+    // pointer*, not content, so it changes if and only if `use_memo`
+    // above actually recomputed (item_count/dataset_version/extents_version
+    // genuinely changed), never merely because the user scrolled. Without
+    // that distinction, resolving the anchor on every render would fight
+    // a real, in-progress scroll instead of only correcting real drift.
+    let last_layout = use_ref(|| None::<Rc<ListLayout>>);
+    let anchor = use_ref(|| None::<ScrollAnchor>);
+    if let (Some(previous), Some(current_anchor)) = (last_layout.get(), anchor.get())
+        && !Rc::ptr_eq(&previous, &layout)
+        && let Some(target_y) = extents.with(|e| current_anchor.resolve(&layout.keys, e))
+        && (target_y - scroll_top).abs() > f32::EPSILON
+    {
+        scroll.scroll_to(scroll_x, target_y);
+        scroll_top = target_y;
+    }
+    last_layout.set(Some(Rc::clone(&layout)));
 
     // `ScrollHandle::viewport_size` is a deliberately non-reactive query
     // against last-known geometry (same contract as `use_committed_size`
@@ -219,6 +241,13 @@ pub fn use_virtual_list(
     let viewport_height = viewport_height_signal.get();
     let range = visible_range(&layout, scroll_top, viewport_height, &overscan);
 
+    anchor.set(range.clone().next().map(|first| {
+        ScrollAnchor::new(
+            layout.keys[first].clone(),
+            scroll_top - layout.cumulative[first],
+        )
+    }));
+
     let before = layout.cumulative.get(range.start).copied().unwrap_or(0.0);
     let after = layout.total()
         - layout
@@ -226,17 +255,17 @@ pub fn use_virtual_list(
             .get(range.end)
             .copied()
             .unwrap_or_else(|| layout.total());
-
     let mut children = Vec::with_capacity(range.len() + 2);
     children.push(spacer(before));
     for i in range {
         let key = layout.keys[i].clone();
-        let element = use_child_scope_keyed(key.clone(), || {
+        let row_id = format!("{id}__row__{i}");
+        let mut element = use_child_scope_keyed(key.clone(), || {
             if measures {
                 let extents = extents.clone();
                 let extents_version = extents_version.clone();
                 let row_key = key.clone();
-                use_committed_size(format!("{id}__row__{i}"), move |_w, h| {
+                use_committed_size(row_id.clone(), move |_w, h| {
                     let changed = extents.with_mut(|e| {
                         let before = e.get(&row_key).value();
                         e.measure(row_key.clone(), h);
@@ -249,6 +278,24 @@ pub fn use_virtual_list(
             }
             render_item(i)
         });
+        if measures {
+            // `use_committed_size` above measures whatever real element in
+            // the tree carries this same id -- `render_item`'s own output
+            // has no way to know what id to declare itself, so it's
+            // stamped on directly here: onto the returned node's own attrs
+            // when it already is one (the common case), or a synthetic
+            // wrapper otherwise (a bare text/fragment result has no
+            // attrs of its own to carry it).
+            match &mut element {
+                Element::Node(node) => {
+                    node.attrs.retain(|(name, _)| name != "id");
+                    node.attrs.push(("id".to_string(), row_id));
+                }
+                Element::Text(_) | Element::Fragment(_) => {
+                    element = Element::node("div", vec![("id".to_string(), row_id)], vec![element]);
+                }
+            }
+        }
         children.push(element);
     }
     children.push(spacer(after.max(0.0)));
@@ -415,5 +462,223 @@ mod tests {
     fn an_empty_dataset_mounts_no_rows_and_does_not_panic() {
         let runtime = build_runtime(0, 20.0, 100.0, Overscan::Items(3));
         assert!(mounted_row_texts(&runtime).is_empty());
+    }
+
+    /// A dataset addressed by *stable ids*, not index -- unlike `row`'s
+    /// plain `Key::from(i)` (fine for the tests above, where nothing ever
+    /// reorders), this is what a real insertion/removal test needs:
+    /// `key_for`/`render_item` must key and label by the item's own
+    /// identity, so a later render with a different `item_count`/ordering
+    /// can still recognize "the same item" by its stable id even though
+    /// its own index shifted underneath it.
+    fn build_runtime_with_stable_ids(
+        ids: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        version: std::rc::Rc<std::cell::Cell<u32>>,
+        item_height: f32,
+        viewport_height: f32,
+    ) -> UiRuntime {
+        let root = {
+            let ids = std::rc::Rc::clone(&ids);
+            let version = std::rc::Rc::clone(&version);
+            move || {
+                let snapshot = std::rc::Rc::new(ids.borrow().clone());
+                let item_count = snapshot.len();
+                let key_for = {
+                    let snapshot = std::rc::Rc::clone(&snapshot);
+                    move |i: usize| Key::from(snapshot[i].clone())
+                };
+                let render_item = {
+                    let snapshot = std::rc::Rc::clone(&snapshot);
+                    move |i: usize| {
+                        Element::node(
+                            "div",
+                            vec![("class".to_string(), "row".to_string())],
+                            vec![Element::text(snapshot[i].clone())],
+                        )
+                    }
+                };
+                let (content, _handle) = use_virtual_list(
+                    "list",
+                    item_count,
+                    version.get(),
+                    ItemHeight::Fixed(item_height),
+                    Overscan::Items(0),
+                    key_for,
+                    render_item,
+                );
+                Element::node(
+                    "div",
+                    vec![
+                        ("id".to_string(), "list".to_string()),
+                        ("class".to_string(), "viewport".to_string()),
+                    ],
+                    vec![content],
+                )
+            }
+        };
+        let css = format!(
+            ".viewport {{ width: 100px; height: {viewport_height}px; overflow-y: auto; }} \
+             .row {{ height: {item_height}px; }}"
+        );
+        let mut runtime =
+            UiRuntime::new(&css, root, viewport()).expect("this test's own CSS always parses");
+        runtime.update(viewport());
+        runtime
+    }
+
+    #[test]
+    fn insertion_before_the_viewport_keeps_the_anchored_item_in_the_same_screen_position() {
+        let item_height = 20.0;
+        let ids = std::rc::Rc::new(std::cell::RefCell::new(
+            (0..100).map(|i| format!("item-{i}")).collect::<Vec<_>>(),
+        ));
+        let version = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let mut runtime = build_runtime_with_stable_ids(
+            std::rc::Rc::clone(&ids),
+            std::rc::Rc::clone(&version),
+            item_height,
+            100.0,
+        );
+
+        // Scroll so "item-20" is the first mounted row.
+        assert!(
+            runtime
+                .scroll_registry()
+                .scroll_to("list", 0.0, 20.0 * item_height)
+        );
+        runtime.update(viewport());
+        assert_eq!(mounted_row_texts(&runtime)[0], "item-20");
+
+        // Insert 10 new items ahead of everything -- "item-20" is now at
+        // index 30, but it's still the *same* item by its own stable id.
+        {
+            let mut ids = ids.borrow_mut();
+            for i in (0..10).rev() {
+                ids.insert(0, format!("new-{i}"));
+            }
+        }
+        version.set(version.get() + 1);
+        runtime.update(viewport());
+
+        assert_eq!(
+            mounted_row_texts(&runtime)[0],
+            "item-20",
+            "the anchored item must still be the first mounted row after an insertion ahead of it"
+        );
+        assert!(
+            !runtime
+                .scroll_registry()
+                .scroll_to("list", 0.0, 30.0 * item_height),
+            "the scroll offset must already have been corrected to item-20's new position -- \
+             asking to scroll there again should be a no-op, not a real change"
+        );
+    }
+
+    #[test]
+    fn a_deleted_anchor_does_not_panic_and_leaves_the_offset_clamped() {
+        let item_height = 20.0;
+        let ids = std::rc::Rc::new(std::cell::RefCell::new(
+            (0..100).map(|i| format!("item-{i}")).collect::<Vec<_>>(),
+        ));
+        let version = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let mut runtime = build_runtime_with_stable_ids(
+            std::rc::Rc::clone(&ids),
+            std::rc::Rc::clone(&version),
+            item_height,
+            100.0,
+        );
+
+        assert!(
+            runtime
+                .scroll_registry()
+                .scroll_to("list", 0.0, 20.0 * item_height)
+        );
+        runtime.update(viewport());
+        assert_eq!(mounted_row_texts(&runtime)[0], "item-20");
+
+        // Delete exactly the anchored item -- `ScrollAnchor::resolve` has
+        // nothing left to resolve against.
+        {
+            let mut ids = ids.borrow_mut();
+            ids.remove(20);
+        }
+        version.set(version.get() + 1);
+        runtime.update(viewport());
+
+        // No fallback is chosen for a deleted anchor -- the offset is left
+        // exactly as it was, and `ScrollRegistry::sync`'s own clamp is
+        // still what protects it from pointing past the (now one item
+        // shorter) real content.
+        assert_eq!(mounted_row_texts(&runtime)[0], "item-21");
+    }
+
+    #[test]
+    fn an_estimate_correcting_to_a_real_measurement_updates_the_total_scrollable_extent() {
+        let estimate = 20.0;
+        let real_first_row_height = 100.0;
+        let handle_slot: std::rc::Rc<std::cell::RefCell<Option<VirtualListHandle>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let root = {
+            let handle_slot = std::rc::Rc::clone(&handle_slot);
+            move || {
+                let (content, handle) = use_virtual_list(
+                    "list",
+                    100,
+                    (),
+                    ItemHeight::Variable { estimate },
+                    Overscan::Items(0),
+                    Key::from,
+                    |i| {
+                        let class = if i == 0 { "tall-row" } else { "row" };
+                        Element::node(
+                            "div",
+                            vec![("class".to_string(), class.to_string())],
+                            vec![Element::text(i.to_string())],
+                        )
+                    },
+                );
+                *handle_slot.borrow_mut() = Some(handle);
+                Element::node(
+                    "div",
+                    vec![
+                        ("id".to_string(), "list".to_string()),
+                        ("class".to_string(), "viewport".to_string()),
+                    ],
+                    vec![content],
+                )
+            }
+        };
+        let css = format!(
+            ".viewport {{ width: 100px; height: 100px; overflow-y: auto; }} \
+             .row {{ height: {estimate}px; }} \
+             .tall-row {{ height: {real_first_row_height}px; }}"
+        );
+        let mut runtime =
+            UiRuntime::new(&css, root, viewport()).expect("this test's own CSS always parses");
+        // Settles across several real passes: the first mounts nothing
+        // (the viewport's own real height isn't known yet), the second
+        // mounts row 0 at its estimate for the first time (only *then*
+        // does it get a real `use_committed_size` registration to
+        // measure), and only the third actually renders against row 0's
+        // corrected extent.
+        for _ in 0..4 {
+            runtime.update(viewport());
+        }
+
+        // Uncorrected total would be 100 * 20 = 2000 (max scroll 1900);
+        // the real total is 99 * 20 + 100 = 2080 (max scroll 1980) --
+        // scrolling far past either and reading back the *clamped* offset
+        // distinguishes whether the correction actually reached the
+        // scrollable extent, not just this list's own internal bookkeeping.
+        runtime
+            .scroll_registry()
+            .scroll_to("list", 0.0, 1_000_000.0);
+        runtime.update(viewport());
+        let handle = handle_slot.borrow().clone().unwrap();
+        assert_eq!(
+            handle.offset(),
+            (0.0, 1980.0),
+            "the corrected (not estimated) total extent must be what scrolling clamps against"
+        );
     }
 }
