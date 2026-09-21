@@ -20,6 +20,7 @@ use florui_style::{
 use taffy::prelude::*;
 
 use crate::focus;
+use crate::portal::PortalRegistry;
 use crate::scroll::ScrollRegistry;
 use crate::size_observer::SizeObserverRegistry;
 
@@ -76,6 +77,13 @@ pub struct UiRuntime {
     /// `size_observers` is — synced right after it, once this render's own
     /// real layout and content extents exist.
     scroll_registry: Rc<ScrollRegistry>,
+    /// Reachable by [`crate::Portal`] via context, the same way
+    /// `size_observers` is. Drained once per [`Self::update`], right
+    /// after this render's own `scope.render` call returns and before
+    /// [`Arena::build_with_overlays`] sees the result — see
+    /// [`PortalRegistry::take`]'s own doc for why no unmount lifecycle is
+    /// needed here, unlike `size_observers`.
+    portal_registry: Rc<PortalRegistry>,
     /// Extra `provide_context` calls a host supplied at construction — run
     /// every [`Self::update`] (including the very first one, inside
     /// [`Self::with_rules`] itself) alongside `executor`/`size_observers`,
@@ -171,6 +179,7 @@ impl UiRuntime {
             executor: Rc::new(LocalExecutor::new()),
             size_observers: Rc::new(SizeObserverRegistry::new()),
             scroll_registry: Rc::new(ScrollRegistry::new()),
+            portal_registry: Rc::new(PortalRegistry::new()),
             extra_context_providers,
         };
         runtime.update(viewport);
@@ -267,19 +276,22 @@ impl UiRuntime {
         let executor = Rc::clone(&self.executor);
         let size_observers = Rc::clone(&self.size_observers);
         let scroll_registry = Rc::clone(&self.scroll_registry);
+        let portal_registry = Rc::clone(&self.portal_registry);
         let tree = self.scope.render(|| {
             provide_context(Rc::clone(&executor) as Rc<dyn Executor>);
             provide_context(Rc::clone(&size_observers));
             provide_context(Rc::clone(&scroll_registry));
+            provide_context(Rc::clone(&portal_registry));
             for provider in &self.extra_context_providers {
                 provider();
             }
             (self.root)()
         });
+        let portals = self.portal_registry.take();
         // Lets any resource the render just started (or a prior task's
         // waker already requeued) make progress before this frame commits.
         self.executor.run_until_stalled();
-        self.arena = Arena::build(&tree);
+        self.arena = Arena::build_with_overlays(&tree, &Element::Fragment(portals));
         self.resolve_focus();
         self.animation_timeline
             .advance_to(self.animation_epoch.elapsed().as_secs_f64());
@@ -530,7 +542,7 @@ mod tests {
     use florui_reactive::{Resource, use_context, use_resource};
 
     use super::*;
-    use crate::use_committed_size;
+    use crate::{Portal, PortalProps, use_committed_size};
 
     fn viewport() -> Size<AvailableSpace> {
         Size {
@@ -1271,6 +1283,91 @@ mod tests {
             None,
             "a button must lose focus the instant it becomes disabled -- resolve_focus's \
              existing no-longer-resolves clearing already covers this"
+        );
+    }
+
+    #[test]
+    fn a_portal_appears_as_an_overlay_root_only_while_rendered() {
+        let show = Rc::new(Cell::new(false));
+        let show_for_root = Rc::clone(&show);
+        let mut runtime = UiRuntime::with_rules(
+            Vec::new(),
+            move || {
+                let overlay = if show_for_root.get() {
+                    view! { <Portal><div id="overlay" /></Portal> }
+                } else {
+                    view! { <div /> }
+                };
+                view! {
+                    <div>
+                        <div id="doc" />
+                        {overlay}
+                    </div>
+                }
+            },
+            viewport(),
+        );
+
+        assert!(
+            runtime.geometry().0.overlay_roots().is_empty(),
+            "nothing rendered a Portal yet"
+        );
+
+        show.set(true);
+        runtime.update(viewport());
+        let (arena, _, layouts) = runtime.geometry();
+        assert_eq!(arena.overlay_roots().len(), 1);
+        let overlay_root = arena.overlay_roots()[0];
+        assert_eq!(arena.id_attr(overlay_root), Some("overlay"));
+        assert!(layouts.contains_key(&overlay_root));
+
+        show.set(false);
+        runtime.update(viewport());
+        assert!(
+            runtime.geometry().0.overlay_roots().is_empty(),
+            "the registry must not leave stale content once nothing renders a Portal"
+        );
+
+        show.set(true);
+        runtime.update(viewport());
+        assert_eq!(
+            runtime.geometry().0.overlay_roots().len(),
+            1,
+            "a Portal rendered again after being hidden must reappear"
+        );
+    }
+
+    #[test]
+    fn dispatch_click_on_portal_content_does_not_reach_a_backdrop_beneath_it() {
+        let backdrop_clicked = Rc::new(Cell::new(false));
+        let backdrop_clicked_in_handler = Rc::clone(&backdrop_clicked);
+        let content_clicked = Rc::new(Cell::new(false));
+        let content_clicked_in_handler = Rc::clone(&content_clicked);
+
+        let runtime = UiRuntime::with_rules(
+            Vec::new(),
+            move || {
+                let backdrop_clicked = Rc::clone(&backdrop_clicked_in_handler);
+                let content_clicked = Rc::clone(&content_clicked_in_handler);
+                view! {
+                    <Portal>
+                        <div id="backdrop" onclick={move || backdrop_clicked.set(true)}>
+                            <div id="content" onclick={move || content_clicked.set(true)} />
+                        </div>
+                    </Portal>
+                }
+            },
+            viewport(),
+        );
+
+        let content = node_id(&runtime, "content");
+        runtime.dispatch_click(content);
+
+        assert!(content_clicked.get());
+        assert!(
+            !backdrop_clicked.get(),
+            "dispatch_click targets exactly the hit-tested node -- no bubbling to an ancestor, \
+             which is what makes a plain backdrop onclick safe to use for dismissal"
         );
     }
 }
