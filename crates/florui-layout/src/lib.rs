@@ -427,23 +427,152 @@ fn compute_layout_with_content_extents(
     // see that pass's own comment for why they aren't ordinary Taffy nodes.
     let mut inline_leaves: Vec<(NodeId, Vec<InlineContentItem>)> = Vec::new();
 
-    for &root in arena.roots() {
-        build_node(
+    layout_root_group(
+        font,
+        arena,
+        styles,
+        arena.document_roots(),
+        available,
+        &mut tree,
+        &mut taffy_ids,
+        &mut inline_leaves,
+    )?;
+
+    // A second, independent layout pass, its own synthetic wrapper -- so
+    // Taffy treats it as its own top of computation, landing at (0, 0)
+    // relative to the real viewport `available` describes, not shifted by
+    // anything the document pass above computed. Skipped entirely when
+    // there's nothing to portal, the common case, at the cost of one
+    // `is_empty` check.
+    if !arena.overlay_roots().is_empty() {
+        layout_root_group(
             font,
             arena,
             styles,
-            root,
+            arena.overlay_roots(),
+            available,
             &mut tree,
             &mut taffy_ids,
             &mut inline_leaves,
-        )
-        .map_err(LayoutError)?;
+        )?;
     }
 
-    // A synthetic block container wraps every root so multiple top-level
-    // elements (view! can produce a Fragment) have somewhere to stack;
-    // its own id is never looked up, only real `arena` nodes are.
-    let root_children: Vec<taffy::NodeId> = arena.roots().iter().map(|id| taffy_ids[id]).collect();
+    let mut result = HashMap::with_capacity(taffy_ids.len());
+    let mut content_extents = HashMap::with_capacity(taffy_ids.len());
+    for (&node_id, &tid) in &taffy_ids {
+        let layout = tree.layout(tid).map_err(LayoutError)?;
+        result.insert(
+            node_id,
+            BoxLayout {
+                x: layout.location.x,
+                y: layout.location.y,
+                width: layout.size.width,
+                height: layout.size.height,
+            },
+        );
+        content_extents.insert(
+            node_id,
+            ContentExtent {
+                width: layout.scrollable_overflow_rect.right - layout.scrollable_overflow_rect.left,
+                height: layout.scrollable_overflow_rect.bottom
+                    - layout.scrollable_overflow_rect.top,
+            },
+        );
+    }
+
+    // Second pass: an inline-formatting-context leaf's own `Box` items
+    // (real `display: inline-block` children) are not Taffy nodes of their
+    // own — they were absorbed into their container's single leaf above,
+    // since Taffy has no inline display mode to give them one — so their
+    // own `BoxLayout` is derived here instead, by rerunning the exact same
+    // real inline layout at the container's now-final resolved width.
+    // Deterministic, not a guess: the same width always produces the same
+    // wrap points and box positions, and this is exactly the width
+    // `measure_leaf` would also have used for Taffy's own final "perform
+    // layout" call on this same leaf.
+    for (container, items) in &inline_leaves {
+        let tid = taffy_ids[container];
+        let layout = tree.layout(tid).map_err(LayoutError)?;
+        let content: Vec<florui_text::InlineContent<'_>> =
+            items.iter().map(to_inline_content).collect();
+        let shaped = font.shape_inline(&content, Some(layout.size.width));
+
+        let container_style = styles.get(container);
+        // A `Box` item's own position comes back from `shape_inline`
+        // relative to the container's content-box origin — matching the
+        // same "includes the parent's own padding" convention every other
+        // `BoxLayout` entry already uses (see `absolute_position`'s own
+        // accumulation), the container's own padding is added here.
+        let padding_left = container_style.map_or(0.0, |s| s.padding.left);
+        let padding_top = container_style.map_or(0.0, |s| s.padding.top);
+
+        let box_sizes: HashMap<NodeId, (f32, f32)> = items
+            .iter()
+            .filter_map(|item| match item {
+                InlineContentItem::Box {
+                    child,
+                    width,
+                    height,
+                } => Some((*child, (*width, *height))),
+                InlineContentItem::Text { .. } => None,
+            })
+            .collect();
+
+        for positioned in shaped.boxes {
+            let child = positioned.id as NodeId;
+            if let Some(&(width, height)) = box_sizes.get(&child) {
+                result.insert(
+                    child,
+                    BoxLayout {
+                        x: positioned.x + padding_left,
+                        y: positioned.y + padding_top,
+                        width,
+                        height,
+                    },
+                );
+                // Not an independent Taffy node — see this pass's own
+                // comment above — so it has no `scrollable_overflow_rect`
+                // of its own; its content extent is just its own box size,
+                // the correct value for a leaf that never overflows itself.
+                content_extents.insert(child, ContentExtent { width, height });
+            }
+        }
+    }
+
+    Ok((result, content_extents))
+}
+
+/// Builds `roots` (via [`build_node`], already root-agnostic) and lays
+/// them out together against `available`, wrapped in one synthetic block
+/// container so multiple siblings (`view!` can produce a `Fragment`, and
+/// so can a portal registry) have somewhere to stack — the exact
+/// behavior [`compute_layout`] always had for its one root group,
+/// factored out so it can run a second, independent time for overlay
+/// roots. Each call's own synthetic wrapper is its own top of
+/// computation as far as Taffy is concerned, so a second call's roots
+/// land at `(0, 0)` relative to `available` regardless of what an
+/// earlier call already computed — not nested inside it, not offset by
+/// it.
+#[allow(clippy::too_many_arguments)]
+fn layout_root_group(
+    font: &mut florui_text::Font,
+    arena: &Arena,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    roots: &[NodeId],
+    available: Size<AvailableSpace>,
+    tree: &mut TaffyTree<LeafContext>,
+    taffy_ids: &mut HashMap<NodeId, taffy::NodeId>,
+    inline_leaves: &mut Vec<(NodeId, Vec<InlineContentItem>)>,
+) -> Result<(), LayoutError> {
+    for &root in roots {
+        build_node(font, arena, styles, root, tree, taffy_ids, inline_leaves)
+            .map_err(LayoutError)?;
+    }
+
+    // A synthetic block container wraps every root in this group so
+    // multiple top-level elements have somewhere to stack; its own id is
+    // never looked up, only real `arena` nodes are.
+    let root_children: Vec<taffy::NodeId> = roots.iter().map(|id| taffy_ids[id]).collect();
     let synthetic_root = tree
         .new_with_children(
             taffy::Style {
@@ -462,8 +591,8 @@ fn compute_layout_with_content_extents(
     // closure below on every call, this lets `measure_leaf` reuse the one
     // Parley layout each leaf actually needs across every one of those
     // calls instead of reshaping from scratch each time. Scoped to this
-    // one call: a fresh, empty map every `compute_layout` call, nothing
-    // persisted across renders.
+    // one call: a fresh, empty map every call, nothing persisted across
+    // renders or between this group and any other.
     let mut shaping_caches: HashMap<taffy::NodeId, Option<florui_text::CachedLayout>> =
         HashMap::new();
 
@@ -563,89 +692,7 @@ fn compute_layout_with_content_extents(
     })
     .map_err(LayoutError)?;
 
-    let mut result = HashMap::with_capacity(taffy_ids.len());
-    let mut content_extents = HashMap::with_capacity(taffy_ids.len());
-    for (&node_id, &tid) in &taffy_ids {
-        let layout = tree.layout(tid).map_err(LayoutError)?;
-        result.insert(
-            node_id,
-            BoxLayout {
-                x: layout.location.x,
-                y: layout.location.y,
-                width: layout.size.width,
-                height: layout.size.height,
-            },
-        );
-        content_extents.insert(
-            node_id,
-            ContentExtent {
-                width: layout.scrollable_overflow_rect.right - layout.scrollable_overflow_rect.left,
-                height: layout.scrollable_overflow_rect.bottom
-                    - layout.scrollable_overflow_rect.top,
-            },
-        );
-    }
-
-    // Second pass: an inline-formatting-context leaf's own `Box` items
-    // (real `display: inline-block` children) are not Taffy nodes of their
-    // own — they were absorbed into their container's single leaf above,
-    // since Taffy has no inline display mode to give them one — so their
-    // own `BoxLayout` is derived here instead, by rerunning the exact same
-    // real inline layout at the container's now-final resolved width.
-    // Deterministic, not a guess: the same width always produces the same
-    // wrap points and box positions, and this is exactly the width
-    // `measure_leaf` would also have used for Taffy's own final "perform
-    // layout" call on this same leaf.
-    for (container, items) in &inline_leaves {
-        let tid = taffy_ids[container];
-        let layout = tree.layout(tid).map_err(LayoutError)?;
-        let content: Vec<florui_text::InlineContent<'_>> =
-            items.iter().map(to_inline_content).collect();
-        let shaped = font.shape_inline(&content, Some(layout.size.width));
-
-        let container_style = styles.get(container);
-        // A `Box` item's own position comes back from `shape_inline`
-        // relative to the container's content-box origin — matching the
-        // same "includes the parent's own padding" convention every other
-        // `BoxLayout` entry already uses (see `absolute_position`'s own
-        // accumulation), the container's own padding is added here.
-        let padding_left = container_style.map_or(0.0, |s| s.padding.left);
-        let padding_top = container_style.map_or(0.0, |s| s.padding.top);
-
-        let box_sizes: HashMap<NodeId, (f32, f32)> = items
-            .iter()
-            .filter_map(|item| match item {
-                InlineContentItem::Box {
-                    child,
-                    width,
-                    height,
-                } => Some((*child, (*width, *height))),
-                InlineContentItem::Text { .. } => None,
-            })
-            .collect();
-
-        for positioned in shaped.boxes {
-            let child = positioned.id as NodeId;
-            if let Some(&(width, height)) = box_sizes.get(&child) {
-                result.insert(
-                    child,
-                    BoxLayout {
-                        x: positioned.x + padding_left,
-                        y: positioned.y + padding_top,
-                        width,
-                        height,
-                    },
-                );
-                // Not an independent Taffy node — see this pass's own
-                // comment above — so it has no `scrollable_overflow_rect`
-                // of its own; its content extent is just its own box size,
-                // the correct value for a leaf that never overflows itself.
-                content_extents.insert(child, ContentExtent { width, height });
-            }
-        }
-    }
-
-    Ok((result, content_extents))
+    Ok(())
 }
 
 /// Same job as calling [`florui_style::compute`] then [`compute_layout`] in
@@ -1459,6 +1506,59 @@ mod tests {
         (arena, styles, layouts)
     }
 
+    fn layout_with_overlays_for(
+        document: &Element,
+        overlays: &Element,
+        css: &str,
+        available: Size<AvailableSpace>,
+    ) -> (Arena, HashMap<NodeId, BoxLayout>) {
+        let arena = Arena::build_with_overlays(document, overlays);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+            &mut florui_style::AnimationTimeline::default(),
+        );
+        let mut font = florui_text::Font::load_embedded();
+        let layouts = compute_layout(&mut font, &arena, &styles, available).unwrap();
+        (arena, layouts)
+    }
+
+    #[test]
+    fn an_overlay_root_lays_out_at_the_viewport_origin_regardless_of_document_content() {
+        let document: Element = view! { <div class="doc" /> };
+        let overlay: Element = view! { <div class="overlay" /> };
+        let available = Size {
+            width: AvailableSpace::Definite(300.0),
+            height: AvailableSpace::Definite(200.0),
+        };
+        let (arena, layouts) = layout_with_overlays_for(
+            &document,
+            &overlay,
+            ".doc { width: 300px; height: 900px; } .overlay { width: 50px; height: 30px; }",
+            available,
+        );
+        let overlay_root = arena.overlay_roots()[0];
+        assert_eq!(
+            layouts[&overlay_root].x, 0.0,
+            "an overlay root must start at the viewport's own origin, not shifted by document \
+             content -- before this fix it would land below 900px of document height instead"
+        );
+        assert_eq!(layouts[&overlay_root].y, 0.0);
+        assert_eq!(layouts[&overlay_root].width, 50.0);
+        assert_eq!(layouts[&overlay_root].height, 30.0);
+    }
+
+    #[test]
+    fn an_arena_built_without_overlays_never_runs_the_second_layout_pass() {
+        let tree: Element = view! { <div /> };
+        let (arena, layouts) = layout_for(&tree, "");
+        assert!(arena.overlay_roots().is_empty());
+        assert_eq!(layouts.len(), 1, "only the one document root is laid out");
+    }
+
     #[test]
     fn an_explicitly_sized_node_gets_that_size() {
         let tree: Element = view! { <div class="card" /> };
@@ -1744,6 +1844,29 @@ mod tests {
             hit_test(&arena, &layouts, 200.0, 200.0),
             None,
             "outside every box"
+        );
+    }
+
+    #[test]
+    fn hit_test_prefers_an_overlay_root_over_overlapping_document_content() {
+        let document: Element = view! { <div class="doc" /> };
+        let overlay: Element = view! { <div class="overlay" /> };
+        let available = Size {
+            width: AvailableSpace::Definite(200.0),
+            height: AvailableSpace::Definite(200.0),
+        };
+        let (arena, layouts) = layout_with_overlays_for(
+            &document,
+            &overlay,
+            ".doc { width: 200px; height: 200px; } .overlay { width: 200px; height: 200px; }",
+            available,
+        );
+        let overlay_root = arena.overlay_roots()[0];
+
+        assert_eq!(
+            hit_test(&arena, &layouts, 50.0, 50.0),
+            Some(overlay_root),
+            "an overlay root fully covering the document must win hit-testing"
         );
     }
 
