@@ -6,6 +6,7 @@
 //! through `Element` itself.
 
 use florui::{Element, Handler};
+use florui_reactive::Binding;
 
 pub type NodeId = usize;
 
@@ -41,6 +42,9 @@ struct ArenaNode {
     /// see [`Arena::inline_items`].
     inline_items: Vec<InlineItem>,
     handlers: Vec<(String, Handler)>,
+    /// A typed write-back channel for a primitive attribute (today, only
+    /// `value` on `<input>`) — see [`Arena::value_binding`].
+    bindings: Vec<(String, Binding<String>)>,
     parent: Option<NodeId>,
     children: Vec<NodeId>,
 }
@@ -128,6 +132,7 @@ impl Arena {
                         text: collect_text(&node.children),
                         inline_items: Vec::new(),
                         handlers: node.handlers.clone(),
+                        bindings: node.bindings.clone(),
                         parent,
                         children: Vec::new(),
                     });
@@ -252,6 +257,19 @@ impl Arena {
             .iter()
             .find(|(name, _)| name == event)
             .map(|(_, handler)| handler)
+    }
+
+    /// The typed write-back channel this node declared for `attr` (e.g.
+    /// `"value"` for a `value={binding}` attribute on `<input>`), if any
+    /// — `None` both when the node declared no such attribute at all and
+    /// when it declared a plain string literal instead (nothing to write
+    /// back to either way).
+    pub fn value_binding(&self, id: NodeId, attr: &str) -> Option<&Binding<String>> {
+        self.nodes[id]
+            .bindings
+            .iter()
+            .find(|(name, _)| name == attr)
+            .map(|(_, binding)| binding)
     }
 
     /// Depth-first pre-order search across every root, for tests and
@@ -491,6 +509,24 @@ mod tests {
         let button = arena.roots()[0];
         assert!(arena.handler(button, "click").is_some());
         assert!(arena.handler(button, "mouseenter").is_none());
+    }
+
+    #[test]
+    fn value_binding_finds_the_declared_attributes_typed_binding() {
+        let binding = Binding::new("Ada".to_string(), |_| {});
+        let tree: Element = view! { <input type="text" value={binding} /> };
+        let arena = Arena::build(&tree);
+        let input = arena.roots()[0];
+        assert!(arena.value_binding(input, "value").is_some());
+        assert!(arena.value_binding(input, "type").is_none());
+    }
+
+    #[test]
+    fn value_binding_is_none_for_a_string_literal_value() {
+        let tree: Element = view! { <input type="text" value="static" /> };
+        let arena = Arena::build(&tree);
+        let input = arena.roots()[0];
+        assert!(arena.value_binding(input, "value").is_none());
     }
 
     #[test]

@@ -5,6 +5,8 @@
 //! only records what was written: tags, string attributes, event handlers,
 //! text, and children.
 
+use florui_reactive::Binding;
+
 use crate::Handler;
 
 /// A node produced by `view!`: a tagged element, a text run, or a fragment
@@ -23,6 +25,13 @@ pub struct ElementNode {
     /// Callbacks from `on*` attributes (`onclick={...}`), keyed by event
     /// name with the leading `on` stripped (`"click"`).
     pub handlers: Vec<(String, Handler)>,
+    /// A typed write-back channel for a primitive attribute (today, only
+    /// `value={binding}` on `<input>`) alongside its plain-string form
+    /// already in `attrs` -- every string-only consumer (measurement,
+    /// paint) keeps reading `attrs` unchanged; only a write path (a real
+    /// text-editing widget) needs this to request an update back to the
+    /// owner.
+    pub bindings: Vec<(String, Binding<String>)>,
     pub children: Vec<Element>,
 }
 
@@ -37,10 +46,21 @@ impl Element {
         handlers: Vec<(String, Handler)>,
         children: Vec<Element>,
     ) -> Self {
+        Self::node_with_bindings(tag, attrs, handlers, Vec::new(), children)
+    }
+
+    pub fn node_with_bindings(
+        tag: &'static str,
+        attrs: Vec<(String, String)>,
+        handlers: Vec<(String, Handler)>,
+        bindings: Vec<(String, Binding<String>)>,
+        children: Vec<Element>,
+    ) -> Self {
         Element::Node(ElementNode {
             tag,
             attrs,
             handlers,
+            bindings,
             children,
         })
     }

@@ -20,6 +20,7 @@
 //! will read and write through, proven here with plain values rather than
 //! a real control.
 
+use std::fmt;
 use std::rc::Rc;
 
 /// A read/write exchange for one value: [`Self::get`] reads the owner's
@@ -84,6 +85,15 @@ impl<T: Clone> Binding<T> {
     }
 }
 
+impl<T> fmt::Debug for Binding<T> {
+    /// Same "identity, not content" reasoning as `PartialEq` -- printing
+    /// `value` would need `T: Debug`, a bound this type otherwise never
+    /// requires of its callers.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Binding(..)")
+    }
+}
+
 impl<T: Clone> Clone for Binding<T> {
     fn clone(&self) -> Self {
         Self {
@@ -92,6 +102,20 @@ impl<T: Clone> Clone for Binding<T> {
         }
     }
 }
+
+impl<T> PartialEq for Binding<T> {
+    /// Equal only if they share the same owner callback -- comparing
+    /// behavior isn't possible, so this is identity, not content,
+    /// equality; same rationale as `florui::Handler`'s own `PartialEq`.
+    /// `value` is deliberately not compared: two `Binding`s snapshotting
+    /// the same owner at different renders carry different `value`s but
+    /// are still "the same binding" for `ElementNode`'s own diffing needs.
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.on_request, &other.on_request)
+    }
+}
+
+impl<T> Eq for Binding<T> {}
 
 #[cfg(test)]
 mod tests {
@@ -148,5 +172,23 @@ mod tests {
 
         make_binding().request_update(12); // accepted
         assert_eq!(make_binding().get(), 12);
+    }
+
+    #[test]
+    fn clones_of_the_same_binding_are_equal_even_with_different_snapshots() {
+        let binding = Binding::new(1, |_| {});
+        let mut clone = binding.clone();
+        clone.value = 2;
+        assert_eq!(
+            binding, clone,
+            "equality is the owner callback's identity, not the snapshotted value"
+        );
+    }
+
+    #[test]
+    fn independently_constructed_bindings_are_not_equal() {
+        let a = Binding::new(1, |_| {});
+        let b = Binding::new(1, |_| {});
+        assert_ne!(a, b);
     }
 }
