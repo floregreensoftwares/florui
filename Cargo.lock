@@ -1454,6 +1454,7 @@ dependencies = [
  "cssparser",
  "euclid",
  "florui",
+ "florui-reactive",
  "selectors",
  "servo_arc",
  "stylo",

@@ -10,6 +10,7 @@ name = "florui_style"
 
 [dependencies]
 florui = { path = "../florui" }
+florui-reactive = { path = "../florui-reactive" }
 app_units = "0.7"
 atomic_refcell = "0.1"
 cssparser = "0.35"

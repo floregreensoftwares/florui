@@ -108,6 +108,7 @@ fn primitive_element(
 
     let mut attr_pairs = Vec::new();
     let mut handler_pairs = Vec::new();
+    let mut binding_pairs = Vec::new();
 
     for (name, value) in attrs {
         if is_scope_attr(name) {
@@ -127,6 +128,19 @@ fn primitive_element(
                     quote_spanned! { lit.span() => compile_error!(#message) }
                 }
             });
+        } else if name_str == "value" && matches!(value, AttrValue::Expr(_)) {
+            // A `value={binding}` expression is a `Binding<String>` write-back
+            // channel, not a plain string -- `value="literal"` (an
+            // `AttrValue::Lit`) stays a plain attribute below, since there is
+            // nothing to write back to. `attrs` still gets the current
+            // snapshot string alongside, so every existing string-only
+            // consumer (measurement, paint) needs no `<input>`-specific
+            // lookup just to read the displayed text.
+            let AttrValue::Expr(expr) = value else {
+                unreachable!("matched above")
+            };
+            attr_pairs.push(quote! { (#name_str.to_string(), (#expr).get()) });
+            binding_pairs.push(quote! { (#name_str.to_string(), (#expr).clone()) });
         } else {
             let value_expr = match value {
                 AttrValue::Lit(lit) => quote! { (#lit).to_string() },
@@ -147,7 +161,17 @@ fn primitive_element(
     }
     let children = children_vec(children, effective_scope);
 
-    if handler_pairs.is_empty() {
+    if !binding_pairs.is_empty() {
+        quote! {
+            ::florui::Element::node_with_bindings(
+                #tag_str,
+                ::std::vec![ #(#attr_pairs),* ],
+                ::std::vec![ #(#handler_pairs),* ],
+                ::std::vec![ #(#binding_pairs),* ],
+                #children,
+            )
+        }
+    } else if handler_pairs.is_empty() {
         quote! {
             ::florui::Element::node(#tag_str, ::std::vec![ #(#attr_pairs),* ], #children)
         }
