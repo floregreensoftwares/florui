@@ -45,6 +45,8 @@ use parley::{
 };
 use peniko::Blob;
 
+pub mod editing;
+
 /// Open Sans (SIL Open Font License 1.1) — see `fonts/NOTICE.md` for
 /// provenance and why it's this crate's sans-serif default despite not
 /// being metrically matched to Arial.
@@ -196,8 +198,12 @@ pub struct CachedLayout(parley::Layout<[u8; 4]>);
 /// state needed to measure text, plus every font this crate currently
 /// knows about.
 pub struct Font {
-    font_cx: FontContext,
-    layout_cx: LayoutContext,
+    /// `pub(crate)`, not private: [`editing`]'s `impl Font` block (a real
+    /// text-editing buffer needs the exact same `FontContext`/
+    /// `LayoutContext` every other shape/measure call already reuses, not
+    /// a second, separately-loaded pair) reaches these directly.
+    pub(crate) font_cx: FontContext,
+    pub(crate) layout_cx: LayoutContext,
     sans_serif_family_name: String,
     monospace_family_name: String,
 }
@@ -246,7 +252,7 @@ impl Font {
             .map(str::to_owned)
     }
 
-    fn family_name(&self, family: FontFamily) -> &str {
+    pub(crate) fn family_name(&self, family: FontFamily) -> &str {
         match family {
             FontFamily::SansSerif => &self.sans_serif_family_name,
             FontFamily::Monospace => &self.monospace_family_name,
