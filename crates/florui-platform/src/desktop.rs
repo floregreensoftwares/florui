@@ -37,6 +37,7 @@ use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::UiRuntime;
+use crate::accessibility;
 use crate::activation::{ActivationEvent, ActivationEvents, ActivationQueue, SingleInstance};
 use crate::appearance::DecorationMode;
 use crate::dpi::{self, ViewportScale};
@@ -122,6 +123,17 @@ enum UserEvent {
     /// where touching `Signal`s is safe.
     OpenFileDialogResult(WindowId, OpenFileDialogOutcome),
     SaveFileDialogResult(WindowId, SaveFileDialogOutcome),
+    /// A real AccessKit event -- the initial tree request, an inbound
+    /// `ActionRequest` from the platform AT, or deactivation. Already
+    /// carries its own `window_id` (see `accesskit_winit::Event`), unlike
+    /// every other variant here.
+    Accessibility(accesskit_winit::Event),
+}
+
+impl From<accesskit_winit::Event> for UserEvent {
+    fn from(event: accesskit_winit::Event) -> Self {
+        UserEvent::Accessibility(event)
+    }
 }
 
 /// What [`run_with_options`]/[`run_with_css_reload_and_options`] ask for
@@ -751,6 +763,18 @@ struct WindowState {
     /// real double-click makes. No existing double-click detection exists
     /// anywhere else in this file to reuse.
     last_text_input_click: Option<(NodeId, std::time::Instant)>,
+    /// Real AccessKit wiring for this window -- see `resumed`'s own doc
+    /// for why it must be constructed before the window is first shown.
+    accessibility_adapter: accesskit_winit::Adapter,
+    /// Builds the real AccessKit tree from this window's own `Arena`
+    /// every redraw. Kept per-window (not per-`UiRuntime`) because it
+    /// needs post-scroll, DPI-scaled, window-relative bounds that only
+    /// exist here, in `redraw` -- see `accessibility::tree`'s own doc.
+    accessibility_tree: accessibility::tree::AccessibilityTree,
+    /// This render's translation from an AccessKit id back to a real
+    /// node -- rebuilt every `redraw`, read by an inbound `ActionRequest`
+    /// arriving before the next one.
+    accessibility_reverse: HashMap<accesskit::NodeId, NodeId>,
 }
 
 /// Not spec-mandated to an exact number — a common real-OS default for
@@ -886,6 +910,21 @@ impl WindowState {
         }
         let text_inputs =
             build_text_input_paint(arena, styles, font, &text_input_registry, focused);
+
+        let node_bounds: HashMap<NodeId, (f32, f32, f32, f32)> = physical_layouts
+            .keys()
+            .map(|&id| {
+                let (x, y) = florui_layout::absolute_position(arena, &physical_layouts, id);
+                let layout = physical_layouts[&id];
+                (id, (x, y, layout.width, layout.height))
+            })
+            .collect();
+        let (accessibility_update, accessibility_reverse) =
+            self.accessibility_tree.build(arena, focused, &node_bounds);
+        self.accessibility_reverse = accessibility_reverse;
+        self.accessibility_adapter
+            .update_if_active(|| accessibility_update);
+
         let canvas = florui_paint::paint_to_buffer_with_text_inputs(
             font,
             size.width,
@@ -1692,12 +1731,21 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                     }
                 }
             }
-            let attrs = gpu::transparent_capable_attributes(attrs);
+            // Invisible until the real AccessKit adapter below exists --
+            // `accesskit_winit::Adapter::with_event_loop_proxy` panics if
+            // constructed after the window has already been shown once.
+            let attrs = gpu::transparent_capable_attributes(attrs).with_visible(false);
             let window = match event_loop.create_window(attrs) {
                 Ok(window) => Arc::new(window),
                 Err(error) => return self.fail(event_loop, RunError::WindowCreation(error)),
             };
             let window_id = window.id();
+            let accessibility_adapter = accesskit_winit::Adapter::with_event_loop_proxy(
+                event_loop,
+                &window,
+                self.proxy.clone(),
+            );
+            window.set_visible(true);
             // The very first window this host ever creates, across its
             // whole lifetime -- `pending` is only ever drained once (see
             // this function's own doc), so this is unambiguous.
@@ -1830,6 +1878,9 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 modifiers: ModifiersState::empty(),
                 text_selecting: None,
                 last_text_input_click: None,
+                accessibility_adapter,
+                accessibility_tree: accessibility::tree::AccessibilityTree::new(),
+                accessibility_reverse: HashMap::new(),
             };
             state.redraw();
             // A `@keyframes` animation already running on mount (no `:hover`
@@ -1888,6 +1939,9 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
         let Some(state) = self.windows.get_mut(&window_id) else {
             return;
         };
+        state
+            .accessibility_adapter
+            .process_event(&state.window, &event);
         match event {
             WindowEvent::Resized(_) => {
                 state.update_and_request_redraw();
@@ -1977,6 +2031,56 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 if let Some(state) = self.windows.get_mut(&id) {
                     state.controls.deliver_save_dialog_result(outcome);
                     state.update_and_request_redraw();
+                }
+            }
+            UserEvent::Accessibility(event) => {
+                let Some(state) = self.windows.get_mut(&event.window_id) else {
+                    return;
+                };
+                match event.window_event {
+                    // `with_event_loop_proxy`'s own doc: this constructor
+                    // always returns `None` from `request_initial_tree`, so
+                    // the real first tree is whatever the next `redraw`'s
+                    // own `update_if_active` call sends -- the adapter is
+                    // already active by the time that runs.
+                    accesskit_winit::WindowEvent::InitialTreeRequested => {
+                        state.update_and_request_redraw();
+                    }
+                    accesskit_winit::WindowEvent::ActionRequested(request) => {
+                        let Some(node) = state
+                            .accessibility_reverse
+                            .get(&request.target_node)
+                            .copied()
+                        else {
+                            return;
+                        };
+                        match request.action {
+                            // Matches Tab's own semantics (`via_keyboard: true`).
+                            accesskit::Action::Focus => {
+                                if state.runtime.set_focused(Some(node), true) {
+                                    state.update_and_request_redraw();
+                                }
+                            }
+                            // Matches `handle_release`'s own click semantics
+                            // exactly: focus first (`via_keyboard: false`),
+                            // then dispatch -- a redraw here only covers the
+                            // focus-indicator change, since the click
+                            // handler's own `Signal` writes (if any) already
+                            // redraw via `UserEvent::Dirty`.
+                            accesskit::Action::Click => {
+                                let focus_changed = state.runtime.set_focused(Some(node), false);
+                                state.runtime.dispatch_click(node);
+                                if focus_changed {
+                                    state.update_and_request_redraw();
+                                }
+                            }
+                            // AT-driven text editing (`SetValue`, etc.) is
+                            // out of scope this slice -- see this crate's
+                            // own accessibility module doc.
+                            _ => {}
+                        }
+                    }
+                    accesskit_winit::WindowEvent::AccessibilityDeactivated => {}
                 }
             }
         }
