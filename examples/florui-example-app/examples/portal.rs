@@ -1,15 +1,17 @@
-//! A real portal-based overlay, live: "Open dialog" renders a `<Portal>`
-//! whose content becomes an independent, unclipped overlay root, painted
-//! on top of the document and winning hit-testing -- not a simulated
-//! z-index trick. Clicking the backdrop closes it (a plain `onclick` on
-//! the backdrop itself); clicking the dialog box does not, since
-//! `dispatch_click` targets exactly the hit-tested node with no
-//! bubbling.
+//! A real modal `Dialog`, live (built on `Portal`, which still renders as
+//! an independent, unclipped overlay root under the hood): opening it
+//! moves keyboard focus inside automatically; Tab/Shift+Tab cycle only
+//! within it -- a real focus trap, confirmed by tabbing past "Close": it
+//! wraps back to the first focusable element inside, never escaping to
+//! "Open dialog" behind it; Escape closes it; clicking the backdrop
+//! closes it; clicking the dialog box itself does not (`dispatch_click`
+//! targets exactly the hit-tested node, no bubbling); closing it by any
+//! of these restores focus to "Open dialog".
 //!
 //! `cargo run --example portal -p florui-example-app`
 
 use florui::prelude::*;
-use florui_platform::{Portal, PortalProps};
+use florui_platform::{Dialog, DialogProps};
 use florui_reactive::use_signal;
 use florui_style::Rgba;
 
@@ -27,30 +29,31 @@ fn main() {
 
 fn app() -> Element {
     let open = use_signal(|| false);
-    let open_dialog = open.clone();
+    let open_trigger = open.clone();
+    let close_from_escape = open.clone();
     let close_from_backdrop = open.clone();
     let close_from_button = open.clone();
 
     view! {
         <div class="page">
             <p class="instructions">
-                {"Open the dialog, then click the backdrop (closes) vs. the dialog box \
-                  itself (does not)."}
+                {"Open the dialog: focus moves inside automatically, Tab/Shift+Tab cycle only \
+                  within it, Escape or the backdrop closes it (the dialog box itself does not), \
+                  and closing it returns focus to this button."}
             </p>
             <p class="status">
                 {if open.get() { "Dialog is open" } else { "Dialog is closed" }}
             </p>
-            <button class="action" onclick={move || open_dialog.set(true)}>
+            <button class="action" onclick={move || open_trigger.set(true)}>
                 {"Open dialog"}
             </button>
             {open.get().then(move || view! {
-                <Portal>
+                <Dialog onclose={Handler::new(move || close_from_escape.set(false))}>
                     <div class="backdrop" onclick={move || close_from_backdrop.set(false)}>
                         <div class="dialog">
-                            <p class="dialog-title">{"Real portal content"}</p>
+                            <p class="dialog-title">{"Real modal content"}</p>
                             <p class="dialog-body">
-                                {"This renders outside the page's own clipping area, as an \
-                                  independent overlay root."}
+                                {"Escape or the backdrop closes this. Tab never escapes it."}
                             </p>
                             <button
                                 class="action"
@@ -60,7 +63,7 @@ fn app() -> Element {
                             </button>
                         </div>
                     </div>
-                </Portal>
+                </Dialog>
             })}
         </div>
     }
