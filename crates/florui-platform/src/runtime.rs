@@ -43,6 +43,19 @@ pub struct UiRuntime {
     /// Whether the current focus is keyboard-driven (`:focus-visible`
     /// should match) rather than a mouse click.
     focus_visible: bool,
+    /// Where to restore focus once the currently open modal
+    /// [`crate::dialog::Dialog`] closes — captured the render it opens,
+    /// consumed the render it closes. See [`Self::resolve_focus`]'s own
+    /// doc for the full open/steady/close transition this drives.
+    modal_return_path: Option<FocusPath>,
+    /// Whether a modal was open as of the *previous* render — the
+    /// authoritative "did a modal just open/close this render" signal.
+    /// Deliberately not derived from `modal_return_path.is_some()`: a
+    /// modal opening while nothing was previously focused would save
+    /// `None` into it, indistinguishable from "no modal has ever been
+    /// open," and silently re-trigger auto-focus-on-open every
+    /// subsequent render.
+    had_modal_last_render: bool,
     arena: Arena,
     styles: HashMap<NodeId, ComputedStyle>,
     layouts: HashMap<NodeId, BoxLayout>,
@@ -180,6 +193,8 @@ impl UiRuntime {
             focused_path: None,
             focused_node: None,
             focus_visible: false,
+            modal_return_path: None,
+            had_modal_last_render: false,
             arena: Arena::build(&Element::Fragment(Vec::new())),
             styles: HashMap::new(),
             layouts: HashMap::new(),
@@ -428,7 +443,7 @@ impl UiRuntime {
     }
 
     fn step_focus(&mut self, direction: isize) -> bool {
-        let order = focus::focus_order(&self.arena);
+        let order = focus::focus_candidates(&self.arena);
         if order.is_empty() {
             return self.set_focused(None, true);
         }
@@ -451,17 +466,15 @@ impl UiRuntime {
         self.set_focused(Some(order[next_index]), true)
     }
 
-    /// Re-resolves [`Self::focused_path`] against this render's freshly
-    /// rebuilt [`Self::arena`] — a [`NodeId`] from the previous arena
-    /// generation isn't safe to reuse directly (see [`FocusPath`]'s own
-    /// doc). Clears focus outright if the focused element is no longer
-    /// present; deliberately no "restore to trigger" fallback, which is
-    /// an overlay-specific concern this slice doesn't attempt.
-    fn resolve_focus(&mut self) {
+    /// Re-resolves [`Self::focused_path`] against `candidates` — a
+    /// [`NodeId`] from the previous arena generation isn't safe to reuse
+    /// directly (see [`FocusPath`]'s own doc). Clears focus outright
+    /// (and `focused_path`/`focus_visible` with it) if it no longer
+    /// resolves against `candidates` — no invented fallback.
+    fn resolve_against(&mut self, candidates: &[NodeId]) {
         self.focused_node = match &self.focused_path {
             Some(path) => {
-                let candidates = focus::focus_order(&self.arena);
-                let resolved = path.resolve(&self.arena, &candidates);
+                let resolved = path.resolve(&self.arena, candidates);
                 if resolved.is_none() {
                     self.focused_path = None;
                     self.focus_visible = false;
@@ -470,6 +483,59 @@ impl UiRuntime {
             }
             None => None,
         };
+    }
+
+    /// Re-resolves focus against this render's freshly rebuilt
+    /// [`Self::arena`], and drives the modal [`crate::dialog::Dialog`]
+    /// open/close transition:
+    ///
+    /// - **just opened** (a modal wasn't present last render, is now):
+    ///   saves wherever focus currently is into [`Self::modal_return_path`]
+    ///   (`None` if nothing was focused), then traps focus onto the
+    ///   modal's own first focusable descendant, if any — a real
+    ///   `:focus-visible` trap, matching expected modal UX.
+    /// - **steady-state open**: resolves the existing focus against the
+    ///   modal's own content only ([`focus::focusable_within`]), never
+    ///   the whole document — the actual focus-containment behavior.
+    /// - **just closed**: restores focus to [`Self::modal_return_path`]
+    ///   (taken, so a later close doesn't reuse a stale path), resolved
+    ///   against the *whole* document again since the modal is gone —
+    ///   falling back to nothing focused if that original trigger was
+    ///   itself removed while the modal was open (no invented fallback,
+    ///   matching this crate's own long-standing precedent for a focus
+    ///   target that disappears).
+    /// - **no modal, no transition**: unchanged from before this modal
+    ///   support existed.
+    fn resolve_focus(&mut self) {
+        match (focus::modal_root(&self.arena), self.had_modal_last_render) {
+            (Some(root), false) => {
+                self.modal_return_path = self.focused_path.clone();
+                let first = focus::focusable_within(&self.arena, root)
+                    .into_iter()
+                    .next();
+                self.focused_path = first.map(|id| FocusPath::of(&self.arena, id));
+                self.focused_node = first;
+                self.focus_visible = first.is_some();
+                self.had_modal_last_render = true;
+            }
+            (Some(root), true) => {
+                let candidates = focus::focusable_within(&self.arena, root);
+                self.resolve_against(&candidates);
+            }
+            (None, true) => {
+                self.had_modal_last_render = false;
+                self.focused_path = self.modal_return_path.take();
+                let candidates = focus::focus_order(&self.arena);
+                self.resolve_against(&candidates);
+                if self.focused_node.is_some() {
+                    self.focus_visible = true;
+                }
+            }
+            (None, false) => {
+                let candidates = focus::focus_order(&self.arena);
+                self.resolve_against(&candidates);
+            }
+        }
         self.rebuild_interaction();
     }
 
@@ -512,6 +578,16 @@ impl UiRuntime {
             return;
         }
         if let Some(handler) = self.arena.handler(node, "click") {
+            florui_reactive::batch(|| handler.call());
+        }
+    }
+
+    /// Same as [`Self::dispatch_click`], generalized to an arbitrary
+    /// event name and with no disabled-button gate — a modal
+    /// [`crate::dialog::Dialog`]'s own root is never itself a
+    /// disableable button, so that check has nothing to apply to here.
+    pub(crate) fn dispatch_event(&self, node: NodeId, event: &str) {
+        if let Some(handler) = self.arena.handler(node, event) {
             florui_reactive::batch(|| handler.call());
         }
     }
@@ -559,7 +635,7 @@ mod tests {
     use florui_reactive::{Resource, use_context, use_resource};
 
     use super::*;
-    use crate::{Portal, PortalProps, use_committed_size};
+    use crate::{Dialog, DialogProps, Portal, PortalProps, use_committed_size};
 
     fn viewport() -> Size<AvailableSpace> {
         Size {
@@ -1385,6 +1461,142 @@ mod tests {
             !backdrop_clicked.get(),
             "dispatch_click targets exactly the hit-tested node -- no bubbling to an ancestor, \
              which is what makes a plain backdrop onclick safe to use for dismissal"
+        );
+    }
+
+    #[test]
+    fn dispatch_event_calls_the_nodes_own_handler_for_that_event_name() {
+        let closed = Rc::new(Cell::new(false));
+        let closed_in_handler = Rc::clone(&closed);
+        let runtime = UiRuntime::with_rules(
+            Vec::new(),
+            move || {
+                let closed = Rc::clone(&closed_in_handler);
+                view! { <div id="target" onclose={move || closed.set(true)} /> }
+            },
+            viewport(),
+        );
+        let target = node_id(&runtime, "target");
+
+        runtime.dispatch_event(target, "close");
+
+        assert!(closed.get());
+    }
+
+    fn dialog_runtime(open: Rc<Cell<bool>>, remove_trigger: Rc<Cell<bool>>) -> UiRuntime {
+        UiRuntime::with_rules(
+            Vec::new(),
+            move || {
+                let dialog = if open.get() {
+                    view! {
+                        <Dialog onclose={Handler::new(|| {})}>
+                            <button id="first-inside">{"First inside"}</button>
+                            <button id="second-inside">{"Second inside"}</button>
+                        </Dialog>
+                    }
+                } else {
+                    view! { <div /> }
+                };
+                let trigger = if remove_trigger.get() {
+                    view! { <div /> }
+                } else {
+                    view! { <button id="trigger">{"Trigger"}</button> }
+                };
+                view! {
+                    <div>
+                        {trigger}
+                        {dialog}
+                    </div>
+                }
+            },
+            viewport(),
+        )
+    }
+
+    #[test]
+    fn opening_a_modal_dialog_saves_prior_focus_and_traps_focus_inside_it() {
+        let open = Rc::new(Cell::new(false));
+        let mut runtime = dialog_runtime(Rc::clone(&open), Rc::new(Cell::new(false)));
+
+        let trigger = node_id(&runtime, "trigger");
+        runtime.set_focused(Some(trigger), true);
+        assert_eq!(runtime.focused(), Some(trigger));
+
+        open.set(true);
+        runtime.update(viewport());
+
+        let first_inside = node_id(&runtime, "first-inside");
+        assert_eq!(
+            runtime.focused(),
+            Some(first_inside),
+            "focus must move to the modal's own first focusable descendant on open"
+        );
+    }
+
+    #[test]
+    fn tab_does_not_escape_a_modal_dialogs_own_content() {
+        let open = Rc::new(Cell::new(true));
+        let mut runtime = dialog_runtime(Rc::clone(&open), Rc::new(Cell::new(false)));
+        runtime.update(viewport());
+
+        let first_inside = node_id(&runtime, "first-inside");
+        let second_inside = node_id(&runtime, "second-inside");
+        assert_eq!(runtime.focused(), Some(first_inside));
+
+        assert!(runtime.focus_next());
+        assert_eq!(runtime.focused(), Some(second_inside));
+
+        // Wraps back to the first inside element -- never escapes to
+        // "trigger", which sits outside the modal's own content.
+        assert!(runtime.focus_next());
+        assert_eq!(runtime.focused(), Some(first_inside));
+    }
+
+    #[test]
+    fn closing_a_modal_dialog_restores_focus_to_the_original_trigger() {
+        let open = Rc::new(Cell::new(false));
+        let mut runtime = dialog_runtime(Rc::clone(&open), Rc::new(Cell::new(false)));
+
+        let trigger = node_id(&runtime, "trigger");
+        runtime.set_focused(Some(trigger), true);
+
+        open.set(true);
+        runtime.update(viewport());
+        assert_ne!(
+            runtime.focused(),
+            Some(trigger),
+            "focus moved into the modal"
+        );
+
+        open.set(false);
+        runtime.update(viewport());
+        assert_eq!(
+            runtime.focused(),
+            Some(trigger),
+            "closing the modal must restore focus to its original trigger"
+        );
+    }
+
+    #[test]
+    fn closing_a_modal_dialog_whose_trigger_was_removed_clears_focus() {
+        let open = Rc::new(Cell::new(false));
+        let remove_trigger = Rc::new(Cell::new(false));
+        let mut runtime = dialog_runtime(Rc::clone(&open), Rc::clone(&remove_trigger));
+
+        let trigger = node_id(&runtime, "trigger");
+        runtime.set_focused(Some(trigger), true);
+
+        open.set(true);
+        runtime.update(viewport());
+
+        remove_trigger.set(true);
+        open.set(false);
+        runtime.update(viewport());
+
+        assert_eq!(
+            runtime.focused(),
+            None,
+            "no invented fallback when the original trigger no longer exists"
         );
     }
 }
