@@ -15,7 +15,7 @@ default = ["desktop"]
 # driving UiRuntime on its own shouldn't have to pull them in.
 # `dep:windows-sys` is a no-op outside the Windows-only dependency table
 # below — every other target simply never has it in its resolved graph.
-desktop = ["dep:notify", "dep:softbuffer", "dep:winit", "dep:wgpu", "dep:pollster", "dep:windows-sys", "dep:windows", "dep:windows-core", "dep:florui-icon", "dep:serde", "dep:serde_json", "dep:arboard"]
+desktop = ["dep:notify", "dep:softbuffer", "dep:winit", "dep:wgpu", "dep:pollster", "dep:windows-sys", "dep:windows", "dep:windows-core", "dep:florui-icon", "dep:serde", "dep:serde_json", "dep:arboard", "dep:accesskit", "dep:accesskit_winit"]
 
 [dependencies]
 florui = { path = "../florui" }
@@ -48,6 +48,12 @@ serde_json = { version = "1.0.151", optional = true }
 # dependency, and scratchpad-validated (set/get round-trip) on this
 # machine before being pinned here.
 arboard = { version = "3.6.1", optional = true }
+# Real accessibility bridge (roles/names/values/focus through the actual
+# platform AT bridge) -- versions scratchpad-validated to build cleanly
+# against this crate's own pinned `winit` before being pinned here;
+# `accesskit_winit` pulls in real Windows UIA support (`accesskit_windows`).
+accesskit = { version = "0.25", optional = true }
+accesskit_winit = { version = "0.34", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
