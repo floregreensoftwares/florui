@@ -11,7 +11,7 @@
 
 use crate::tree::{Arena, NodeId};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct PathSegment {
     tag: &'static str,
     ordinal: usize,
@@ -20,7 +20,10 @@ struct PathSegment {
 /// A focused element's identity, independent of any single [`Arena`]
 /// generation. See the module doc for why [`NodeId`] alone can't serve
 /// this role.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Hash` lets a path key a `HashMap` — e.g. an accessibility-tree
+/// identity interner, which needs the same stable-across-renders scheme.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FocusPath(Vec<PathSegment>);
 
 impl FocusPath {
