@@ -56,7 +56,8 @@ use std::collections::HashMap;
 use florui_style::{
     AnimationTimeline, Arena, ComputedStyle, ContentAlignment, ContentBoxSize,
     Display as StyleDisplay, FlexDirection as StyleFlexDirection, FlexWrap as StyleFlexWrap,
-    InlineItem as StyleInlineItem, InteractionState, ItemAlignment, NodeId, Rule, Viewport,
+    InlineItem as StyleInlineItem, InteractionState, ItemAlignment, NodeId,
+    Position as StylePosition, Rule, Viewport,
 };
 use taffy::prelude::*;
 use taffy::{Baselines, compute_leaf_layout};
@@ -1010,6 +1011,13 @@ fn to_taffy_style(style: Option<&ComputedStyle>) -> taffy::Style {
             top: to_length_percentage_auto(style.margin.top),
             bottom: to_length_percentage_auto(style.margin.bottom),
         },
+        position: to_taffy_position(style.position),
+        inset: Rect {
+            left: to_length_percentage_auto(style.inset.left),
+            right: to_length_percentage_auto(style.inset.right),
+            top: to_length_percentage_auto(style.inset.top),
+            bottom: to_length_percentage_auto(style.inset.bottom),
+        },
         // These four only affect *this node's own children*, and only take
         // effect at all when `display` above is `Flex` — Taffy ignores them
         // for a block container, so setting them unconditionally is safe.
@@ -1108,6 +1116,19 @@ fn to_length_percentage_auto(value: Option<f32>) -> LengthPercentageAuto {
     match value {
         Some(length) => LengthPercentageAuto::length(length),
         None => LengthPercentageAuto::auto(),
+    }
+}
+
+/// Taffy has no `Static` concept of its own — every node is already a
+/// valid positioning context for an absolutely-positioned descendant
+/// regardless (see [`florui_style::Position`]'s own doc for why this
+/// crate accepts that simplification rather than modeling real CSS's
+/// stricter "nearest *explicitly* positioned ancestor" containing-block
+/// rule).
+fn to_taffy_position(value: StylePosition) -> Position {
+    match value {
+        StylePosition::Static | StylePosition::Relative => Position::Relative,
+        StylePosition::Absolute => Position::Absolute,
     }
 }
 
@@ -1596,6 +1617,95 @@ mod tests {
         let node = arena.roots()[0];
         assert_eq!(layouts[&node].width, 200.0);
         assert_eq!(layouts[&node].height, 100.0);
+    }
+
+    #[test]
+    fn position_relative_alone_is_a_no_op() {
+        let tree: Element = view! {
+            <div class="parent">
+                <div class="rel" />
+            </div>
+        };
+        let (arena, layouts) = layout_for(
+            &tree,
+            ".parent { width: 200px; height: 100px; } \
+             .rel { position: relative; width: 50px; height: 20px; }",
+        );
+        let rel = arena.children(arena.roots()[0])[0];
+        assert_eq!(
+            (layouts[&rel].x, layouts[&rel].y),
+            (0.0, 0.0),
+            "position: relative with no inset must not move the box at all"
+        );
+    }
+
+    #[test]
+    fn position_absolute_lands_at_its_own_explicit_inset_offset() {
+        let tree: Element = view! {
+            <div class="parent">
+                <div class="abs" />
+            </div>
+        };
+        let (arena, layouts) = layout_for(
+            &tree,
+            ".parent { position: relative; width: 200px; height: 100px; } \
+             .abs { position: absolute; top: 10px; left: 20px; width: 30px; height: 15px; }",
+        );
+        let abs = arena.children(arena.roots()[0])[0];
+        assert_eq!(layouts[&abs].x, 20.0);
+        assert_eq!(layouts[&abs].y, 10.0);
+        assert_eq!(layouts[&abs].width, 30.0);
+        assert_eq!(layouts[&abs].height, 15.0);
+    }
+
+    #[test]
+    fn position_absolute_is_removed_from_normal_flow() {
+        let tree: Element = view! {
+            <div class="parent">
+                <div class="abs" />
+                <div class="sibling" />
+            </div>
+        };
+        let (arena, layouts) = layout_for(
+            &tree,
+            ".parent { position: relative; width: 200px; } \
+             .abs { position: absolute; top: 0px; left: 0px; width: 30px; height: 15px; } \
+             .sibling { width: 40px; height: 10px; }",
+        );
+        let parent = arena.roots()[0];
+        let sibling = arena.children(parent)[1];
+        assert_eq!(
+            layouts[&sibling].y, 0.0,
+            "an absolutely positioned sibling must not push document-flow \
+             content down, as if it were never there at all"
+        );
+    }
+
+    #[test]
+    fn position_absolute_resolves_against_its_nearest_ancestor_not_the_root() {
+        let tree: Element = view! {
+            <div class="root">
+                <div class="middle">
+                    <div class="abs" />
+                </div>
+            </div>
+        };
+        let (arena, layouts) = layout_for(
+            &tree,
+            ".root { width: 300px; height: 300px; padding-top: 50px; padding-left: 50px; } \
+             .middle { position: relative; width: 100px; height: 100px; \
+                       padding-top: 20px; padding-left: 20px; } \
+             .abs { position: absolute; top: 5px; left: 5px; width: 10px; height: 10px; }",
+        );
+        let root = arena.roots()[0];
+        let middle = arena.children(root)[0];
+        let abs = arena.children(middle)[0];
+        assert_eq!(
+            (layouts[&abs].x, layouts[&abs].y),
+            (5.0, 5.0),
+            "must resolve relative to its nearest positioned ancestor's own \
+             origin, not accumulate the root's own padding too"
+        );
     }
 
     /// Real CSS's actual default is content-box: padding adds to a
