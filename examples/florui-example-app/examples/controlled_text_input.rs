@@ -18,6 +18,10 @@
 //! padding. Password masking paints a real substitute glyph run at the
 //! real glyph positions, not a parallel masked buffer.
 //!
+//! Every `<label for="...">` here really names its control's real
+//! accessible name through the platform accessibility bridge (Narrator,
+//! on Windows) — not just visually adjacent text.
+//!
 //! `cargo run --example controlled_text_input -p florui-example-app`
 
 use florui::prelude::*;
@@ -68,7 +72,9 @@ fn app() -> Element {
                   Ctrl+Z / Ctrl+Shift+Z to undo/redo."}
             </p>
 
-            <label class="field-label">{"Name (Binding, rejects over 12 characters)"}</label>
+            <label class="field-label" for="name-input">
+                {"Name (Binding, rejects over 12 characters)"}
+            </label>
             <input
                 id="name-input"
                 class="text-field"
@@ -77,7 +83,9 @@ fn app() -> Element {
             />
             <p class="status">{format!("Committed: {:?}", name.get())}</p>
 
-            <label class="field-label">{"Nickname (explicit value + oninput, no Binding)"}</label>
+            <label class="field-label" for="nickname-input">
+                {"Nickname (explicit value + oninput, no Binding)"}
+            </label>
             <input
                 id="nickname-input"
                 class="text-field"
@@ -87,10 +95,12 @@ fn app() -> Element {
             />
             <p class="status">{format!("Committed: {:?}", nickname.get())}</p>
 
-            <label class="field-label">{"Default text (no author CSS -- pure UA default)"}</label>
+            <label class="field-label" for="default-text-input">
+                {"Default text (no author CSS -- pure UA default)"}
+            </label>
             <input id="default-text-input" type="text" value={default_text_binding} />
 
-            <label class="field-label">
+            <label class="field-label" for="default-password-input">
                 {"Default password (no author CSS -- pure UA default)"}
             </label>
             <input id="default-password-input" type="password" value={default_password_binding} />
