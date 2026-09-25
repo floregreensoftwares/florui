@@ -69,6 +69,17 @@ pub enum Display {
     Grid,
 }
 
+/// `position` — `Fixed`/`Sticky` aren't supported yet, see
+/// [`ComputedStyle::position`]'s own doc for why they collapse to
+/// [`Self::Static`] rather than [`Self::Absolute`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Position {
+    #[default]
+    Static,
+    Relative,
+    Absolute,
+}
+
 /// One track's sizing function, from `grid-template-columns`/`-rows` —
 /// bounded to what a single (non-`repeat()`) track can be: `repeat()`,
 /// named lines, `grid-template-areas`, and `fit-content()`/`minmax()`
@@ -370,12 +381,27 @@ pub struct ComputedStyle {
     pub grid_column: (GridPlacement, GridPlacement),
     /// `grid-row-start`/`grid-row-end`.
     pub grid_row: (GridPlacement, GridPlacement),
+    /// `position`. `Fixed`/`Sticky` aren't supported yet — collapsed to
+    /// [`Position::Static`] rather than silently behaving like
+    /// [`Position::Absolute`], a real behavior mismatch an author asking
+    /// for viewport-relative or scroll-anchored positioning would hit
+    /// otherwise. `Absolute`'s real containing-block rule (the *nearest
+    /// explicitly* `relative`/`absolute` ancestor) is also simplified:
+    /// this crate's own [`Position::Static`] still counts as a valid
+    /// positioning context for an absolutely-positioned descendant, the
+    /// same deviation the official Stylo→Taffy bridge crate itself
+    /// already accepts (Taffy has no `Static` concept of its own).
+    pub position: Position,
+    /// `top`/`right`/`bottom`/`left` — meaningless when [`Self::position`]
+    /// is [`Position::Static`]. Each edge is `None` for an explicit
+    /// `auto`, or any value this crate can't yet resolve (a percentage,
+    /// a `calc()`) — the identical limitation [`Self::width`]/
+    /// [`Self::margin`] already have, not a new one.
+    pub inset: Edges<Option<f32>>,
     /// `z-index`. `None` means `auto` (the initial value) — real CSS only
-    /// gives `z-index` an effect on a positioned element, a flex item, or
-    /// a grid item; this crate has no `position` property yet, so today it
-    /// only reorders a flex/grid item among its own siblings during paint
-    /// (see `florui_paint`'s own doc on stacking order). Meaningless
-    /// anywhere else, matching real CSS.
+    /// gives `z-index` an effect on a positioned (non-[`Position::Static`])
+    /// element, a flex item, or a grid item (see `florui_paint`'s own doc
+    /// on stacking order). Meaningless anywhere else, matching real CSS.
     pub z_index: Option<i32>,
     /// `opacity`, clamped to `0.0..=1.0` (real CSS's own computed-value
     /// clamp). `1.0` (fully opaque) is the initial value and paints
@@ -982,6 +1008,83 @@ mod tests {
         let node = arena.roots()[0];
         assert_eq!(computed[&node].margin.left, None);
         assert_eq!(computed[&node].margin.right, None);
+    }
+
+    #[test]
+    fn position_defaults_to_static() {
+        let tree: Element = view! { <div /> };
+        let (arena, computed) = styles(&tree, "", &InteractionState::new());
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].position, Position::Static);
+    }
+
+    #[test]
+    fn position_relative_and_absolute_are_read() {
+        let tree: Element = view! {
+            <div class="rel">
+                <div class="abs" />
+            </div>
+        };
+        let (arena, computed) = styles(
+            &tree,
+            ".rel { position: relative; } .abs { position: absolute; }",
+            &InteractionState::new(),
+        );
+        let rel = arena.roots()[0];
+        let abs = arena.children(rel)[0];
+        assert_eq!(computed[&rel].position, Position::Relative);
+        assert_eq!(computed[&abs].position, Position::Absolute);
+    }
+
+    #[test]
+    fn position_fixed_and_sticky_collapse_to_static() {
+        let tree: Element = view! {
+            <div>
+                <div class="fixed" />
+                <div class="sticky" />
+            </div>
+        };
+        let (arena, computed) = styles(
+            &tree,
+            ".fixed { position: fixed; } .sticky { position: sticky; }",
+            &InteractionState::new(),
+        );
+        let root = arena.roots()[0];
+        let (fixed, sticky) = (arena.children(root)[0], arena.children(root)[1]);
+        assert_eq!(
+            computed[&fixed].position,
+            Position::Static,
+            "fixed isn't supported yet -- inert, not silently absolute"
+        );
+        assert_eq!(computed[&sticky].position, Position::Static);
+    }
+
+    #[test]
+    fn inset_edges_are_read_when_positioned() {
+        let tree: Element = view! { <div class="abs" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".abs { position: absolute; top: 4px; right: 8px; bottom: 12px; left: 16px; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        let inset = &computed[&node].inset;
+        assert_eq!(inset.top, Some(4.0));
+        assert_eq!(inset.right, Some(8.0));
+        assert_eq!(inset.bottom, Some(12.0));
+        assert_eq!(inset.left, Some(16.0));
+    }
+
+    #[test]
+    fn unset_inset_edges_default_to_auto() {
+        let tree: Element = view! { <div class="abs" /> };
+        let (arena, computed) = styles(
+            &tree,
+            ".abs { position: absolute; }",
+            &InteractionState::new(),
+        );
+        let node = arena.roots()[0];
+        assert_eq!(computed[&node].inset.top, None);
     }
 
     #[test]

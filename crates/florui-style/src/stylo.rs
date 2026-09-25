@@ -1344,6 +1344,13 @@ fn to_computed_style(values: &ComputedValues) -> ComputedStyle {
         flex_basis: to_flex_basis(&position.flex_basis),
         column_gap: to_gap(&position.column_gap),
         row_gap: to_gap(&position.row_gap),
+        position: to_position(box_style.position),
+        inset: Edges {
+            top: to_optional_inset(&position.top),
+            right: to_optional_inset(&position.right),
+            bottom: to_optional_inset(&position.bottom),
+            left: to_optional_inset(&position.left),
+        },
         z_index: to_z_index(position.z_index),
         // Stylo already clamps a declared `opacity` to this range at
         // computed-value time per spec; clamping again here costs nothing
@@ -1903,6 +1910,31 @@ fn to_optional_margin(
     use style::values::generics::length::GenericMargin;
     match value {
         GenericMargin::LengthPercentage(lp) => lp.to_length().map(|length| length.px()),
+        _ => None,
+    }
+}
+
+/// `Fixed`/`Sticky` collapse to [`crate::cascade::Position::Static`]
+/// rather than [`crate::cascade::Position::Absolute`] — see
+/// [`crate::cascade::ComputedStyle::position`]'s own doc for why.
+fn to_position(value: style::values::computed::PositionProperty) -> crate::cascade::Position {
+    use style::values::computed::PositionProperty;
+    match value {
+        PositionProperty::Static => crate::cascade::Position::Static,
+        PositionProperty::Relative => crate::cascade::Position::Relative,
+        PositionProperty::Absolute => crate::cascade::Position::Absolute,
+        PositionProperty::Fixed | PositionProperty::Sticky => crate::cascade::Position::Static,
+    }
+}
+
+/// Same fallback reasoning as [`to_optional_margin`] (`auto`, a
+/// percentage, or a `calc()` all become `None`) — `top`/`right`/`bottom`/
+/// `left` share `margin`'s own generated value shape (a plain
+/// `LengthPercentage`, real CSS inset values allow negative lengths too).
+fn to_optional_inset(value: &style::values::computed::position::Inset) -> Option<f32> {
+    use style::values::generics::position::GenericInset;
+    match value {
+        GenericInset::LengthPercentage(lp) => lp.to_length().map(|length| length.px()),
         _ => None,
     }
 }
