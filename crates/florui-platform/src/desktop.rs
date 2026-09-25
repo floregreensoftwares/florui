@@ -31,7 +31,7 @@ use taffy::prelude::*;
 use winit::application::ApplicationHandler;
 #[cfg(test)]
 use winit::dpi::PhysicalSize;
-use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
@@ -530,6 +530,27 @@ fn layout_viewport(scale: ViewportScale) -> Size<AvailableSpace> {
     }
 }
 
+/// The content-box origin (post border/padding) of `node`, in logical
+/// pixels — a free function (not a `WindowState` method) so `redraw`'s
+/// own already-borrowed `arena`/`styles`/`layouts` can call it directly,
+/// without a second, conflicting borrow of `self.runtime`. See
+/// [`WindowState::text_input_content_origin`]'s own doc for the full
+/// rationale; that method just delegates here.
+fn text_input_content_origin(
+    arena: &florui_style::Arena,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    layouts: &HashMap<NodeId, BoxLayout>,
+    node: NodeId,
+) -> (f32, f32) {
+    let (x, y) = florui_layout::absolute_position(arena, layouts, node);
+    let style = styles.get(&node);
+    let border = style.map_or(0.0, |s| s.border.left.width);
+    let border_top = style.map_or(0.0, |s| s.border.top.width);
+    let padding_left = style.map_or(0.0, |s| s.padding.left);
+    let padding_top = style.map_or(0.0, |s| s.padding.top);
+    (x + border + padding_left, y + border_top + padding_top)
+}
+
 /// Scales every committed box from the logical pixels layout ran against
 /// up to physical pixels, so painting can rasterize at full device
 /// resolution instead of the canvas's own (unscaled) unit.
@@ -575,12 +596,15 @@ fn build_text_input_paint(
         let Some(id) = arena.id_attr(node) else {
             continue;
         };
-        let Some((runs, caret_rect, selection_rects)) = registry.paint_data(id, font) else {
+        let Some((runs, caret_rect, selection_rects, compose_rect)) = registry.paint_data(id, font)
+        else {
             continue;
         };
         let is_focused = focused == Some(node);
         let style = styles.get(&node);
-        let (runs, caret_rect, selection_rects) = if arena.input_type(node) == Some("password") {
+        let (runs, caret_rect, selection_rects, compose_rect) = if arena.input_type(node)
+            == Some("password")
+        {
             let font_size = style.map_or(16.0, |s| s.font_size);
             let font_weight = style.map_or(400.0, |s| s.font_weight);
             let family = style.map_or(florui_text::FontFamily::SansSerif, |s| {
@@ -599,19 +623,22 @@ fn build_text_input_paint(
                     .copied()
                     .unwrap_or_else(|| mask_positions.last().copied().unwrap_or(0.0))
             };
-            // `caret_rect`/`selection_rects` are `(x0, y0, x1, y1)` --
-            // two real corners, not a width/height pair (see
-            // `Font::caret_rect`'s own doc and `florui-paint`'s identical
-            // destructuring) -- so both x's need remapping through the
-            // same real-x -> mask-x lookup, not just the first.
+            // `caret_rect`/`selection_rects`/`compose_rect` are all
+            // `(x0, y0, x1, y1)` -- two real corners, not a width/height
+            // pair (see `Font::caret_rect`'s own doc and `florui-paint`'s
+            // identical destructuring) -- so every one of these x's needs
+            // remapping through the same real-x -> mask-x lookup, not
+            // just the first.
             let caret_rect = caret_rect.map(|(x0, y0, x1, y1)| (mask_x(x0), y0, mask_x(x1), y1));
             let selection_rects = selection_rects
                 .into_iter()
                 .map(|(x0, y0, x1, y1)| (mask_x(x0), y0, mask_x(x1), y1))
                 .collect();
-            (mask_runs, caret_rect, selection_rects)
+            let compose_rect =
+                compose_rect.map(|(x0, y0, x1, y1)| (mask_x(x0), y0, mask_x(x1), y1));
+            (mask_runs, caret_rect, selection_rects, compose_rect)
         } else {
-            (runs, caret_rect, selection_rects)
+            (runs, caret_rect, selection_rects, compose_rect)
         };
         result.insert(
             node,
@@ -623,6 +650,7 @@ fn build_text_input_paint(
                 } else {
                     Vec::new()
                 },
+                compose_rect: is_focused.then_some(compose_rect).flatten(),
                 show_caret: is_focused,
             },
         );
@@ -944,6 +972,21 @@ impl WindowState {
         }
         let text_inputs =
             build_text_input_paint(arena, styles, font, &text_input_registry, focused);
+        if let Some(node) = focused
+            && let Some(paint) = text_inputs.get(&node)
+            && let Some((x0, y0, x1, y1)) = paint.compose_rect
+        {
+            // Logical coordinates straight through -- `set_ime_cursor_area`
+            // accepts either `Logical*`/`Physical*` and converts using the
+            // window's own scale factor internally, so no manual
+            // `scale_factor` multiplication belongs here (unlike
+            // `physical_layouts`, which painting needs pre-scaled).
+            let (origin_x, origin_y) = text_input_content_origin(arena, styles, layouts, node);
+            window.set_ime_cursor_area(
+                winit::dpi::LogicalPosition::new(origin_x + x0, origin_y + y0),
+                winit::dpi::LogicalSize::new((x1 - x0).max(1.0), (y1 - y0).max(1.0)),
+            );
+        }
 
         let node_bounds: HashMap<NodeId, (f32, f32, f32, f32)> = physical_layouts
             .keys()
@@ -1231,7 +1274,15 @@ impl WindowState {
             .is_some_and(|(last_node, at)| last_node == node && now - at < DOUBLE_CLICK_INTERVAL);
         self.last_text_input_click = Some((node, now));
 
+        let previous = self.focused_text_input();
         self.runtime.set_focused(Some(node), false);
+        if let Some(previous) = previous
+            && previous != node
+        {
+            self.clear_compose_for(previous);
+            self.reset_ime_context();
+        }
+        self.window.set_ime_allowed(self.allows_ime(node));
         let Some(id) = ({
             let (arena, ..) = self.runtime.geometry();
             arena.id_attr(node).map(str::to_owned)
@@ -1265,13 +1316,7 @@ impl WindowState {
     /// painted over.
     fn text_input_content_origin(&self, node: NodeId) -> (f32, f32) {
         let (arena, styles, layouts) = self.runtime.geometry();
-        let (x, y) = florui_layout::absolute_position(arena, layouts, node);
-        let style = styles.get(&node);
-        let border = style.map_or(0.0, |s| s.border.left.width);
-        let border_top = style.map_or(0.0, |s| s.border.top.width);
-        let padding_left = style.map_or(0.0, |s| s.padding.left);
-        let padding_top = style.map_or(0.0, |s| s.padding.top);
-        (x + border + padding_left, y + border_top + padding_top)
+        text_input_content_origin(arena, styles, layouts, node)
     }
 
     fn is_drag_region(&self, node: NodeId) -> bool {
@@ -1342,9 +1387,18 @@ impl WindowState {
         {
             // Matches real HTML: a click sets keyboard focus to its
             // target too, just not :focus-visible (via_keyboard: false).
+            let previous = self.focused_text_input();
             let focus_changed = self.runtime.set_focused(Some(pressed), false);
             self.runtime.dispatch_click(pressed);
             if focus_changed {
+                // `pressed` is never itself an editable text input here
+                // (`handle_press` routes those through
+                // `handle_text_input_press` instead) -- so focus is
+                // always leaving text-input territory when it lands here.
+                if let Some(previous) = previous {
+                    self.clear_compose_for(previous);
+                }
+                self.window.set_ime_allowed(false);
                 self.update_and_request_redraw();
             }
         }
@@ -1383,12 +1437,27 @@ impl WindowState {
         }
         match event.logical_key {
             Key::Named(NamedKey::Tab) => {
+                let previous = self.focused_text_input();
                 let moved = if self.modifiers.shift_key() {
                     self.runtime.focus_previous()
                 } else {
                     self.runtime.focus_next()
                 };
                 if moved {
+                    let now_focused = self.focused_text_input();
+                    if let Some(previous) = previous
+                        && Some(previous) != now_focused
+                    {
+                        self.clear_compose_for(previous);
+                        // Real reset, not just this crate's own buffer --
+                        // see `Self::reset_ime_context`'s own doc. Needed
+                        // even when moving to a *different* text input,
+                        // since `set_ime_allowed(true)` right after is a
+                        // real no-op if it was already `true`.
+                        self.reset_ime_context();
+                    }
+                    self.window
+                        .set_ime_allowed(now_focused.is_some_and(|node| self.allows_ime(node)));
                     self.update_and_request_redraw();
                 }
             }
@@ -1411,6 +1480,57 @@ impl WindowState {
         let (arena, ..) = self.runtime.geometry();
         (arena.tag(node) == "input" && crate::focus::is_editable_input_type(arena.input_type(node)))
             .then_some(node)
+    }
+
+    /// Whether IME composition should ever be allowed for `node` --
+    /// never for `type="password"`. The OS's own candidate window shows
+    /// composing text in the clear regardless of this crate's own
+    /// masking (a real, unavoidable leak in the platform's IME
+    /// architecture, not something an app can suppress) -- disabling IME
+    /// there entirely, so a password field only ever takes direct
+    /// keystrokes, is the same real-world choice many existing
+    /// applications already make for this exact reason.
+    fn allows_ime(&self, node: NodeId) -> bool {
+        let (arena, ..) = self.runtime.geometry();
+        arena.input_type(node) != Some("password")
+    }
+
+    /// Defensive: clears any live IME composition on `node`. winit never
+    /// signals `Ime::Disabled` when focus moves directly between two
+    /// text inputs, or from one to a button (both keep this window's
+    /// `set_ime_allowed` unchanged or update it independently) -- nothing
+    /// else tells the app "the input that just lost focus needs its
+    /// preedit cleared." A real no-op if `node` wasn't composing, or has
+    /// no `id` attribute (see [`crate::text_input::TextInputRegistry::clear_compose`]).
+    fn clear_compose_for(&mut self, node: NodeId) {
+        let Some(id) = ({
+            let (arena, ..) = self.runtime.geometry();
+            arena.id_attr(node).map(str::to_owned)
+        }) else {
+            return;
+        };
+        let registry = self.runtime.text_input_registry();
+        let (_, _, _, font) = self.runtime.geometry_and_font_mut();
+        registry.clear_compose(&id, font);
+    }
+
+    /// Forces the real OS-level IME session to end, for whichever input
+    /// it was still composing against. Real Windows IME composition is
+    /// scoped to the whole window (one input context per `hwnd`), not to
+    /// any one `<input>` node -- so moving focus directly from a
+    /// composing text input to another one leaves the OS's own
+    /// candidate/preedit state alive and still targeting *this* window,
+    /// misdirected into whichever input is now focused once the next
+    /// `WM_IME_COMPOSITION` arrives. `set_ime_allowed(true)` again would
+    /// be a real no-op here (IME was already allowed) -- toggling off
+    /// then on re-associates the window's input context (see winit's own
+    /// `ImeContext::set_ime_allowed`, which calls `ImmAssociateContextEx`
+    /// either way), the actual mechanism that discards a stale
+    /// composition. [`Self::clear_compose_for`] alone only clears this
+    /// crate's own buffer state; it can't reach into the OS's IME session
+    /// at all.
+    fn reset_ime_context(&mut self) {
+        self.window.set_ime_allowed(false);
     }
 
     /// Maps one real key-down on a focused editable `<input>` to a
@@ -1556,6 +1676,55 @@ impl WindowState {
         };
         if let Some(op) = op {
             self.commit_text_input_op(&registry, &id, node, op);
+        }
+    }
+
+    /// The real handler for `WindowEvent::Ime`. `Preedit`/`Commit` only
+    /// ever arrive for the focused text input (winit only allows IME
+    /// events at all once [`Self::handle_text_input_press`]/the `Tab`
+    /// branch/`Self::handle_release` have called `set_ime_allowed` for
+    /// it) — a missing focused input or `id` attribute is a real no-op,
+    /// not an error. `Commit` reuses the exact same
+    /// [`Self::commit_text_input_op`] a typed character already goes
+    /// through: once committed, IME-composed text is exactly as real as
+    /// anything typed directly.
+    fn handle_ime_event(&mut self, ime: Ime) {
+        let Some(node) = self.focused_text_input() else {
+            return;
+        };
+        // Defense in depth: `type="password"` never asks the OS to
+        // enable IME in the first place (see `Self::allows_ime`'s own
+        // doc), but a stray event delivered anyway must still not reach
+        // a password field's own buffer.
+        if !self.allows_ime(node) {
+            return;
+        }
+        let Some(id) = ({
+            let (arena, ..) = self.runtime.geometry();
+            arena.id_attr(node).map(str::to_owned)
+        }) else {
+            return;
+        };
+        let registry = self.runtime.text_input_registry();
+        match ime {
+            Ime::Preedit(text, cursor) => {
+                let (_, _, _, font) = self.runtime.geometry_and_font_mut();
+                registry.set_compose(&id, &text, cursor, font);
+                self.update_and_request_redraw();
+            }
+            Ime::Commit(text) => {
+                let text = strip_disallowed_input_chars(&text);
+                self.commit_text_input_op(&registry, &id, node, TextEditOp::InsertOrReplace(text));
+            }
+            // `Enabled` needs no action (this window already allowed IME
+            // before the OS would ever send `Preedit`/`Commit`).
+            // `Disabled` defensively clears a composition winit itself
+            // didn't already clear via an empty `Preedit` first.
+            Ime::Enabled | Ime::Disabled => {
+                let (_, _, _, font) = self.runtime.geometry_and_font_mut();
+                registry.clear_compose(&id, font);
+                self.update_and_request_redraw();
+            }
         }
     }
 
@@ -2031,6 +2200,7 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 is_synthetic: false,
                 ..
             } => state.handle_keyboard_input(event, &self.clipboard),
+            WindowEvent::Ime(ime) => state.handle_ime_event(ime),
             _ => {}
         }
     }
