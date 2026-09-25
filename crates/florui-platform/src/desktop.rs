@@ -1424,11 +1424,14 @@ impl WindowState {
         }
         // A held key's own OS auto-repeat must reach text editing (real
         // held-Backspace/arrow-key repeat, matching every other real text
-        // input) but must not re-fire Tab/Enter/Space's own activation --
-        // gated below, only for that branch, not up here where it would
-        // also suppress text-input repeat.
-        let is_tab = matches!(event.logical_key, Key::Named(NamedKey::Tab));
-        if !is_tab && let Some(node) = self.focused_text_input() {
+        // input) but must not re-fire Tab/Enter/Space/Escape's own
+        // activation -- gated below, only for that branch, not up here
+        // where it would also suppress text-input repeat.
+        let is_tab_or_escape = matches!(
+            event.logical_key,
+            Key::Named(NamedKey::Tab) | Key::Named(NamedKey::Escape)
+        );
+        if !is_tab_or_escape && let Some(node) = self.focused_text_input() {
             self.handle_text_input_key(node, &event, clipboard);
             return;
         }
@@ -1464,6 +1467,19 @@ impl WindowState {
             Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
                 if let Some(focused) = self.runtime.focused() {
                     self.runtime.dispatch_click(focused);
+                }
+            }
+            // Only a modal `Dialog` wires this up at all -- resolved
+            // structurally (its own reserved marker class), not from
+            // whatever currently has focus, so it works even if nothing
+            // inside the dialog does.
+            Key::Named(NamedKey::Escape) => {
+                let modal_root = {
+                    let (arena, ..) = self.runtime.geometry();
+                    crate::focus::modal_root(arena)
+                };
+                if let Some(root) = modal_root {
+                    self.runtime.dispatch_event(root, "close");
                 }
             }
             _ => {}
