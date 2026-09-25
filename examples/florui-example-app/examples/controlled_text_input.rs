@@ -2,15 +2,21 @@
 //! to select, double-click selects a word), Ctrl+A/C/X/V against the
 //! real OS clipboard, and Ctrl+Z/Ctrl+Shift+Z undo/redo.
 //!
-//! Two fields, the two authoring contracts slots-and-bindings.md's
-//! "Optional convenience and explicit control" both require: "Name"
-//! carries a real `Binding<String>` that rejects anything over 12
-//! characters (so a real "the owner rejected this" resync is visibly
-//! exercised, not just accepted edits); "Nickname" carries a plain value
-//! plus `oninput` instead, with no `Binding` anywhere in its own code.
-//! Both sibling `<span>`s below only update once the owner actually
-//! accepts a change — never on every keystroke, and never on a rejected
-//! one.
+//! Four fields. "Name" and "Nickname" are the two authoring contracts
+//! slots-and-bindings.md's "Optional convenience and explicit control"
+//! both require: "Name" carries a real `Binding<String>` that rejects
+//! anything over 12 characters (so a real "the owner rejected this"
+//! resync is visibly exercised, not just accepted edits); "Nickname"
+//! carries a plain value plus `oninput` instead, with no `Binding`
+//! anywhere in its own code. Both sibling `<span>`s below only update
+//! once the owner actually accepts a change — never on every keystroke,
+//! and never on a rejected one.
+//!
+//! "Default text"/"Default password" carry no `class` at all — real
+//! `default_stylesheet.rs` UA styling only, checked directly against a
+//! real Chromium: gray border, white background, black text, real
+//! padding. Password masking paints a real substitute glyph run at the
+//! real glyph positions, not a parallel masked buffer.
 //!
 //! `cargo run --example controlled_text_input -p florui-example-app`
 
@@ -46,6 +52,15 @@ fn app() -> Element {
     let nickname = use_signal(|| "Grace".to_string());
     let nickname_for_input = nickname.clone();
 
+    let default_text = use_signal(|| "Hello".to_string());
+    let default_text_binding =
+        Binding::new(default_text.get(), move |value| default_text.set(value));
+
+    let default_password = use_signal(|| "secret".to_string());
+    let default_password_binding = Binding::new(default_password.get(), move |value| {
+        default_password.set(value)
+    });
+
     view! {
         <div class="page">
             <p class="instructions">
@@ -71,6 +86,14 @@ fn app() -> Element {
                 oninput={move |value: String| nickname_for_input.set(value)}
             />
             <p class="status">{format!("Committed: {:?}", nickname.get())}</p>
+
+            <label class="field-label">{"Default text (no author CSS -- pure UA default)"}</label>
+            <input id="default-text-input" type="text" value={default_text_binding} />
+
+            <label class="field-label">
+                {"Default password (no author CSS -- pure UA default)"}
+            </label>
+            <input id="default-password-input" type="password" value={default_password_binding} />
         </div>
     }
 }
