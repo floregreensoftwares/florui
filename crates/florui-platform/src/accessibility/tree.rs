@@ -1,0 +1,344 @@
+//! Builds a real AccessKit tree from a florui `Arena` every render. Host
+//! OS wiring (the `winit` adapter, inbound `ActionRequest` dispatch) stays
+//! in `desktop.rs`; this module only turns an `Arena` into a
+//! [`accesskit::TreeUpdate`], so it never needs to know about `winit`.
+//!
+//! Node identity: `florui_style::NodeId` is just preorder position in a
+//! freshly rebuilt `Arena` (`Arena::build` reruns from scratch every
+//! render) and does not survive across renders — the same problem
+//! [`florui_style::FocusPath`] already solves for "the one focused
+//! element". This tree interns each node's `FocusPath` into a monotonic
+//! `accesskit::NodeId` — zero collision risk, unlike hashing the path.
+//! `AccessKitId(0)` is reserved for a synthetic `Role::Window` root over
+//! `arena.roots()` (document *and* portal-overlay roots, in order —
+//! AccessKit needs exactly one tree root; `Arena` can hand back several).
+//!
+//! Like `ScrollRegistry`/`TextInputRegistry`, this rebuilds the whole
+//! tree every call rather than diffing against the previous one —
+//! AccessKit's own docs allow sending a complete tree every update, just
+//! not optimally; incremental updates are a later, measured-cost
+//! optimization, not this slice's concern.
+//!
+//! Inbound `Action::Focus`/`Action::Click` are the only ones this slice
+//! wires up (see `desktop.rs`'s own dispatch). AT-driven text editing
+//! (`Action::SetValue`/`ReplaceSelectedText`) is explicitly out of scope:
+//! there is no existing write path from an arbitrary AT string into
+//! `TextInputRegistry`'s caret-based edit ops, the same reason IME was
+//! excluded from the text-input slice.
+
+use std::collections::{HashMap, HashSet};
+
+use accesskit::{Action, Node, NodeId as AccessKitId, Rect, Role, TreeId, TreeInfo, TreeUpdate};
+use florui_style::{Arena, FocusPath, NodeId};
+
+use crate::focus::is_focusable;
+
+const ROOT_ID: AccessKitId = AccessKitId(0);
+
+/// A node's real, on-screen, window-relative physical box — the same
+/// geometry hit-testing/painting already use. Supplied by the caller
+/// (`desktop.rs`'s own `physical_layouts`); this module has no scroll/DPI
+/// knowledge of its own.
+pub(crate) type NodeBounds = HashMap<NodeId, (f32, f32, f32, f32)>;
+
+pub(crate) struct AccessibilityTree {
+    interner: HashMap<FocusPath, u64>,
+    next_id: u64,
+}
+
+impl AccessibilityTree {
+    pub(crate) fn new() -> Self {
+        Self {
+            interner: HashMap::new(),
+            next_id: 1,
+        }
+    }
+
+    fn stable_id(&mut self, path: &FocusPath) -> AccessKitId {
+        if let Some(&id) = self.interner.get(path) {
+            return AccessKitId(id);
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        self.interner.insert(path.clone(), id);
+        AccessKitId(id)
+    }
+
+    /// Rebuilds the whole tree from `arena`. Returns the update plus a
+    /// side table translating an inbound `ActionRequest.target_node`
+    /// back to a real `florui_style::NodeId` for this same render (the
+    /// interning above is one-way; a fresh reverse table is cheaper than
+    /// keeping one live across renders when nodes come and go).
+    pub(crate) fn build(
+        &mut self,
+        arena: &Arena,
+        focused: Option<NodeId>,
+        bounds: &NodeBounds,
+    ) -> (TreeUpdate, HashMap<AccessKitId, NodeId>) {
+        let mut nodes = Vec::new();
+        let mut reverse = HashMap::new();
+        let mut seen = HashSet::new();
+
+        let root_children: Vec<AccessKitId> = arena
+            .roots()
+            .iter()
+            .map(|&child| {
+                self.build_node(arena, child, bounds, &mut nodes, &mut reverse, &mut seen)
+            })
+            .collect();
+
+        let mut root = Node::new(Role::Window);
+        root.set_children(root_children);
+        nodes.push((ROOT_ID, root));
+
+        self.interner.retain(|path, _| seen.contains(path));
+
+        let focus = focused
+            .map(|id| self.stable_id(&FocusPath::of(arena, id)))
+            .unwrap_or(ROOT_ID);
+
+        let update = TreeUpdate {
+            nodes,
+            tree: Some(TreeInfo::new(ROOT_ID)),
+            tree_id: TreeId::ROOT,
+            focus,
+        };
+        (update, reverse)
+    }
+
+    fn build_node(
+        &mut self,
+        arena: &Arena,
+        id: NodeId,
+        bounds: &NodeBounds,
+        nodes: &mut Vec<(AccessKitId, Node)>,
+        reverse: &mut HashMap<AccessKitId, NodeId>,
+        seen: &mut HashSet<FocusPath>,
+    ) -> AccessKitId {
+        let path = FocusPath::of(arena, id);
+        seen.insert(path.clone());
+        let ak_id = self.stable_id(&path);
+        reverse.insert(ak_id, id);
+
+        let children = arena.children(id);
+        let mut node = Node::new(Role::GenericContainer);
+
+        match arena.tag(id) {
+            "button" => {
+                node.set_role(Role::Button);
+                node.set_label(arena.text_content(id));
+                if is_focusable(arena, id) {
+                    node.add_action(Action::Focus);
+                    node.add_action(Action::Click);
+                }
+            }
+            "input" => {
+                let role = match arena.input_type(id) {
+                    Some("password") => Role::PasswordInput,
+                    _ => Role::TextInput,
+                };
+                node.set_role(role);
+                node.set_value(arena.value_attr(id).unwrap_or_default());
+                if is_focusable(arena, id) {
+                    node.add_action(Action::Focus);
+                }
+            }
+            _ if children.is_empty() => {
+                let text = arena.text_content(id);
+                if !text.is_empty() {
+                    node.set_role(Role::Label);
+                    node.set_value(text);
+                }
+            }
+            _ => {}
+        }
+
+        if arena.is_disabled(id) {
+            node.set_disabled();
+        }
+
+        if let Some(&(x, y, width, height)) = bounds.get(&id) {
+            node.set_bounds(Rect {
+                x0: x as f64,
+                y0: y as f64,
+                x1: (x + width) as f64,
+                y1: (y + height) as f64,
+            });
+        }
+
+        let child_ids: Vec<AccessKitId> = children
+            .iter()
+            .copied()
+            .map(|child| self.build_node(arena, child, bounds, nodes, reverse, seen))
+            .collect();
+        node.set_children(child_ids);
+
+        nodes.push((ak_id, node));
+        ak_id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use florui::prelude::*;
+
+    use super::*;
+
+    fn build(
+        tree: &Element,
+        focused: Option<NodeId>,
+    ) -> (TreeUpdate, HashMap<AccessKitId, NodeId>, Arena) {
+        let arena = Arena::build(tree);
+        let mut ak_tree = AccessibilityTree::new();
+        let bounds = NodeBounds::new();
+        let (update, reverse) = ak_tree.build(&arena, focused, &bounds);
+        (update, reverse, arena)
+    }
+
+    fn role_of(update: &TreeUpdate, id: AccessKitId) -> Role {
+        update
+            .nodes
+            .iter()
+            .find(|(node_id, _)| *node_id == id)
+            .map(|(_, node)| node.role())
+            .expect("node must be present in the update")
+    }
+
+    #[test]
+    fn a_button_gets_the_button_role_and_its_text_as_label() {
+        let tree: Element = view! { <button>{"Go"}</button> };
+        let (update, reverse, arena) = build(&tree, None);
+        let button = arena.roots()[0];
+        let ak_id = *reverse.iter().find(|&(_, &n)| n == button).unwrap().0;
+        assert_eq!(role_of(&update, ak_id), Role::Button);
+        let node = update.nodes.iter().find(|(id, _)| *id == ak_id).unwrap();
+        assert_eq!(node.1.label(), Some("Go"));
+    }
+
+    #[test]
+    fn a_text_input_gets_the_text_input_role_and_its_value() {
+        let tree: Element = view! { <input type="text" value="hi" /> };
+        let (update, reverse, arena) = build(&tree, None);
+        let input = arena.roots()[0];
+        let ak_id = *reverse.iter().find(|&(_, &n)| n == input).unwrap().0;
+        assert_eq!(role_of(&update, ak_id), Role::TextInput);
+        let node = update.nodes.iter().find(|(id, _)| *id == ak_id).unwrap();
+        assert_eq!(node.1.value(), Some("hi"));
+    }
+
+    #[test]
+    fn a_password_input_gets_the_password_input_role() {
+        let tree: Element = view! { <input type="password" value="secret" /> };
+        let (update, reverse, arena) = build(&tree, None);
+        let input = arena.roots()[0];
+        let ak_id = *reverse.iter().find(|&(_, &n)| n == input).unwrap().0;
+        assert_eq!(role_of(&update, ak_id), Role::PasswordInput);
+    }
+
+    #[test]
+    fn a_leaf_text_node_gets_the_label_role() {
+        let tree: Element = view! { <span>{"hello"}</span> };
+        let (update, reverse, arena) = build(&tree, None);
+        let span = arena.roots()[0];
+        let ak_id = *reverse.iter().find(|&(_, &n)| n == span).unwrap().0;
+        assert_eq!(role_of(&update, ak_id), Role::Label);
+        let node = update.nodes.iter().find(|(id, _)| *id == ak_id).unwrap();
+        assert_eq!(node.1.value(), Some("hello"));
+    }
+
+    #[test]
+    fn a_div_gets_the_generic_container_role() {
+        let tree: Element = view! { <div><span>{"x"}</span></div> };
+        let (update, reverse, arena) = build(&tree, None);
+        let div = arena.roots()[0];
+        let ak_id = *reverse.iter().find(|&(_, &n)| n == div).unwrap().0;
+        assert_eq!(role_of(&update, ak_id), Role::GenericContainer);
+    }
+
+    #[test]
+    fn a_disabled_button_is_marked_disabled_and_gets_no_actions() {
+        let tree: Element = view! { <button disabled="true">{"Go"}</button> };
+        let (update, reverse, arena) = build(&tree, None);
+        let button = arena.roots()[0];
+        let ak_id = *reverse.iter().find(|&(_, &n)| n == button).unwrap().0;
+        let node = &update.nodes.iter().find(|(id, _)| *id == ak_id).unwrap().1;
+        assert!(node.is_disabled());
+    }
+
+    #[test]
+    fn the_root_is_a_window_containing_every_top_level_root() {
+        let tree: Element = view! {
+            <div class="a" />
+            <div class="b" />
+        };
+        let (update, _, _) = build(&tree, None);
+        let root = &update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == ROOT_ID)
+            .unwrap()
+            .1;
+        assert_eq!(root.role(), Role::Window);
+        assert_eq!(root.children().len(), 2);
+    }
+
+    #[test]
+    fn focus_defaults_to_the_root_when_nothing_is_focused() {
+        let tree: Element = view! { <button>{"Go"}</button> };
+        let (update, _, _) = build(&tree, None);
+        assert_eq!(update.focus, ROOT_ID);
+    }
+
+    #[test]
+    fn focus_points_at_the_focused_nodes_stable_id() {
+        let tree: Element = view! { <button>{"Go"}</button> };
+        let arena = Arena::build(&tree);
+        let button = arena.roots()[0];
+        let mut ak_tree = AccessibilityTree::new();
+        let bounds = NodeBounds::new();
+        let (update, reverse) = ak_tree.build(&arena, Some(button), &bounds);
+        let focused_id = *reverse.iter().find(|&(_, &n)| n == button).unwrap().0;
+        assert_eq!(update.focus, focused_id);
+    }
+
+    #[test]
+    fn the_same_structural_position_gets_the_same_id_across_a_rebuild() {
+        let tree: Element = view! {
+            <div>
+                <button>{"First"}</button>
+                <button>{"Second"}</button>
+            </div>
+        };
+        let mut ak_tree = AccessibilityTree::new();
+        let bounds = NodeBounds::new();
+
+        let arena1 = Arena::build(&tree);
+        let second1 = arena1.find_all(|a, id| a.tag(id) == "button")[1];
+        let (_, reverse1) = ak_tree.build(&arena1, None, &bounds);
+        let id1 = *reverse1.iter().find(|&(_, &n)| n == second1).unwrap().0;
+
+        let arena2 = Arena::build(&tree);
+        let second2 = arena2.find_all(|a, id| a.tag(id) == "button")[1];
+        let (_, reverse2) = ak_tree.build(&arena2, None, &bounds);
+        let id2 = *reverse2.iter().find(|&(_, &n)| n == second2).unwrap().0;
+
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn a_removed_nodes_id_is_swept_and_reused_by_nothing_else_incorrectly() {
+        let with_button: Element = view! { <button>{"Go"}</button> };
+        let mut ak_tree = AccessibilityTree::new();
+        let bounds = NodeBounds::new();
+        ak_tree.build(&Arena::build(&with_button), None, &bounds);
+        assert_eq!(ak_tree.interner.len(), 1);
+
+        let empty: Element = view! { <div /> };
+        ak_tree.build(&Arena::build(&empty), None, &bounds);
+        assert_eq!(
+            ak_tree.interner.len(),
+            1,
+            "the div's own path replaces the swept button entry"
+        );
+    }
+}
