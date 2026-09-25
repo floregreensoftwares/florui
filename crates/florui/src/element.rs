@@ -7,7 +7,7 @@
 
 use florui_reactive::Binding;
 
-use crate::Handler;
+use crate::{Handler, ValueHandler};
 
 /// A node produced by `view!`: a tagged element, a text run, or a fragment
 /// (a sequence of siblings with no wrapping box of their own).
@@ -30,8 +30,16 @@ pub struct ElementNode {
     /// already in `attrs` -- every string-only consumer (measurement,
     /// paint) keeps reading `attrs` unchanged; only a write path (a real
     /// text-editing widget) needs this to request an update back to the
-    /// owner.
+    /// owner. Mutually exclusive with `value_handlers` for the same
+    /// attribute -- see slots-and-bindings.md's "Optional convenience and
+    /// explicit control."
     pub bindings: Vec<(String, Binding<String>)>,
+    /// The explicit (non-`Binding`) controlled-value channel -- `oninput`
+    /// reports a new value directly rather than through a typed
+    /// `Binding`'s owner-decides-acceptance contract. `view!`'s own
+    /// codegen only ever emits one of `bindings`/`value_handlers` for a
+    /// given attribute, never both.
+    pub value_handlers: Vec<(String, ValueHandler)>,
     pub children: Vec<Element>,
 }
 
@@ -56,11 +64,23 @@ impl Element {
         bindings: Vec<(String, Binding<String>)>,
         children: Vec<Element>,
     ) -> Self {
+        Self::node_with_value_handlers(tag, attrs, handlers, bindings, Vec::new(), children)
+    }
+
+    pub fn node_with_value_handlers(
+        tag: &'static str,
+        attrs: Vec<(String, String)>,
+        handlers: Vec<(String, Handler)>,
+        bindings: Vec<(String, Binding<String>)>,
+        value_handlers: Vec<(String, ValueHandler)>,
+        children: Vec<Element>,
+    ) -> Self {
         Element::Node(ElementNode {
             tag,
             attrs,
             handlers,
             bindings,
+            value_handlers,
             children,
         })
     }

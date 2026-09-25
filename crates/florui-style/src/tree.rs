@@ -5,7 +5,7 @@
 //! that view once, up front, rather than threading parent references
 //! through `Element` itself.
 
-use florui::{Element, Handler};
+use florui::{Element, Handler, ValueHandler};
 use florui_reactive::Binding;
 
 pub type NodeId = usize;
@@ -34,6 +34,16 @@ struct ArenaNode {
     /// The raw, unparsed `style="..."` attribute text, if declared — see
     /// [`Arena::style_attr`].
     style: Option<String>,
+    /// The current `value` attribute's plain string form — kept
+    /// unconditionally, the same as every other primitive attribute,
+    /// regardless of whether it came from a literal or a `Binding` (see
+    /// [`Arena::value_binding`] for the write-back half). See
+    /// [`Arena::value_attr`].
+    value: Option<String>,
+    /// The `type` attribute on `<input>` (`"text"`/`"password"`/
+    /// `"checkbox"`/`"radio"` — the only values `view!` accepts at all).
+    /// See [`Arena::input_type`].
+    input_type: Option<String>,
     /// The node's own direct text, for text measurement — not inherited
     /// from or propagated to any other node.
     text: String,
@@ -43,8 +53,12 @@ struct ArenaNode {
     inline_items: Vec<InlineItem>,
     handlers: Vec<(String, Handler)>,
     /// A typed write-back channel for a primitive attribute (today, only
-    /// `value` on `<input>`) — see [`Arena::value_binding`].
+    /// `value` on `<input>`) — see [`Arena::value_binding`]. Mutually
+    /// exclusive with `value_handlers` for the same attribute.
     bindings: Vec<(String, Binding<String>)>,
+    /// The explicit (non-`Binding`) controlled-value channel — see
+    /// [`Arena::value_handler`].
+    value_handlers: Vec<(String, ValueHandler)>,
     parent: Option<NodeId>,
     children: Vec<NodeId>,
 }
@@ -129,10 +143,13 @@ impl Arena {
                         id: attr_value(&node.attrs, "id"),
                         disabled: attr_bool(&node.attrs, "disabled"),
                         style: attr_value(&node.attrs, "style"),
+                        value: attr_value(&node.attrs, "value"),
+                        input_type: attr_value(&node.attrs, "type"),
                         text: collect_text(&node.children),
                         inline_items: Vec::new(),
                         handlers: node.handlers.clone(),
                         bindings: node.bindings.clone(),
+                        value_handlers: node.value_handlers.clone(),
                         parent,
                         children: Vec::new(),
                     });
@@ -226,6 +243,20 @@ impl Arena {
         self.nodes[id].style.as_deref()
     }
 
+    /// This node's `value` attribute, in its current plain string form —
+    /// the displayed text for a text-editing control, regardless of
+    /// whether it was written as a literal or a `Binding` (the string
+    /// snapshot always exists either way; see [`Self::value_binding`]).
+    pub fn value_attr(&self, id: NodeId) -> Option<&str> {
+        self.nodes[id].value.as_deref()
+    }
+
+    /// This node's `type` attribute — meaningful only on `<input>`,
+    /// `None` for any tag that never declared one.
+    pub fn input_type(&self, id: NodeId) -> Option<&str> {
+        self.nodes[id].input_type.as_deref()
+    }
+
     /// This node's own direct text, for measurement: its direct
     /// [`Element::Text`] children concatenated in order, flattening
     /// through any [`Element::Fragment`] child but not descending into a
@@ -270,6 +301,17 @@ impl Arena {
             .iter()
             .find(|(name, _)| name == attr)
             .map(|(_, binding)| binding)
+    }
+
+    /// The explicit (non-`Binding`) write-back channel this node declared
+    /// for `attr`, if any — mutually exclusive with [`Self::value_binding`]
+    /// for the same `attr`; `view!`'s own codegen never emits both.
+    pub fn value_handler(&self, id: NodeId, attr: &str) -> Option<&ValueHandler> {
+        self.nodes[id]
+            .value_handlers
+            .iter()
+            .find(|(name, _)| name == attr)
+            .map(|(_, handler)| handler)
     }
 
     /// Depth-first pre-order search across every root, for tests and
@@ -522,11 +564,41 @@ mod tests {
     }
 
     #[test]
+    fn value_handler_finds_the_explicit_contracts_callback() {
+        let tree: Element = view! {
+            <input type="text" value={"Ada".to_string()} oninput={|_: String| ()} />
+        };
+        let arena = Arena::build(&tree);
+        let input = arena.roots()[0];
+        assert!(arena.value_handler(input, "value").is_some());
+        assert!(
+            arena.value_binding(input, "value").is_none(),
+            "the explicit contract must not also carry a Binding"
+        );
+    }
+
+    #[test]
     fn value_binding_is_none_for_a_string_literal_value() {
         let tree: Element = view! { <input type="text" value="static" /> };
         let arena = Arena::build(&tree);
         let input = arena.roots()[0];
         assert!(arena.value_binding(input, "value").is_none());
+    }
+
+    #[test]
+    fn value_attr_and_input_type_read_the_plain_string_form_either_way() {
+        let binding = Binding::new("Ada".to_string(), |_| {});
+        let bound: Element = view! { <input type="password" value={binding} /> };
+        let arena = Arena::build(&bound);
+        let input = arena.roots()[0];
+        assert_eq!(arena.value_attr(input), Some("Ada"));
+        assert_eq!(arena.input_type(input), Some("password"));
+
+        let literal: Element = view! { <input type="checkbox" value="on" /> };
+        let arena = Arena::build(&literal);
+        let input = arena.roots()[0];
+        assert_eq!(arena.value_attr(input), Some("on"));
+        assert_eq!(arena.input_type(input), Some("checkbox"));
     }
 
     #[test]
