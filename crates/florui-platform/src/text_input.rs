@@ -12,8 +12,12 @@
 //! by — an editable input with none gets no caret/selection/undo/focus
 //! story, logged once, not per render (see [`TextInputRegistry::sync`]).
 //!
-//! IME composition is out of scope this slice — nothing here ever calls
-//! `PlainEditor::set_compose`.
+//! IME composition ([`TextInputRegistry::set_compose`]/[`TextInputRegistry::clear_compose`])
+//! deliberately bypasses `undo_stack`/`redo_stack`/`last_committed_text`
+//! entirely — a live preedit is real text in the buffer (it must paint),
+//! but never a *committed* one; only a real `Ime::Commit` (routed through
+//! the ordinary [`TextInputRegistry::apply`] like any other insert) ever
+//! reaches those.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -24,12 +28,14 @@ use florui_text::editing::{ByteSelection, TextEditOp, TextEditor};
 
 use crate::focus;
 
-/// Real shaped glyphs, a caret rect (`x0,y0,x1,y1`), and selection rects
-/// — see [`TextInputRegistry::paint_data`].
+/// Real shaped glyphs, a caret rect (`x0,y0,x1,y1`), selection rects, and
+/// the current IME preedit area (`None` unless actually composing) — see
+/// [`TextInputRegistry::paint_data`].
 type TextInputPaintData = (
     Vec<florui_text::ShapedRun>,
     Option<(f32, f32, f32, f32)>,
     Vec<(f32, f32, f32, f32)>,
+    Option<(f32, f32, f32, f32)>,
 );
 
 /// Bounded so a very long editing session can't grow this without limit —
@@ -266,19 +272,76 @@ impl TextInputRegistry {
             .map(str::to_owned)
     }
 
-    /// The real shaped glyphs plus caret/selection geometry `id`'s
-    /// editor currently has — everything `crate::desktop`'s own `redraw`
-    /// needs to build one `florui_paint::TextInputPaint` entry. `None`
-    /// for an untracked `id`. Password masking isn't decided here (this
-    /// registry doesn't track `type`) — the caller substitutes glyph ids
-    /// afterward if the node's own `type` calls for it.
+    /// The real shaped glyphs plus caret/selection/compose geometry
+    /// `id`'s editor currently has — everything `crate::desktop`'s own
+    /// `redraw` needs to build one `florui_paint::TextInputPaint` entry.
+    /// `None` for an untracked `id`. Password masking isn't decided here
+    /// (this registry doesn't track `type`) — the caller substitutes
+    /// glyph ids afterward if the node's own `type` calls for it.
     pub(crate) fn paint_data(&self, id: &str, font: &mut Font) -> Option<TextInputPaintData> {
         let mut states = self.states.borrow_mut();
         let state = states.get_mut(id)?;
         let runs = font.shaped_runs_for_edit(&mut state.editor);
         let caret_rect = font.caret_rect(&mut state.editor);
         let selection_rects = font.selection_rects(&mut state.editor);
-        Some((runs, caret_rect, selection_rects))
+        let compose_rect = state
+            .editor
+            .is_composing()
+            .then(|| font.ime_cursor_area(&mut state.editor));
+        Some((runs, caret_rect, selection_rects, compose_rect))
+    }
+
+    /// Starts or updates `id`'s IME preedit composition — real text in
+    /// the buffer (so it paints, and so [`Self::paint_data`]'s geometry
+    /// reflects it), but deliberately untouched by undo/redo or
+    /// [`TextInputState::last_committed_text`]: composing-so-far text is
+    /// never itself a final value (see this module's own doc). A no-op
+    /// for an untracked `id` (not currently focused/synced, or missing
+    /// its own `id` attribute).
+    ///
+    /// `text` empty routes to [`Self::clear_compose`] instead of
+    /// forwarding an empty string to Parley, which panics on one in
+    /// debug builds — winit's own contract sends exactly this (an empty
+    /// `Ime::Preedit`) immediately before every `Ime::Commit`.
+    pub fn set_compose(
+        &self,
+        id: &str,
+        text: &str,
+        cursor: Option<(usize, usize)>,
+        font: &mut Font,
+    ) {
+        if text.is_empty() {
+            self.clear_compose(id, font);
+            return;
+        }
+        let mut states = self.states.borrow_mut();
+        let Some(state) = states.get_mut(id) else {
+            return;
+        };
+        font.apply_text_edit(
+            &mut state.editor,
+            TextEditOp::SetCompose(text.to_owned(), cursor),
+            state.font_family,
+            state.font_weight,
+        );
+    }
+
+    /// Ends `id`'s composition, if any — a real no-op when nothing is
+    /// composing (Parley's own `clear_compose` contract), so safe to
+    /// call defensively (e.g. a text input losing focus mid-composition,
+    /// which winit itself never signals via `Ime::Disabled` since the
+    /// newly-focused input keeps IME allowed too).
+    pub fn clear_compose(&self, id: &str, font: &mut Font) {
+        let mut states = self.states.borrow_mut();
+        let Some(state) = states.get_mut(id) else {
+            return;
+        };
+        font.apply_text_edit(
+            &mut state.editor,
+            TextEditOp::ClearCompose,
+            state.font_family,
+            state.font_weight,
+        );
     }
 }
 
