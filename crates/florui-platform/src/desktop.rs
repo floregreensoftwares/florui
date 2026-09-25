@@ -1470,6 +1470,15 @@ impl WindowState {
                 let text = strip_disallowed_input_chars(text);
                 (!text.is_empty()).then_some(TextEditOp::InsertOrReplace(text))
             }
+            // Unlike every other printable character, winit reports the
+            // spacebar as a *named* key, never `Key::Character(" ")` --
+            // a deliberate deviation from the UI Events spec (see
+            // `winit::keyboard::NamedKey::Space`'s own doc). Without this
+            // arm it fell through to the `_ => None` below and typing a
+            // space did nothing.
+            Key::Named(NamedKey::Space) if !ctrl => {
+                Some(TextEditOp::InsertOrReplace(" ".to_string()))
+            }
             _ => None,
         };
         if let Some(op) = op {
