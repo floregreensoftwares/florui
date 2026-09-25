@@ -9,6 +9,7 @@
 //! wants [`UiRuntime`] alone, without pulling in `winit`/`softbuffer`/
 //! `notify` at all, can disable it (`default-features = false`).
 
+mod dialog;
 mod focus;
 mod portal;
 mod runtime;
@@ -17,6 +18,7 @@ mod size_observer;
 mod text_input;
 mod virtual_list;
 
+pub use dialog::{Dialog, DialogProps, MODAL_ROOT_CLASS};
 pub use portal::{Portal, PortalProps, PortalRegistry};
 pub use runtime::UiRuntime;
 pub use scroll::{ScrollHandle, ScrollRegistry, use_scroll_offset};
