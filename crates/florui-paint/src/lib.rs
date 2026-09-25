@@ -60,7 +60,7 @@ use std::path::Path;
 
 use florui_layout::{BoxLayout, absolute_position};
 use florui_style::{
-    Arena, ComputedStyle, Display, FilterFunction, NodeId, Rgba, TransformFunction,
+    Arena, ComputedStyle, Display, FilterFunction, NodeId, Position, Rgba, TransformFunction,
 };
 use florui_text::Font;
 use skrifa::instance::{LocationRef, NormalizedCoord, Size as GlyphSize};
@@ -1391,31 +1391,50 @@ fn saturate_premultiplied(pixel: PremultipliedColorU8, factor: f32) -> Premultip
 /// same "later wins" rule [`paint_node`]'s own doc already establishes
 /// for document order.
 ///
-/// Real CSS only gives `z-index` an effect on a positioned element, a
-/// flex item, or a grid item — this crate has no `position` property yet
-/// (see [`ComputedStyle::z_index`]'s own doc), so `parent_display` is
-/// what decides whether `z_index` applies at all: `None` (no parent, i.e.
-/// a set of document roots) or anything but [`Display::Flex`]/
-/// [`Display::Grid`] leaves `nodes` in plain document order untouched,
-/// matching a plain block/inline child's `z-index` having no real effect.
-/// Only inside a flex or grid container are siblings actually reordered,
-/// by [`ComputedStyle::z_index`] ascending — `auto` (`None`) sorts as `0`
-/// for comparison purposes only, its own semantic meaning otherwise
-/// unaffected. Ties (including every sibling at the default `auto`, the
-/// common case even inside a flex/grid container) keep their original
-/// document order: [`Vec::sort_by_key`] is a stable sort, so a flex/grid
-/// container with no `z-index` anywhere paints in plain document order,
-/// unchanged from before this function existed.
+/// Real CSS only gives `z-index` an effect on a positioned (non-
+/// [`Position::Static`]) element, a flex item, or a grid item — a plain
+/// static block/inline child's `z-index` has no real effect regardless
+/// of what any sibling declares. `parent_display` being
+/// [`Display::Flex`]/[`Display::Grid`] makes *every* child in `nodes`
+/// eligible (real CSS: any flex/grid item, positioned or not); a child
+/// with its own `position` other than [`Position::Static`] is eligible
+/// on its own regardless of `parent_display`. An ineligible sibling
+/// always sorts as `0` (its own `z-index`, if it declared one, is inert)
+/// — an eligible one sorts by its real [`ComputedStyle::z_index`]
+/// ascending, `auto` (`None`) also as `0` for comparison purposes only,
+/// its own semantic meaning otherwise unaffected. Ties (including every
+/// sibling at the default `auto`, the common case) keep their original
+/// document order: [`Vec::sort_by_key`] is a stable sort, so nothing
+/// eligible anywhere paints in plain document order, unchanged from
+/// before this function existed. Real per-element stacking *contexts*
+/// (where a positioned descendant's `z-index` can reach past its own
+/// siblings to stack against unrelated, non-sibling content elsewhere in
+/// the tree) are not implemented — this only ever reorders siblings
+/// within the one shared parent `nodes` already came from.
 pub fn paint_order(
     styles: &HashMap<NodeId, ComputedStyle>,
     parent_display: Option<Display>,
     nodes: &[NodeId],
 ) -> Vec<NodeId> {
-    if !matches!(parent_display, Some(Display::Flex) | Some(Display::Grid)) {
+    let parent_is_flex_or_grid =
+        matches!(parent_display, Some(Display::Flex) | Some(Display::Grid));
+    let is_eligible = |id: &NodeId| {
+        parent_is_flex_or_grid
+            || styles
+                .get(id)
+                .is_some_and(|s| s.position != Position::Static)
+    };
+    if !nodes.iter().any(is_eligible) {
         return nodes.to_vec();
     }
     let mut ordered = nodes.to_vec();
-    ordered.sort_by_key(|id| styles.get(id).and_then(|s| s.z_index).unwrap_or(0));
+    ordered.sort_by_key(|id| {
+        if is_eligible(id) {
+            styles.get(id).and_then(|s| s.z_index).unwrap_or(0)
+        } else {
+            0
+        }
+    });
     ordered
 }
 
@@ -3216,6 +3235,75 @@ mod tests {
             [0xff, 0x00, 0x00],
             "z-index on a plain block child has no real CSS effect; back is later in \
              source order and must still win"
+        );
+    }
+
+    #[test]
+    fn z_index_has_an_effect_on_a_positioned_block_child_outside_flex_or_grid() {
+        // Same shape as the two tests above, but `.front` is `position:
+        // relative` -- real CSS now gives its z-index a real effect, even
+        // though the parent is a plain block, not flex/grid.
+        let tree: Element = view! {
+            <div class="column">
+                <div class="front" />
+                <div class="back" />
+            </div>
+        };
+        let css = "
+            .front { background-color: #00ff00; position: relative; z-index: 1; }
+            .back { background-color: #ff0000; }
+        ";
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet(css).unwrap();
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+            &mut florui_style::AnimationTimeline::default(),
+        );
+
+        let column = arena.roots()[0];
+        let front = arena.children(column)[0];
+        let back = arena.children(column)[1];
+        let mut layouts = HashMap::new();
+        layouts.insert(
+            column,
+            BoxLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 20.0,
+                height: 20.0,
+            },
+        );
+        for child in [front, back] {
+            layouts.insert(
+                child,
+                BoxLayout {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 20.0,
+                    height: 20.0,
+                },
+            );
+        }
+
+        let mut font = Font::load_embedded();
+        let buffer = paint_to_buffer(
+            &mut font,
+            20,
+            20,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            1.0,
+        );
+        assert_eq!(
+            pixel_rgb(&buffer, 10, 10),
+            [0x00, 0xff, 0x00],
+            "front is position: relative with a real z-index now -- it must win over \
+             back's later source position, the same as inside a flex/grid container"
         );
     }
 
