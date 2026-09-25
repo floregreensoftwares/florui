@@ -257,6 +257,13 @@ pub struct TextInputPaint {
     pub runs: Vec<florui_text::ShapedRun>,
     pub caret_rect: Option<(f32, f32, f32, f32)>,
     pub selection_rects: Vec<(f32, f32, f32, f32)>,
+    /// The current IME preedit composition's own area, `None` unless
+    /// actually composing — `runs` already includes the real composing
+    /// glyphs (Parley splices preedit text straight into the shaped
+    /// buffer), so this is only ever used to draw an underline beneath
+    /// them, distinguishing an in-progress composition from committed
+    /// text.
+    pub compose_rect: Option<(f32, f32, f32, f32)>,
     /// `false` while the caret should be hidden this frame (a future
     /// blink timer, or a real Parley IME hidden-cursor request) — distinct
     /// from `caret_rect` being `None` (there's a real geometry answer, it
@@ -1562,6 +1569,22 @@ fn paint_node(
                     scale_factor,
                     clip,
                 );
+                // A live IME preedit composition already painted above
+                // (its glyphs are real, spliced straight into `paint.runs`
+                // by Parley) -- this underline is the only visual cue
+                // distinguishing it from already-committed text.
+                if let Some(rect) = paint.compose_rect {
+                    let (rx0, _, rx1, ry1) = scaled(rect);
+                    fill_rect(
+                        buffer,
+                        content_x + rx0,
+                        content_y + ry1 - TEXT_INPUT_CARET_WIDTH * scale_factor,
+                        rx1 - rx0,
+                        TEXT_INPUT_CARET_WIDTH * scale_factor,
+                        color,
+                        clip,
+                    );
+                }
                 if paint.show_caret
                     && let Some(rect) = paint.caret_rect
                 {
@@ -3817,6 +3840,7 @@ mod tests {
                     .runs,
                 caret_rect: Some((text_width + 4.0, 0.0, text_width + 4.0, height as f32)),
                 selection_rects: Vec::new(),
+                compose_rect: None,
                 show_caret: true,
             },
         );
