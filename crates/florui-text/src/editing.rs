@@ -8,8 +8,11 @@
 //! future multiline slice would need a different type, not a flag on this
 //! one, since single-line callers should never pay for line-wrap tracking.
 //!
-//! IME composition (`PlainEditor::set_compose`/`clear_compose`) is
-//! deliberately never called here — out of scope for this slice.
+//! IME composition goes through [`TextEditOp::SetCompose`]/[`ClearCompose`]
+//! — real Parley preedit state, spliced directly into the live buffer
+//! (see [`Font::apply_text_edit`]'s own dispatch); [`TextEditor::is_composing`]
+//! and [`Font::ime_cursor_area`] are the two things a caller needs to
+//! know while it's active.
 
 use parley::FontFamily as ParleyFontFamily;
 use parley::editing::PlainEditor;
@@ -83,6 +86,15 @@ pub enum TextEditOp {
     /// restore a prior selection, not reachable from any real keyboard/
     /// mouse gesture (those all resolve relative to the current layout).
     SelectByteRange(usize, usize),
+    /// Starts or updates IME preedit composition — `cursor` is byte
+    /// offsets *relative to the start of `text`*, matching both Parley's
+    /// own contract and winit's `Ime::Preedit`'s byte-indexed cursor
+    /// directly, no conversion needed. Real callers never construct this
+    /// with an empty `text` (Parley's own `set_compose` panics on one in
+    /// debug builds) — see [`TextEditOp::ClearCompose`] instead.
+    SetCompose(String, Option<(usize, usize)>),
+    /// Ends composition: removes the preedit text, restores the caret.
+    ClearCompose,
 }
 
 /// Every point-based [`TextEditOp`] resolves against `y = 0.0` in
@@ -127,6 +139,14 @@ impl TextEditor {
     /// caret has nothing to copy/cut).
     pub fn selected_text(&self) -> Option<&str> {
         self.0.selected_text()
+    }
+
+    /// Whether a live IME preedit composition is in progress — the
+    /// buffer already holds the composed-so-far text either way (see
+    /// [`TextEditOp::SetCompose`]'s own doc), so this is what a caller
+    /// checks before treating that text as final.
+    pub fn is_composing(&self) -> bool {
+        self.0.raw_compose().is_some()
     }
 }
 
@@ -186,16 +206,36 @@ impl Font {
                 driver.extend_selection_to_point(x, SINGLE_LINE_Y)
             }
             TextEditOp::SelectByteRange(start, end) => driver.select_byte_range(start, end),
+            TextEditOp::SetCompose(text, cursor) => driver.set_compose(&text, cursor),
+            TextEditOp::ClearCompose => driver.clear_compose(),
         }
         editor.0.raw_text() != text_before
     }
 
+    /// The area of the current IME preedit composition, or the current
+    /// selection if not composing — Parley's own `ime_cursor_area`, the
+    /// only geometry it exposes for an arbitrary (non-selection) byte
+    /// range. Safe to call unconditionally; gate *use* of the result on
+    /// [`TextEditor::is_composing`] at the call site.
+    pub fn ime_cursor_area(&mut self, editor: &mut TextEditor) -> (f32, f32, f32, f32) {
+        editor
+            .0
+            .driver(&mut self.font_cx, &mut self.layout_cx)
+            .refresh_layout();
+        let rect = editor.0.ime_cursor_area();
+        (
+            rect.x0 as f32,
+            rect.y0 as f32,
+            rect.x1 as f32,
+            rect.y1 as f32,
+        )
+    }
+
     /// The caret's own rect (`x0/y0/x1/y1`, zero-width — a caller draws
     /// its own visible width) at `editor`'s current, collapsed-or-not
-    /// selection focus — `None` only if the editor has asked to hide it
-    /// (an IME concern this slice never triggers, so effectively always
-    /// `Some` here, but the caller must still handle it since this is a
-    /// real Parley contract, not one this crate invented).
+    /// selection focus — `None` only if the editor has asked to hide it,
+    /// which real IME composition on some platforms does (see
+    /// [`TextEditor::is_composing`]).
     pub fn caret_rect(&mut self, editor: &mut TextEditor) -> Option<(f32, f32, f32, f32)> {
         editor
             .0
@@ -386,6 +426,74 @@ mod tests {
         );
         let rect = font.caret_rect(&mut editor).expect("cursor is not hidden");
         assert!(rect.3 > rect.1, "caret must have a real, nonzero height");
+    }
+
+    #[test]
+    fn set_compose_starts_composing_but_stays_out_of_the_real_committed_text() {
+        let mut font = Font::load_embedded();
+        let mut editor = TextEditor::new(16.0);
+        assert!(!editor.is_composing());
+        let changed = font.apply_text_edit(
+            &mut editor,
+            TextEditOp::SetCompose("n".to_string(), Some((1, 1))),
+            FontFamily::SansSerif,
+            400.0,
+        );
+        assert!(editor.is_composing());
+        // The buffer really holds "n" (so it paints), but `text()` -- the
+        // real, committed value a caller reports to a Binding/oninput --
+        // deliberately excludes preedit content (Parley's own contract:
+        // "the in-progress IME content is not itself what the user
+        // intends to write").
+        assert!(
+            changed,
+            "the raw buffer did change, even if text() hides it"
+        );
+        assert_eq!(editor.text(), "");
+    }
+
+    #[test]
+    fn clear_compose_really_removes_the_preedit_text_not_just_from_text() {
+        let mut font = Font::load_embedded();
+        let mut editor = TextEditor::new(16.0);
+        font.apply_text_edit(
+            &mut editor,
+            TextEditOp::SetCompose("n".to_string(), Some((1, 1))),
+            FontFamily::SansSerif,
+            400.0,
+        );
+        font.apply_text_edit(
+            &mut editor,
+            TextEditOp::ClearCompose,
+            FontFamily::SansSerif,
+            400.0,
+        );
+        assert!(!editor.is_composing());
+        // `text()` was already "" the whole time (it always excludes an
+        // active preedit) -- the real proof `clear_compose` removed the
+        // preedit from the *buffer*, not just Parley's own read-side
+        // filter, is that new real text afterward isn't prefixed with it.
+        font.apply_text_edit(
+            &mut editor,
+            TextEditOp::InsertOrReplace("hi".to_string()),
+            FontFamily::SansSerif,
+            400.0,
+        );
+        assert_eq!(editor.text(), "hi");
+    }
+
+    #[test]
+    fn ime_cursor_area_is_a_real_rect_while_composing() {
+        let mut font = Font::load_embedded();
+        let mut editor = TextEditor::new(16.0);
+        font.apply_text_edit(
+            &mut editor,
+            TextEditOp::SetCompose("n".to_string(), Some((1, 1))),
+            FontFamily::SansSerif,
+            400.0,
+        );
+        let rect = font.ime_cursor_area(&mut editor);
+        assert!(rect.3 > rect.1, "must have a real, nonzero height");
     }
 
     #[test]
