@@ -15,7 +15,7 @@ default = ["desktop"]
 # driving UiRuntime on its own shouldn't have to pull them in.
 # `dep:windows-sys` is a no-op outside the Windows-only dependency table
 # below — every other target simply never has it in its resolved graph.
-desktop = ["dep:notify", "dep:softbuffer", "dep:winit", "dep:wgpu", "dep:pollster", "dep:windows-sys", "dep:windows", "dep:windows-core", "dep:florui-icon", "dep:serde", "dep:serde_json"]
+desktop = ["dep:notify", "dep:softbuffer", "dep:winit", "dep:wgpu", "dep:pollster", "dep:windows-sys", "dep:windows", "dep:windows-core", "dep:florui-icon", "dep:serde", "dep:serde_json", "dep:arboard"]
 
 [dependencies]
 florui = { path = "../florui" }
@@ -43,6 +43,11 @@ pollster = { version = "1.0.1", optional = true }
 # workspace.
 serde = { version = "1.0.229", features = ["derive"], optional = true }
 serde_json = { version = "1.0.151", optional = true }
+# Real OS clipboard for text-input copy/cut/paste -- version matches what
+# was already resolved transitively via `florui-devtools`'s own `egui`
+# dependency, and scratchpad-validated (set/get round-trip) on this
+# machine before being pinned here.
+arboard = { version = "3.6.1", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

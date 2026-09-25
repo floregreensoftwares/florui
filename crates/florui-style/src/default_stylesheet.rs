@@ -31,6 +31,23 @@
 //! approximates Arial — a real, fixed value rather than querying the OS's
 //! own theme, which this crate has no mechanism for. Default padding isn't
 //! added here yet — tracked separately, not attempted in this slice.
+//!
+//! `input`'s own rule is checked directly against a real Chromium
+//! (`getComputedStyle` on an injected `<input>`/`<button>`, not assumed):
+//! `border: 2px inset rgb(118, 118, 118)`, `padding: 1px 2px`,
+//! `background-color: rgb(255, 255, 255)`, `color: rgb(0, 0, 0)` (a real
+//! UA reset, confirmed not to inherit an ancestor's own `color`), and
+//! `display: inline-block`. The same flat-border simplification as
+//! `button`'s own rule applies here too — real Chromium paints a 2px
+//! inset (3D-beveled) border via native OS theming under
+//! `appearance: auto`, which this crate has no mechanism to replicate (nor
+//! does `button`'s own rule, which similarly flattens a real `2px outset
+//! rgb(0, 0, 0)` down to `1px solid`) — only the *value* (`#767676`, the
+//! same color `button` already uses) carries over, not the 3D bevel
+//! rendering technique. Native OS theming as an opt-in, platform-specific
+//! rendering mode (the way Expo/React Native lets an app render toward
+//! each platform's own native look) is a real, deliberately separate
+//! future direction, not something this default stylesheet attempts.
 
 use std::sync::LazyLock;
 
@@ -50,6 +67,17 @@ const CSS: &str = "
     button {
         display: inline-block;
         border: 1px solid #767676;
+    }
+
+    input {
+        display: inline-block;
+        border: 1px solid #767676;
+        background-color: #ffffff;
+        color: #000000;
+        padding-top: 1px;
+        padding-right: 2px;
+        padding-bottom: 1px;
+        padding-left: 2px;
     }
 
     h1, h2, h3, h4, h5, h6 {
@@ -187,6 +215,54 @@ mod tests {
             assert_close(side.width, 1.0, "button border-width");
             assert_eq!(side.color, crate::color::Rgba::opaque(0x76, 0x76, 0x76));
         }
+    }
+
+    #[test]
+    fn input_resolves_chromiums_real_default_appearance_with_zero_author_css() {
+        // Verified directly against a real Chromium (`getComputedStyle` on
+        // an injected `<input>`), not assumed -- see this module's own doc
+        // for the exact values and the flat-border simplification, shared
+        // with `button`'s own already-established one.
+        // Wrapped in a `<div>`, matching `button`'s own test above --
+        // real CSS blockifies a root element's own `display` (an
+        // `inline`/`inline-block` root computes to `block`), which would
+        // otherwise mask the real `inline-block` this rule declares.
+        let tree: Element = view! {
+            <div>
+                <input type="text" />
+            </div>
+        };
+        let arena = Arena::build(&tree);
+        let div = arena.roots()[0];
+        let input = arena.children(div)[0];
+        let rules = parse_stylesheet("").unwrap();
+        let computed = compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            Viewport::default(),
+            &mut crate::AnimationTimeline::default(),
+        );
+        let style = &computed[&input];
+        assert_eq!(style.display, Display::InlineBlock);
+        for side in [
+            style.border.top,
+            style.border.right,
+            style.border.bottom,
+            style.border.left,
+        ] {
+            assert_close(side.width, 1.0, "input border-width");
+            assert_eq!(side.color, crate::color::Rgba::opaque(0x76, 0x76, 0x76));
+        }
+        assert_eq!(
+            style.background_color,
+            crate::color::Rgba::opaque(0xff, 0xff, 0xff)
+        );
+        assert_eq!(style.color, crate::color::Rgba::opaque(0x00, 0x00, 0x00));
+        assert_close(style.padding.top, 1.0, "input padding-top");
+        assert_close(style.padding.right, 2.0, "input padding-right");
+        assert_close(style.padding.bottom, 1.0, "input padding-bottom");
+        assert_close(style.padding.left, 2.0, "input padding-left");
     }
 
     #[test]

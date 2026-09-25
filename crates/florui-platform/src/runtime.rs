@@ -23,6 +23,7 @@ use crate::focus;
 use crate::portal::PortalRegistry;
 use crate::scroll::ScrollRegistry;
 use crate::size_observer::SizeObserverRegistry;
+use crate::text_input::TextInputRegistry;
 
 pub struct UiRuntime {
     scope: ComponentScope,
@@ -84,6 +85,15 @@ pub struct UiRuntime {
     /// [`PortalRegistry::take`]'s own doc for why no unmount lifecycle is
     /// needed here, unlike `size_observers`.
     portal_registry: Rc<PortalRegistry>,
+    /// Real editing state (caret/selection/undo-redo) for every currently
+    /// editable `<input>` — never reachable via `use_context`, unlike
+    /// every other registry here: nothing inside a render ever needs it,
+    /// only [`crate::desktop::DesktopHost`]'s own keyboard/mouse handlers
+    /// and paint (via [`Self::text_input_registry`]). Synced structurally
+    /// in [`Self::update`], not via `use_attachment` — see
+    /// [`crate::text_input`]'s own module doc for why a bare `<input>` has
+    /// no hook call-site to register through.
+    text_input_registry: Rc<TextInputRegistry>,
     /// Extra `provide_context` calls a host supplied at construction — run
     /// every [`Self::update`] (including the very first one, inside
     /// [`Self::with_rules`] itself) alongside `executor`/`size_observers`,
@@ -180,6 +190,7 @@ impl UiRuntime {
             size_observers: Rc::new(SizeObserverRegistry::new()),
             scroll_registry: Rc::new(ScrollRegistry::new()),
             portal_registry: Rc::new(PortalRegistry::new()),
+            text_input_registry: Rc::new(TextInputRegistry::new()),
             extra_context_providers,
         };
         runtime.update(viewport);
@@ -222,6 +233,10 @@ impl UiRuntime {
     /// to drive directly, without going through a component at all.
     pub(crate) fn scroll_registry(&self) -> Rc<ScrollRegistry> {
         Rc::clone(&self.scroll_registry)
+    }
+
+    pub(crate) fn text_input_registry(&self) -> Rc<TextInputRegistry> {
+        Rc::clone(&self.text_input_registry)
     }
 
     /// Replaces the stylesheet driving every subsequent [`Self::update`].
@@ -316,6 +331,8 @@ impl UiRuntime {
         self.size_observers.notify(&self.arena, &self.layouts);
         self.scroll_registry
             .sync(&self.arena, &self.layouts, &content_extents);
+        self.text_input_registry
+            .sync(&self.arena, &self.styles, &mut self.font);
     }
 
     /// Whether the most recent [`Self::update`] left any `transition`/

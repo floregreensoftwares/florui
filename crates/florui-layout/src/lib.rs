@@ -132,7 +132,37 @@ struct TextContext {
     font_family: florui_text::FontFamily,
 }
 
-fn to_text_font_family(value: florui_style::FontFamily) -> florui_text::FontFamily {
+/// A childless leaf's own text to measure/shape — `<input>`'s `value`
+/// attribute (it can never have `Element::Text` children at all;
+/// `Content::Void` forbids it) for every other childless tag,
+/// `Arena::text_content` exactly as before. Every leaf-intrinsic-size call
+/// site (a leaf built directly, an inline-block child's own measurement,
+/// `flex-basis`'s own text fallback) needs this instead of
+/// `text_content` alone, or a real `<input>` never gets a real size.
+///
+/// An `<input>` with an empty `value` measures as a single space, not an
+/// empty string: unlike an ordinary empty element (a `<div></div>`
+/// legitimately collapses to zero), a real text input keeps its own
+/// line-height-driven box even with nothing typed in it yet — real
+/// `Font::measure`'s own documented behavior treats a truly empty string
+/// as occupying no line at all, which would otherwise collapse an
+/// `<input>`'s height to zero the instant its value is cleared.
+fn leaf_text(arena: &Arena, node: NodeId) -> &str {
+    if arena.tag(node) == "input" {
+        match arena.value_attr(node) {
+            Some(value) if !value.is_empty() => value,
+            _ => " ",
+        }
+    } else {
+        arena.text_content(node)
+    }
+}
+
+/// `pub`, not private: `florui-platform`'s own text-editing registry needs
+/// this exact translation too (an editable input's caret/selection ops
+/// reshape through the same font a plain text node would) — one shared
+/// mapping, not a second copy reimplementing it.
+pub fn to_text_font_family(value: florui_style::FontFamily) -> florui_text::FontFamily {
     match value {
         florui_style::FontFamily::SansSerif => florui_text::FontFamily::SansSerif,
         florui_style::FontFamily::Monospace => florui_text::FontFamily::Monospace,
@@ -270,7 +300,7 @@ fn measure_inline_block_intrinsic_size(
     child: NodeId,
 ) -> (f32, f32) {
     let style = styles.get(&child);
-    let text = arena.text_content(child);
+    let text = leaf_text(arena, child);
     let font_size = style.map_or(16.0, |s| s.font_size);
     let font_weight = style.map_or(400.0, |s| s.font_weight);
     let font_family = style.map_or(florui_text::FontFamily::SansSerif, |s| {
@@ -902,7 +932,7 @@ fn build_node(
                 let arena_children = arena.children(node);
                 let id = if arena_children.is_empty() {
                     let style = to_taffy_style(styles.get(&node));
-                    let text = arena.text_content(node);
+                    let text = leaf_text(arena, node);
                     if text.is_empty() {
                         tree.new_leaf(style)?
                     } else {
@@ -1422,7 +1452,7 @@ fn natural_width(
         return width;
     }
     if arena.children(node).is_empty() {
-        let text = arena.text_content(node);
+        let text = leaf_text(arena, node);
         if !text.is_empty() {
             let family = to_text_font_family(style.font_family);
             return font
@@ -1455,7 +1485,7 @@ fn natural_height(
         return height;
     }
     if arena.children(node).is_empty() {
-        let text = arena.text_content(node);
+        let text = leaf_text(arena, node);
         if !text.is_empty() {
             let family = to_text_font_family(style.font_family);
             return font
@@ -1786,6 +1816,43 @@ mod tests {
         assert_close(layouts[&node].width, expected.width);
         assert_close(layouts[&node].height, expected.height);
         assert!(expected.width > 0.0, "the font actually measured something");
+    }
+
+    #[test]
+    fn an_input_with_no_explicit_size_sizes_to_its_value_texts_measured_width() {
+        // <input> can never have Element::Text children (Content::Void
+        // forbids it) -- its own value attribute, not text_content, must
+        // drive intrinsic sizing, or it would always measure to zero.
+        // Author CSS strips the framework's own default border/padding
+        // (see default_stylesheet.rs) so this test stays focused on text
+        // measurement alone, not box-model addition -- covered separately
+        // by default_stylesheet.rs's own test.
+        let tree: Element = view! { <input type="text" value="Hello" /> };
+        let (arena, layouts) = layout_for(&tree, "input { border: none; padding: 0px; }");
+        let node = arena.roots()[0];
+
+        let expected = florui_text::Font::load_embedded().measure(
+            florui_text::FontFamily::SansSerif,
+            "Hello",
+            16.0,
+            400.0,
+        );
+        assert_close(layouts[&node].width, expected.width);
+        assert!(expected.width > 0.0, "the font actually measured something");
+    }
+
+    #[test]
+    fn an_input_with_an_empty_value_still_keeps_a_real_nonzero_height() {
+        // A real regression: an ordinary empty element legitimately
+        // collapses to zero height, but a real `<input>` must not --
+        // clearing its own value must never make the box disappear.
+        let tree: Element = view! { <input type="text" value="" /> };
+        let (arena, layouts) = layout_for(&tree, "");
+        let node = arena.roots()[0];
+        assert!(
+            layouts[&node].height > 0.0,
+            "an empty <input> must still keep its own line-height, not collapse to zero"
+        );
     }
 
     #[test]

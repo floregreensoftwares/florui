@@ -245,6 +245,25 @@ pub fn paint_to_png(
     })
 }
 
+/// What an editable `<input>` node needs painted for it — the real
+/// caret/selection this crate has no other way to know about, since
+/// neither lives in `styles`/`layouts` (see `crates/florui-platform/src/text_input.rs`,
+/// the only real source of one of these). `runs` are this input's own
+/// shaped glyphs — real ones for `type="text"`, a masked substitute (same
+/// positions, a "•" glyph swapped in) for `type="password"` — painted
+/// exactly like any other text run, no `<input>`-specific rasterization
+/// path needed.
+pub struct TextInputPaint {
+    pub runs: Vec<florui_text::ShapedRun>,
+    pub caret_rect: Option<(f32, f32, f32, f32)>,
+    pub selection_rects: Vec<(f32, f32, f32, f32)>,
+    /// `false` while the caret should be hidden this frame (a future
+    /// blink timer, or a real Parley IME hidden-cursor request) — distinct
+    /// from `caret_rect` being `None` (there's a real geometry answer, it
+    /// just shouldn't paint right now).
+    pub show_caret: bool,
+}
+
 /// Same painting as [`paint_to_png`], returning the pixel buffer directly
 /// instead of writing it to disk. `font` is the caller's own long-lived
 /// instance — see [`florui_layout::compute_layout`]'s own doc for why, and
@@ -282,8 +301,39 @@ pub fn paint_to_buffer(
     layouts: &HashMap<NodeId, BoxLayout>,
     scale_factor: f32,
 ) -> Canvas {
-    let pixmap =
-        Pixmap::new(width, height).expect("paint_to_buffer requires a nonzero-sized canvas");
+    paint_to_buffer_with_text_inputs(
+        font,
+        width,
+        height,
+        canvas,
+        arena,
+        styles,
+        layouts,
+        scale_factor,
+        None,
+    )
+}
+
+/// Same as [`paint_to_buffer`], plus `text_inputs`: real caret/selection
+/// painting for every editable `<input>` node it has an entry for — kept
+/// as a separate function, rather than changing [`paint_to_buffer`]'s own
+/// signature, since text-input painting is only needed by a real desktop
+/// host and every other caller (conformance, devtools, benches) has no
+/// use for it.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_to_buffer_with_text_inputs(
+    font: &mut Font,
+    width: u32,
+    height: u32,
+    canvas: Rgba,
+    arena: &Arena,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    layouts: &HashMap<NodeId, BoxLayout>,
+    scale_factor: f32,
+    text_inputs: Option<&HashMap<NodeId, TextInputPaint>>,
+) -> Canvas {
+    let pixmap = Pixmap::new(width, height)
+        .expect("paint_to_buffer_with_text_inputs requires a nonzero-sized canvas");
     let mut surface = Surface::root(pixmap);
     surface.pixmap.fill(to_tiny_skia_color(canvas));
     paint_nodes(
@@ -296,6 +346,7 @@ pub fn paint_to_buffer(
         arena.roots(),
         scale_factor,
         None,
+        text_inputs,
     );
     surface.pixmap
 }
@@ -342,6 +393,7 @@ fn paint_nodes(
     nodes: &[NodeId],
     scale_factor: f32,
     clip: Option<ClipRect>,
+    text_inputs: Option<&HashMap<NodeId, TextInputPaint>>,
 ) {
     let mut stack: Vec<(NodeId, Option<ClipRect>)> = paint_order(styles, parent_display, nodes)
         .into_iter()
@@ -387,6 +439,7 @@ fn paint_nodes(
                 node_clip,
                 opacity,
                 transform,
+                text_inputs,
             );
             continue;
         }
@@ -400,6 +453,7 @@ fn paint_nodes(
             node,
             scale_factor,
             node_mask.as_ref(),
+            text_inputs,
         );
         let child_clip = clip_for_children(arena, styles, layouts, node, node_clip);
         let child_display = styles.get(&node).map(|s| s.display);
@@ -465,6 +519,19 @@ const NO_BORDER_SIDE: florui_style::BorderSide = florui_style::BorderSide {
     width: 0.0,
     color: Rgba::TRANSPARENT,
 };
+
+/// A fixed selection-highlight color for an editable `<input>` — real
+/// `caret-color`/`::selection` CSS is a documented, deliberate gap this
+/// slice leaves for later; every input highlights identically for now.
+const TEXT_INPUT_SELECTION_COLOR: Rgba = Rgba {
+    r: 0x3a,
+    g: 0x84,
+    b: 0xf7,
+    a: 0x66,
+};
+/// Logical pixels — matches a common OS caret width; not spec-mandated to
+/// this exact number, the same as `desktop.rs`'s own `WHEEL_LINE_HEIGHT`.
+const TEXT_INPUT_CARET_WIDTH: f32 = 1.0;
 
 /// Total padding `filters`' own combined blur reach needs on every side
 /// — zero for `brightness`/`contrast`/`saturate`, which are pointwise
@@ -889,6 +956,7 @@ fn paint_group(
     clip: Option<ClipRect>,
     opacity: f32,
     transform: Transform,
+    text_inputs: Option<&HashMap<NodeId, TextInputPaint>>,
 ) {
     let target_rect = ClipRect::from_xywh(
         buffer.origin.0 as f32,
@@ -947,6 +1015,7 @@ fn paint_group(
         node,
         scale_factor,
         inner_mask.as_ref(),
+        text_inputs,
     );
     let content_clip = clip_for_children(arena, styles, layouts, node, clip);
     let child_display = styles.get(&node).map(|s| s.display);
@@ -960,6 +1029,7 @@ fn paint_group(
         arena.children(node),
         scale_factor,
         content_clip,
+        text_inputs,
     );
 
     let filter = styles.get(&node).map_or(&[][..], |s| &s.filter[..]);
@@ -1363,6 +1433,7 @@ fn paint_node(
     node: NodeId,
     scale_factor: f32,
     clip: Option<&Mask>,
+    text_inputs: Option<&HashMap<NodeId, TextInputPaint>>,
 ) {
     if let Some(&layout) = layouts.get(&node) {
         let style = styles.get(&node);
@@ -1452,7 +1523,61 @@ fn paint_node(
         // size the canvas actually needs.
         let wrap_width = content_width / scale_factor;
 
-        if florui_layout::is_inline_formatting_context(arena, styles, node) {
+        if arena.tag(node) == "input" {
+            if let Some(paint) = text_inputs.and_then(|inputs| inputs.get(&node)) {
+                // `caret_rect`/`selection_rects` come from the same
+                // logical-space editor layout `paint.runs`' own glyph
+                // positions do -- scaled up here exactly like
+                // `paint_shaped_runs` already scales each glyph, so a
+                // selection highlight lands under the glyphs it visually
+                // covers instead of drifting on a HiDPI canvas.
+                let scaled = |(x0, y0, x1, y1): (f32, f32, f32, f32)| {
+                    (
+                        x0 * scale_factor,
+                        y0 * scale_factor,
+                        x1 * scale_factor,
+                        y1 * scale_factor,
+                    )
+                };
+                // Behind the text -- real CSS/browser selection highlight
+                // paints under the glyphs it covers, not over them.
+                for &rect in &paint.selection_rects {
+                    let (sx0, sy0, sx1, sy1) = scaled(rect);
+                    fill_rect(
+                        buffer,
+                        content_x + sx0,
+                        content_y + sy0,
+                        sx1 - sx0,
+                        sy1 - sy0,
+                        TEXT_INPUT_SELECTION_COLOR,
+                        clip,
+                    );
+                }
+                paint_shaped_runs(
+                    buffer,
+                    &paint.runs,
+                    content_x,
+                    content_y,
+                    color,
+                    scale_factor,
+                    clip,
+                );
+                if paint.show_caret
+                    && let Some(rect) = paint.caret_rect
+                {
+                    let (cx0, cy0, cx1, cy1) = scaled(rect);
+                    fill_rect(
+                        buffer,
+                        content_x + cx0,
+                        content_y + cy0,
+                        (cx1 - cx0).max(TEXT_INPUT_CARET_WIDTH * scale_factor),
+                        cy1 - cy0,
+                        color,
+                        clip,
+                    );
+                }
+            }
+        } else if florui_layout::is_inline_formatting_context(arena, styles, node) {
             // A real mixed text/inline-element node: rebuilt and
             // reshaped fresh here, since this crate doesn't share layout's
             // own internal Taffy tree — deterministic at the same final
@@ -3655,6 +3780,77 @@ mod tests {
             }
         }
         assert!(found_ink, "expected at least one red glyph pixel");
+    }
+
+    #[test]
+    fn a_text_input_paints_its_caret_in_its_own_declared_color() {
+        let tree: Element = view! { <input type="text" value="Hi" style="color: #ff0000;" /> };
+        let arena = Arena::build(&tree);
+        let rules = florui_style::parse_stylesheet("").unwrap();
+        let styles = florui_style::compute(
+            &arena,
+            &rules,
+            &InteractionState::new(),
+            florui_style::Viewport::default(),
+            &mut florui_style::AnimationTimeline::default(),
+        );
+        let mut font = Font::load_embedded();
+        let layouts =
+            florui_layout::compute_layout(&mut font, &arena, &styles, Size::MAX_CONTENT).unwrap();
+
+        let node = arena.roots()[0];
+        let width = layouts[&node].width.ceil() as u32 + 10;
+        let height = layouts[&node].height.ceil() as u32;
+
+        // A caret placed 4px past the text's own measured width -- past
+        // every real glyph, so any red pixel there can only be the caret,
+        // not anti-aliased glyph ink.
+        let text_width = font
+            .measure(florui_text::FontFamily::SansSerif, "Hi", 16.0, 400.0)
+            .width;
+        let mut text_inputs = HashMap::new();
+        text_inputs.insert(
+            node,
+            TextInputPaint {
+                runs: font
+                    .shape(florui_text::FontFamily::SansSerif, "Hi", 16.0, 400.0)
+                    .runs,
+                caret_rect: Some((text_width + 4.0, 0.0, text_width + 4.0, height as f32)),
+                selection_rects: Vec::new(),
+                show_caret: true,
+            },
+        );
+
+        let buffer = paint_to_buffer_with_text_inputs(
+            &mut font,
+            width,
+            height,
+            Rgba::opaque(0, 0, 0),
+            &arena,
+            &styles,
+            &layouts,
+            1.0,
+            Some(&text_inputs),
+        );
+
+        // Scanned only past the text's own measured width plus a small
+        // margin -- real glyph ink never extends past its own advance by
+        // more than a pixel or two, so any red pixel out here can only be
+        // the caret, not anti-aliased text.
+        let past_text = (text_width.ceil() as u32 + 2).min(width);
+        let mut found_caret = false;
+        for py in 0..height {
+            for px in past_text..width {
+                let pixel = pixel_rgb(&buffer, px, py);
+                if pixel[0] > 0x80 && pixel[1] < 0x40 && pixel[2] < 0x40 {
+                    found_caret = true;
+                }
+            }
+        }
+        assert!(
+            found_caret,
+            "expected a red caret pixel past x={past_text} (text width {text_width})"
+        );
     }
 
     #[test]
