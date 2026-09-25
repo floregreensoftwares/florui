@@ -24,7 +24,8 @@ use std::sync::Arc;
 use florui::Element;
 use florui_layout::BoxLayout;
 use florui_reactive::provide_context;
-use florui_style::{NodeId, Rgba, StyleError};
+use florui_style::{ComputedStyle, NodeId, Rgba, StyleError};
+use florui_text::editing::TextEditOp;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use taffy::prelude::*;
 use winit::application::ApplicationHandler;
@@ -32,7 +33,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::UiRuntime;
@@ -286,6 +287,7 @@ pub fn run_windows(initial: Vec<WindowSpec>) -> Result<(), RunError> {
         fatal_error: None,
         activation_queue: None,
         primary_window_id: None,
+        clipboard: crate::clipboard::Clipboard::new(),
     };
     event_loop.run_app(&mut host).map_err(RunError::EventLoop)?;
     match host.fatal_error {
@@ -377,6 +379,7 @@ pub fn run_single_instance(
                 fatal_error: None,
                 activation_queue: Some(activation_queue),
                 primary_window_id: None,
+                clipboard: crate::clipboard::Clipboard::new(),
             };
             event_loop.run_app(&mut host).map_err(RunError::EventLoop)?;
             match host.fatal_error {
@@ -535,6 +538,105 @@ fn scale_layouts(layouts: &HashMap<NodeId, BoxLayout>, factor: f32) -> HashMap<N
         .collect()
 }
 
+/// Builds one [`florui_paint::TextInputPaint`] entry for every editable
+/// `<input>` [`crate::text_input::TextInputRegistry`] currently tracks —
+/// the real glyphs and geometry [`crate::desktop`]'s own `redraw` hands
+/// to [`florui_paint::paint_to_buffer_with_text_inputs`]. Only `focused`
+/// gets a real caret/selection highlight (`show_caret`/`selection_rects`);
+/// every other tracked input still needs its own text painted (it's a
+/// real, visible control either way), just without either — matching
+/// real browsers, which never show a selection swatch on an unfocused
+/// text field. `type="password"` gets a masked substitute run instead of
+/// its real glyphs — see [`masked_runs`].
+fn build_text_input_paint(
+    arena: &florui_style::Arena,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    font: &mut florui_text::Font,
+    registry: &crate::text_input::TextInputRegistry,
+    focused: Option<NodeId>,
+) -> HashMap<NodeId, florui_paint::TextInputPaint> {
+    let mut result = HashMap::new();
+    let editable_inputs = arena.find_all(|arena, id| {
+        arena.tag(id) == "input" && crate::focus::is_editable_input_type(arena.input_type(id))
+    });
+    for node in editable_inputs {
+        let Some(id) = arena.id_attr(node) else {
+            continue;
+        };
+        let Some((runs, caret_rect, selection_rects)) = registry.paint_data(id, font) else {
+            continue;
+        };
+        let is_focused = focused == Some(node);
+        let style = styles.get(&node);
+        let runs = if arena.input_type(node) == Some("password") {
+            let font_size = style.map_or(16.0, |s| s.font_size);
+            let font_weight = style.map_or(400.0, |s| s.font_weight);
+            let family = style.map_or(florui_text::FontFamily::SansSerif, |s| {
+                florui_layout::to_text_font_family(s.font_family)
+            });
+            masked_runs(font, &runs, family, font_size, font_weight)
+        } else {
+            runs
+        };
+        result.insert(
+            node,
+            florui_paint::TextInputPaint {
+                runs,
+                caret_rect: is_focused.then_some(caret_rect).flatten(),
+                selection_rects: if is_focused {
+                    selection_rects
+                } else {
+                    Vec::new()
+                },
+                show_caret: is_focused,
+            },
+        );
+    }
+    result
+}
+
+/// A `type="password"` substitute: the real run's own glyph positions
+/// (correct cluster/caret math either way), every glyph's `id` replaced
+/// by one shared "•" glyph — see slots-and-bindings.md-adjacent
+/// `florui-text::editing`'s own doc (Fork 5 in the original design note)
+/// for why a parallel masked buffer was rejected in favor of this.
+fn masked_runs(
+    font: &mut florui_text::Font,
+    real_runs: &[florui_text::ShapedRun],
+    family: florui_text::FontFamily,
+    font_size: f32,
+    font_weight: f32,
+) -> Vec<florui_text::ShapedRun> {
+    let mask = font.shape(family, "\u{2022}", font_size, font_weight);
+    let (Some(mask_run), Some(mask_glyph)) = (
+        mask.runs.first(),
+        mask.runs.first().and_then(|r| r.glyphs.first()),
+    ) else {
+        return Vec::new();
+    };
+    let mask_font = mask_run.font.clone();
+    let mask_font_size = mask_run.font_size;
+    let mask_coords = mask_run.normalized_coords.clone();
+    let mask_glyph_id = mask_glyph.id;
+    real_runs
+        .iter()
+        .map(|run| florui_text::ShapedRun {
+            font: mask_font.clone(),
+            font_size: mask_font_size,
+            normalized_coords: mask_coords.clone(),
+            glyphs: run
+                .glyphs
+                .iter()
+                .map(|glyph| florui_text::ShapedGlyph {
+                    id: mask_glyph_id,
+                    x: glyph.x,
+                    y: glyph.y,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 /// Collects every [`crate::WINDOW_INPUT_REGION_CLASS`] element's real
 /// screen rectangle from this frame's own committed layout and hands
 /// them to [`WindowControls::sync_input_regions`] — only called under
@@ -637,7 +739,23 @@ struct WindowState {
     /// `KeyEvent` carries no modifier state of its own, so Shift+Tab needs
     /// this to distinguish itself from a plain Tab.
     modifiers: ModifiersState,
+    /// The editable `<input>` a left-button press started a text
+    /// selection drag on, if any — still down, not yet released.
+    /// `CursorMoved` while this is `Some` extends the selection to the
+    /// cursor's current position; `handle_release` clears it.
+    text_selecting: Option<NodeId>,
+    /// The node and instant of the last real left-button press on an
+    /// editable `<input>` — a second press on the *same* node within
+    /// [`DOUBLE_CLICK_INTERVAL`] selects the word under the cursor
+    /// instead of just moving the caret there, the same distinction a
+    /// real double-click makes. No existing double-click detection exists
+    /// anywhere else in this file to reuse.
+    last_text_input_click: Option<(NodeId, std::time::Instant)>,
 }
+
+/// Not spec-mandated to an exact number — a common real-OS default for
+/// "two clicks this close together count as one double-click."
+const DOUBLE_CLICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// Long enough that a drag-resize (many `Resized`/`Moved` events per
 /// second) collapses into one save after the user stops; short enough
@@ -757,6 +875,8 @@ impl WindowState {
         };
 
         let scroll_registry = self.runtime.scroll_registry();
+        let text_input_registry = self.runtime.text_input_registry();
+        let focused = self.runtime.focused();
         let (arena, styles, layouts, font) = self.runtime.geometry_and_font_mut();
         let scroll_offsets = scroll_registry.offsets_by_node(arena);
         let scrolled_layouts = florui_layout::apply_scroll_offsets(arena, layouts, &scroll_offsets);
@@ -764,7 +884,9 @@ impl WindowState {
         if self.controls.input_mode() == InputMode::Selective {
             sync_input_regions(&self.controls, &window, arena, &physical_layouts);
         }
-        let canvas = florui_paint::paint_to_buffer(
+        let text_inputs =
+            build_text_input_paint(arena, styles, font, &text_input_registry, focused);
+        let canvas = florui_paint::paint_to_buffer_with_text_inputs(
             font,
             size.width,
             size.height,
@@ -773,6 +895,7 @@ impl WindowState {
             styles,
             &physical_layouts,
             scale_factor as f32,
+            Some(&text_inputs),
         );
 
         match &mut self.presenter {
@@ -910,10 +1033,28 @@ impl WindowState {
     }
 
     /// Updates `:hover` against the runtime's cached geometry — no
-    /// rebuild just to know what's under the cursor.
+    /// rebuild just to know what's under the cursor. While a text-input
+    /// drag-select is in progress (see [`Self::handle_text_input_press`]),
+    /// also extends that selection to the cursor's current position —
+    /// still tracked even once the cursor drags outside the input's own
+    /// box, matching real text-selection behavior.
     fn handle_cursor_moved(&mut self, x: f64, y: f64) {
         self.last_cursor = (x, y);
         let (x, y) = self.to_logical_cursor(x, y);
+        if let Some(node) = self.text_selecting {
+            let Some(id) = ({
+                let (arena, ..) = self.runtime.geometry();
+                arena.id_attr(node).map(str::to_owned)
+            }) else {
+                return;
+            };
+            let local_x = x - self.text_input_content_origin(node).0;
+            let registry = self.runtime.text_input_registry();
+            let (_, _, _, font) = self.runtime.geometry_and_font_mut();
+            registry.apply(&id, TextEditOp::ExtendSelectionToPoint(local_x), font);
+            self.update_and_request_redraw();
+            return;
+        }
         let hit = self
             .runtime
             .hit_test(x, y)
@@ -982,6 +1123,13 @@ impl WindowState {
             self.controls.drag();
             return;
         }
+        if let Some(node) = hit
+            && !self.is_disabled(node)
+            && self.is_editable_text_input(node)
+        {
+            self.handle_text_input_press(node, x);
+            return;
+        }
         // A disabled button must not become `pressed`: `handle_release`
         // sets focus purely from `pressed` being `Some`, before it ever
         // calls `dispatch_click` -- excluding it here is what stops a
@@ -989,6 +1137,68 @@ impl WindowState {
         // `dispatch_click` alone can't (that only stops the click's own
         // handler from firing).
         self.pressed = hit.filter(|&node| !self.is_disabled(node));
+    }
+
+    fn is_editable_text_input(&self, node: NodeId) -> bool {
+        let (arena, ..) = self.runtime.geometry();
+        arena.tag(node) == "input" && crate::focus::is_editable_input_type(arena.input_type(node))
+    }
+
+    /// A real press on an editable, enabled `<input>`: focuses it (like
+    /// real HTML, `:focus-visible` false — a mouse-driven focus, not a
+    /// keyboard one) and positions the caret at the press point, or
+    /// selects the word under it if this press landed on the same input
+    /// within [`DOUBLE_CLICK_INTERVAL`] of the last one. Starts a
+    /// same-input drag-select, extended by [`Self::handle_cursor_moved`]
+    /// and ended by [`Self::handle_release`].
+    fn handle_text_input_press(&mut self, node: NodeId, x: f32) {
+        let now = std::time::Instant::now();
+        let is_double_click = self
+            .last_text_input_click
+            .is_some_and(|(last_node, at)| last_node == node && now - at < DOUBLE_CLICK_INTERVAL);
+        self.last_text_input_click = Some((node, now));
+
+        self.runtime.set_focused(Some(node), false);
+        let Some(id) = ({
+            let (arena, ..) = self.runtime.geometry();
+            arena.id_attr(node).map(str::to_owned)
+        }) else {
+            self.update_and_request_redraw();
+            return;
+        };
+        let local_x = x - self.text_input_content_origin(node).0;
+        let registry = self.runtime.text_input_registry();
+        let (_, _, _, font) = self.runtime.geometry_and_font_mut();
+        let op = if is_double_click {
+            TextEditOp::SelectWordAtPoint(local_x)
+        } else {
+            TextEditOp::MoveToPoint(local_x)
+        };
+        // A pure caret/selection move never changes the text itself, so
+        // there is nothing to commit back through a `Binding`/
+        // `ValueHandler` here -- only the redraw this input's own new
+        // caret position needs.
+        registry.apply(&id, op, font);
+        self.text_selecting = Some(node);
+        self.update_and_request_redraw();
+    }
+
+    /// The content-box origin (post border/padding) of an editable
+    /// `<input>`, in the same logical-pixel space [`Self::to_logical_cursor`]
+    /// already converts a real cursor position into — the space every
+    /// point-based [`florui_text::editing::TextEditOp`] expects its `x`
+    /// in. Mirrors `florui_paint`'s own `content_x`/`content_y`
+    /// computation exactly, so a click lands on the same glyph it visibly
+    /// painted over.
+    fn text_input_content_origin(&self, node: NodeId) -> (f32, f32) {
+        let (arena, styles, layouts) = self.runtime.geometry();
+        let (x, y) = florui_layout::absolute_position(arena, layouts, node);
+        let style = styles.get(&node);
+        let border = style.map_or(0.0, |s| s.border.left.width);
+        let border_top = style.map_or(0.0, |s| s.border.top.width);
+        let padding_left = style.map_or(0.0, |s| s.padding.left);
+        let padding_top = style.map_or(0.0, |s| s.padding.top);
+        (x + border + padding_left, y + border_top + padding_top)
     }
 
     fn is_drag_region(&self, node: NodeId) -> bool {
@@ -1004,7 +1214,14 @@ impl WindowState {
     /// events to a disabled control either.
     fn is_disabled(&self, node: NodeId) -> bool {
         let (arena, ..) = self.runtime.geometry();
-        arena.tag(node) == "button" && arena.is_disabled(node)
+        if !arena.is_disabled(node) {
+            return false;
+        }
+        match arena.tag(node) {
+            "button" => true,
+            "input" => crate::focus::is_editable_input_type(arena.input_type(node)),
+            _ => false,
+        }
     }
 
     fn should_close(&self) -> bool {
@@ -1043,6 +1260,7 @@ impl WindowState {
     }
 
     fn handle_release(&mut self) {
+        self.text_selecting = None;
         let (x, y) = self.to_logical_cursor(self.last_cursor.0, self.last_cursor.1);
         let pressed = self.pressed.take();
         let released_over = self.runtime.hit_test(x, y);
@@ -1065,8 +1283,29 @@ impl WindowState {
     /// Shift+Tab move focus; Enter/Space activate whatever is currently
     /// focused through the same [`UiRuntime::dispatch_click`] a real
     /// mouse click already uses — no second event name invented.
-    fn handle_keyboard_input(&mut self, event: KeyEvent) {
-        if event.state != ElementState::Pressed || event.repeat {
+    ///
+    /// A focused editable `<input>` intercepts every key but Tab (which
+    /// must still move focus away, matching real HTML) — see
+    /// [`Self::handle_text_input_key`]. Real HTML's own Enter/Space
+    /// activation behavior for a text input (submitting a form, none of
+    /// which exists here) does not apply, so those two fall to the
+    /// text-input handler too rather than the click-dispatch branch
+    /// below.
+    fn handle_keyboard_input(&mut self, event: KeyEvent, clipboard: &crate::clipboard::Clipboard) {
+        if event.state != ElementState::Pressed {
+            return;
+        }
+        // A held key's own OS auto-repeat must reach text editing (real
+        // held-Backspace/arrow-key repeat, matching every other real text
+        // input) but must not re-fire Tab/Enter/Space's own activation --
+        // gated below, only for that branch, not up here where it would
+        // also suppress text-input repeat.
+        let is_tab = matches!(event.logical_key, Key::Named(NamedKey::Tab));
+        if !is_tab && let Some(node) = self.focused_text_input() {
+            self.handle_text_input_key(node, &event, clipboard);
+            return;
+        }
+        if event.repeat {
             return;
         }
         match event.logical_key {
@@ -1088,6 +1327,224 @@ impl WindowState {
             _ => {}
         }
     }
+
+    /// The currently keyboard-focused node, if it's an editable `<input>`
+    /// — `crate::focus::is_focusable` already keeps a non-editable one
+    /// (`type="checkbox"`/`"radio"`, out of this slice's scope) from ever
+    /// receiving focus in the first place, so this only needs to check
+    /// the tag/type, not re-check disabled/focusability.
+    fn focused_text_input(&self) -> Option<NodeId> {
+        let node = self.runtime.focused()?;
+        let (arena, ..) = self.runtime.geometry();
+        (arena.tag(node) == "input" && crate::focus::is_editable_input_type(arena.input_type(node)))
+            .then_some(node)
+    }
+
+    /// Maps one real key-down on a focused editable `<input>` to a
+    /// [`florui_text::editing::TextEditOp`] (or an undo/redo/clipboard
+    /// action), applies it through [`UiRuntime::text_input_registry`],
+    /// and commits an accepted text change back through whichever of the
+    /// node's own `Binding`/`ValueHandler` it carries — see
+    /// slots-and-bindings.md's "Optional convenience and explicit
+    /// control" for why exactly one of those two is ever present, never
+    /// both. Silently does nothing for a key this slice doesn't map to a
+    /// text-editing action (arrows/Home/End/Backspace/Delete/typed
+    /// characters, their Ctrl/Shift variants, Ctrl+A, Ctrl+Z/Shift+Z/Y,
+    /// Ctrl+C/X/V) or for a node missing its own `id` attribute (see
+    /// `crate::text_input`'s own module doc).
+    fn handle_text_input_key(
+        &mut self,
+        node: NodeId,
+        event: &KeyEvent,
+        clipboard: &crate::clipboard::Clipboard,
+    ) {
+        let Some(id) = ({
+            let (arena, ..) = self.runtime.geometry();
+            arena.id_attr(node).map(str::to_owned)
+        }) else {
+            return;
+        };
+        let registry = self.runtime.text_input_registry();
+        let ctrl = self.modifiers.control_key();
+        let shift = self.modifiers.shift_key();
+
+        // Clipboard/undo shortcuts key off the *physical* key -- the
+        // logical one can vary with layout/locale even while held with
+        // Ctrl, where a mnemonic like "the C key" is what every real app
+        // actually means.
+        if ctrl {
+            let physical = match event.physical_key {
+                PhysicalKey::Code(code) => Some(code),
+                PhysicalKey::Unidentified(_) => None,
+            };
+            match physical {
+                Some(KeyCode::KeyA) => {
+                    self.commit_text_input_op(&registry, &id, node, TextEditOp::SelectAll);
+                    return;
+                }
+                Some(KeyCode::KeyC) => {
+                    if let Some(selected) = registry.selected_text(&id) {
+                        clipboard.set_text(selected);
+                    }
+                    return;
+                }
+                Some(KeyCode::KeyX) => {
+                    if let Some(selected) = registry.selected_text(&id) {
+                        clipboard.set_text(selected);
+                        self.commit_text_input_op(
+                            &registry,
+                            &id,
+                            node,
+                            TextEditOp::InsertOrReplace(String::new()),
+                        );
+                    }
+                    return;
+                }
+                Some(KeyCode::KeyV) => {
+                    if let Some(pasted) = clipboard.get_text() {
+                        let pasted = strip_disallowed_input_chars(&pasted);
+                        self.commit_text_input_op(
+                            &registry,
+                            &id,
+                            node,
+                            TextEditOp::InsertOrReplace(pasted),
+                        );
+                    }
+                    return;
+                }
+                Some(KeyCode::KeyZ) if shift => {
+                    self.commit_text_input_undo_redo(&registry, &id, node, false);
+                    return;
+                }
+                Some(KeyCode::KeyZ) => {
+                    self.commit_text_input_undo_redo(&registry, &id, node, true);
+                    return;
+                }
+                Some(KeyCode::KeyY) => {
+                    self.commit_text_input_undo_redo(&registry, &id, node, false);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        let op = match &event.logical_key {
+            Key::Named(NamedKey::ArrowLeft) => Some(match (ctrl, shift) {
+                (true, true) => TextEditOp::SelectWordLeft,
+                (true, false) => TextEditOp::MoveWordLeft,
+                (false, true) => TextEditOp::SelectLeft,
+                (false, false) => TextEditOp::MoveLeft,
+            }),
+            Key::Named(NamedKey::ArrowRight) => Some(match (ctrl, shift) {
+                (true, true) => TextEditOp::SelectWordRight,
+                (true, false) => TextEditOp::MoveWordRight,
+                (false, true) => TextEditOp::SelectRight,
+                (false, false) => TextEditOp::MoveRight,
+            }),
+            Key::Named(NamedKey::Home) => Some(if shift {
+                TextEditOp::SelectLineStart
+            } else {
+                TextEditOp::MoveLineStart
+            }),
+            Key::Named(NamedKey::End) => Some(if shift {
+                TextEditOp::SelectLineEnd
+            } else {
+                TextEditOp::MoveLineEnd
+            }),
+            Key::Named(NamedKey::Backspace) => Some(if ctrl {
+                TextEditOp::BackdeleteWord
+            } else {
+                TextEditOp::Backdelete
+            }),
+            Key::Named(NamedKey::Delete) => Some(if ctrl {
+                TextEditOp::DeleteWord
+            } else {
+                TextEditOp::Delete
+            }),
+            // A real character the user typed -- `\n`/`\r`/`\t` stripped,
+            // real single-line-input discipline (see
+            // `strip_disallowed_input_chars`'s own doc); Ctrl-held
+            // combinations other than the shortcuts already handled above
+            // carry no text-insertion meaning here.
+            Key::Character(text) if !ctrl => {
+                let text = strip_disallowed_input_chars(text);
+                (!text.is_empty()).then_some(TextEditOp::InsertOrReplace(text))
+            }
+            _ => None,
+        };
+        if let Some(op) = op {
+            self.commit_text_input_op(&registry, &id, node, op);
+        }
+    }
+
+    /// Applies `op`, and if it actually changed the text, commits the
+    /// result through the node's own `Binding`/`ValueHandler` and
+    /// re-renders — the one real write-back path every editing/undo/redo
+    /// key shares.
+    /// Applies `op` and always redraws -- a pure movement/selection op
+    /// (`MoveLeft`, `SelectAll`, ...) changes nothing a `Binding`/
+    /// `ValueHandler` needs to hear about, but it still moves the caret or
+    /// selection highlight, which is only ever visible once this window's
+    /// own next frame actually paints it.
+    fn commit_text_input_op(
+        &mut self,
+        registry: &crate::text_input::TextInputRegistry,
+        id: &str,
+        node: NodeId,
+        op: TextEditOp,
+    ) {
+        let (_, _, _, font) = self.runtime.geometry_and_font_mut();
+        match registry.apply(id, op, font) {
+            Some(new_text) => self.commit_text_input_value(node, new_text),
+            None => self.update_and_request_redraw(),
+        }
+    }
+
+    fn commit_text_input_undo_redo(
+        &mut self,
+        registry: &crate::text_input::TextInputRegistry,
+        id: &str,
+        node: NodeId,
+        is_undo: bool,
+    ) {
+        let (_, _, _, font) = self.runtime.geometry_and_font_mut();
+        let result = if is_undo {
+            registry.undo(id, font)
+        } else {
+            registry.redo(id, font)
+        };
+        match result {
+            Some(new_text) => self.commit_text_input_value(node, new_text),
+            None => self.update_and_request_redraw(),
+        }
+    }
+
+    /// Reports `new_text` to whichever write-back channel `node`'s own
+    /// `value` attribute actually carries, then re-renders — the owner's
+    /// own next value (accepted, rejected, or something else entirely) is
+    /// what the following [`crate::text_input::TextInputRegistry::sync`]
+    /// reconciles against, not this value directly; see that module's own
+    /// doc.
+    fn commit_text_input_value(&mut self, node: NodeId, new_text: String) {
+        let (arena, ..) = self.runtime.geometry();
+        if let Some(binding) = arena.value_binding(node, "value") {
+            binding.request_update(new_text);
+        } else if let Some(handler) = arena.value_handler(node, "value") {
+            handler.call(new_text);
+        }
+        self.update_and_request_redraw();
+    }
+}
+
+/// Strips control characters a single-line `<input>` must never contain
+/// in its own committed text — a newline/carriage-return/tab pasted or
+/// typed in is silently dropped, matching real browsers' own `type=text`
+/// discipline, rather than being inserted and producing multi-line text
+/// this editor was never built to lay out or navigate.
+fn strip_disallowed_input_chars(text: &str) -> String {
+    text.chars()
+        .filter(|c| !matches!(c, '\n' | '\r' | '\t'))
+        .collect()
 }
 
 /// Owns every currently-open window and whichever [`WindowSpec`]s haven't
@@ -1113,6 +1570,10 @@ struct DesktopHost {
     /// make `take_pending` a race over which window's render drains it
     /// first.
     primary_window_id: Option<WindowId>,
+    /// One real OS clipboard for this whole process — see
+    /// `crate::clipboard`'s own module doc for why this isn't per-window
+    /// or reachable via `use_context`.
+    clipboard: crate::clipboard::Clipboard,
 }
 
 impl DesktopHost {
@@ -1367,6 +1828,8 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 persistence: spec.options.persistence.clone(),
                 pending_geometry_save: None,
                 modifiers: ModifiersState::empty(),
+                text_selecting: None,
+                last_text_input_click: None,
             };
             state.redraw();
             // A `@keyframes` animation already running on mount (no `:hover`
@@ -1470,7 +1933,7 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 event,
                 is_synthetic: false,
                 ..
-            } => state.handle_keyboard_input(event),
+            } => state.handle_keyboard_input(event, &self.clipboard),
             _ => {}
         }
     }

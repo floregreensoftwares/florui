@@ -79,6 +79,10 @@ pub enum TextEditOp {
     MoveToPoint(f32),
     SelectWordAtPoint(f32),
     ExtendSelectionToPoint(f32),
+    /// Sets the selection to an exact byte range — undo/redo's own way to
+    /// restore a prior selection, not reachable from any real keyboard/
+    /// mouse gesture (those all resolve relative to the current layout).
+    SelectByteRange(usize, usize),
 }
 
 /// Every point-based [`TextEditOp`] resolves against `y = 0.0` in
@@ -181,6 +185,7 @@ impl Font {
             TextEditOp::ExtendSelectionToPoint(x) => {
                 driver.extend_selection_to_point(x, SINGLE_LINE_Y)
             }
+            TextEditOp::SelectByteRange(start, end) => driver.select_byte_range(start, end),
         }
         editor.0.raw_text() != text_before
     }
@@ -269,6 +274,32 @@ impl Font {
 mod tests {
     use super::*;
     use crate::FontFamily;
+
+    #[test]
+    fn select_byte_range_restores_an_exact_prior_selection() {
+        let mut font = Font::load_embedded();
+        let mut editor = TextEditor::new(16.0);
+        font.apply_text_edit(
+            &mut editor,
+            TextEditOp::InsertOrReplace("hello".to_string()),
+            FontFamily::SansSerif,
+            400.0,
+        );
+        font.apply_text_edit(
+            &mut editor,
+            TextEditOp::SelectByteRange(1, 3),
+            FontFamily::SansSerif,
+            400.0,
+        );
+        assert_eq!(
+            editor.selection(),
+            ByteSelection {
+                anchor: 1,
+                focus: 3
+            }
+        );
+        assert_eq!(editor.selected_text(), Some("el"));
+    }
 
     #[test]
     fn insert_or_replace_appends_at_the_end_of_an_empty_editor() {

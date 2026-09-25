@@ -14,6 +14,7 @@ mod portal;
 mod runtime;
 mod scroll;
 mod size_observer;
+mod text_input;
 mod virtual_list;
 
 pub use portal::{Portal, PortalProps, PortalRegistry};
@@ -21,6 +22,9 @@ pub use runtime::UiRuntime;
 pub use scroll::{ScrollHandle, ScrollRegistry, use_scroll_offset};
 pub use size_observer::{SizeObserverRegistry, use_committed_size};
 pub use virtual_list::{ItemHeight, Overscan, VirtualListHandle, use_virtual_list};
+
+#[cfg(feature = "desktop")]
+mod clipboard;
 
 #[cfg(feature = "desktop")]
 mod desktop;
