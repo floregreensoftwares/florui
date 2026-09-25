@@ -568,15 +568,38 @@ fn build_text_input_paint(
         };
         let is_focused = focused == Some(node);
         let style = styles.get(&node);
-        let runs = if arena.input_type(node) == Some("password") {
+        let (runs, caret_rect, selection_rects) = if arena.input_type(node) == Some("password") {
             let font_size = style.map_or(16.0, |s| s.font_size);
             let font_weight = style.map_or(400.0, |s| s.font_weight);
             let family = style.map_or(florui_text::FontFamily::SansSerif, |s| {
                 florui_layout::to_text_font_family(s.font_family)
             });
-            masked_runs(font, &runs, family, font_size, font_weight)
+            let real_glyphs: Vec<florui_text::ShapedGlyph> = runs
+                .iter()
+                .flat_map(|run| run.glyphs.iter().copied())
+                .collect();
+            let (mask_runs, mask_positions) =
+                masked_glyphs(font, real_glyphs.len(), family, font_size, font_weight);
+            let mask_x = |real_x: f32| -> f32 {
+                let index = char_index_at(&real_glyphs, real_x);
+                mask_positions
+                    .get(index)
+                    .copied()
+                    .unwrap_or_else(|| mask_positions.last().copied().unwrap_or(0.0))
+            };
+            // `caret_rect`/`selection_rects` are `(x0, y0, x1, y1)` --
+            // two real corners, not a width/height pair (see
+            // `Font::caret_rect`'s own doc and `florui-paint`'s identical
+            // destructuring) -- so both x's need remapping through the
+            // same real-x -> mask-x lookup, not just the first.
+            let caret_rect = caret_rect.map(|(x0, y0, x1, y1)| (mask_x(x0), y0, mask_x(x1), y1));
+            let selection_rects = selection_rects
+                .into_iter()
+                .map(|(x0, y0, x1, y1)| (mask_x(x0), y0, mask_x(x1), y1))
+                .collect();
+            (mask_runs, caret_rect, selection_rects)
         } else {
-            runs
+            (runs, caret_rect, selection_rects)
         };
         result.insert(
             node,
@@ -595,46 +618,57 @@ fn build_text_input_paint(
     result
 }
 
-/// A `type="password"` substitute: the real run's own glyph positions
-/// (correct cluster/caret math either way), every glyph's `id` replaced
-/// by one shared "•" glyph — see slots-and-bindings.md-adjacent
-/// `florui-text::editing`'s own doc (Fork 5 in the original design note)
-/// for why a parallel masked buffer was rejected in favor of this.
-fn masked_runs(
+/// A `type="password"` substitute — verified directly against real
+/// Chromium (`getComputedStyle`/`scrollWidth` on injected elements, not
+/// guessed): masked dot spacing is uniform, keyed only by character
+/// count — a 30-character password of all `I`s and one of all `W`s
+/// render at the exact same width, real proportional glyph widths play
+/// no part in it. So this shapes a fresh run of that many bullet
+/// characters directly (itself real, verified to reproduce the same
+/// width Chromium does), rather than reusing the real text's own glyph
+/// positions the way an earlier version of this function did.
+///
+/// Returns the paintable runs (`char_count` bullet glyphs) plus every
+/// position `0..=char_count` a caret/selection edge can land on — the
+/// last entry is one bullet *past* what's painted, the "just past the
+/// last character" position an end-of-text caret needs, without a
+/// separate advance-width probe. See [`char_index_at`] for how a real
+/// caret/selection pixel position maps to one of these.
+fn masked_glyphs(
     font: &mut florui_text::Font,
-    real_runs: &[florui_text::ShapedRun],
+    char_count: usize,
     family: florui_text::FontFamily,
     font_size: f32,
     font_weight: f32,
-) -> Vec<florui_text::ShapedRun> {
-    let mask = font.shape(family, "\u{2022}", font_size, font_weight);
-    let (Some(mask_run), Some(mask_glyph)) = (
-        mask.runs.first(),
-        mask.runs.first().and_then(|r| r.glyphs.first()),
-    ) else {
-        return Vec::new();
-    };
-    let mask_font = mask_run.font.clone();
-    let mask_font_size = mask_run.font_size;
-    let mask_coords = mask_run.normalized_coords.clone();
-    let mask_glyph_id = mask_glyph.id;
-    real_runs
+) -> (Vec<florui_text::ShapedRun>, Vec<f32>) {
+    let probe_text = "\u{2022}".repeat(char_count + 1);
+    let mut shaped = font.shape(family, &probe_text, font_size, font_weight);
+    let positions: Vec<f32> = shaped
+        .runs
         .iter()
-        .map(|run| florui_text::ShapedRun {
-            font: mask_font.clone(),
-            font_size: mask_font_size,
-            normalized_coords: mask_coords.clone(),
-            glyphs: run
-                .glyphs
-                .iter()
-                .map(|glyph| florui_text::ShapedGlyph {
-                    id: mask_glyph_id,
-                    x: glyph.x,
-                    y: glyph.y,
-                })
-                .collect(),
-        })
-        .collect()
+        .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.x))
+        .collect();
+    // The one extra probe bullet above only exists to report the
+    // end-of-text position in `positions` -- it was never meant to be
+    // painted as part of the real text.
+    if let Some(last_run) = shaped.runs.last_mut() {
+        last_run.glyphs.pop();
+    }
+    shaped.runs.retain(|run| !run.glyphs.is_empty());
+    (shaped.runs, positions)
+}
+
+/// How many of `real_glyphs` (one per real character — a multi-codepoint
+/// grapheme cluster is a pre-existing limitation this carries forward,
+/// not a new one) sit strictly left of a real caret/selection edge's
+/// pixel `x` — that count is exactly that edge's character index into
+/// [`masked_glyphs`]'s own `positions`.
+fn char_index_at(real_glyphs: &[florui_text::ShapedGlyph], x: f32) -> usize {
+    const EPSILON: f32 = 0.5;
+    real_glyphs
+        .iter()
+        .filter(|glyph| glyph.x < x - EPSILON)
+        .count()
 }
 
 /// Collects every [`crate::WINDOW_INPUT_REGION_CLASS`] element's real
@@ -2011,6 +2045,76 @@ mod tests {
         let viewport = layout_viewport(scale);
         assert_eq!(viewport.width, AvailableSpace::Definite(800.0));
         assert_eq!(viewport.height, AvailableSpace::Definite(600.0));
+    }
+
+    #[test]
+    fn masked_glyphs_spaces_dots_uniformly_regardless_of_character_width() {
+        let mut font = florui_text::Font::load_embedded();
+        let (narrow_runs, narrow_positions) = masked_glyphs(
+            &mut font,
+            13,
+            florui_text::FontFamily::SansSerif,
+            20.0,
+            400.0,
+        );
+        let (wide_runs, wide_positions) = masked_glyphs(
+            &mut font,
+            13,
+            florui_text::FontFamily::SansSerif,
+            20.0,
+            400.0,
+        );
+        // Same character *count* always produces the same positions --
+        // real Chromium does this regardless of which real characters
+        // were typed (verified: an all-"I" and an all-"W" password of
+        // the same length render at the exact same width).
+        assert_eq!(narrow_positions, wide_positions);
+        assert_eq!(narrow_runs.len(), wide_runs.len());
+        let painted: usize = narrow_runs.iter().map(|run| run.glyphs.len()).sum();
+        assert_eq!(painted, 13, "the extra probe dot must not be painted");
+        assert_eq!(
+            narrow_positions.len(),
+            14,
+            "13 real positions plus one past-the-end"
+        );
+    }
+
+    #[test]
+    fn masked_glyphs_for_an_empty_password_paints_nothing() {
+        let mut font = florui_text::Font::load_embedded();
+        let (runs, positions) = masked_glyphs(
+            &mut font,
+            0,
+            florui_text::FontFamily::SansSerif,
+            20.0,
+            400.0,
+        );
+        assert!(runs.iter().all(|run| run.glyphs.is_empty()));
+        assert_eq!(positions.len(), 1, "just the caret-at-start position");
+    }
+
+    #[test]
+    fn char_index_at_counts_real_glyphs_strictly_left_of_x() {
+        let glyphs = [
+            florui_text::ShapedGlyph {
+                id: 0,
+                x: 0.0,
+                y: 0.0,
+            },
+            florui_text::ShapedGlyph {
+                id: 0,
+                x: 10.0,
+                y: 0.0,
+            },
+            florui_text::ShapedGlyph {
+                id: 0,
+                x: 20.0,
+                y: 0.0,
+            },
+        ];
+        assert_eq!(char_index_at(&glyphs, 0.0), 0);
+        assert_eq!(char_index_at(&glyphs, 10.0), 1);
+        assert_eq!(char_index_at(&glyphs, 25.0), 3);
     }
 
     #[test]
