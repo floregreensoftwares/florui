@@ -75,21 +75,58 @@ impl AccessibilityTree {
         focused: Option<NodeId>,
         bounds: &NodeBounds,
     ) -> (TreeUpdate, HashMap<AccessKitId, NodeId>) {
+        // `for="some-id"` can point forward (a label written before its
+        // control) or backward -- resolved against every `id`-attributed
+        // node up front, not discovered mid-walk.
+        let mut id_index: HashMap<&str, NodeId> = HashMap::new();
+        for &node in &arena.find_all(|a, id| a.id_attr(id).is_some()) {
+            if let Some(id_attr) = arena.id_attr(node) {
+                id_index.insert(id_attr, node);
+            }
+        }
+
         let mut nodes = Vec::new();
         let mut reverse = HashMap::new();
+        let mut forward = HashMap::new();
+        let mut index_by_ak_id = HashMap::new();
         let mut seen = HashSet::new();
+        // `(label's own id, the control's florui id)` -- the control's own
+        // `AccessKitId` isn't known until the whole walk finishes (it may
+        // not have been visited yet), so association is a second pass.
+        let mut label_targets: Vec<(AccessKitId, NodeId)> = Vec::new();
 
         let root_children: Vec<AccessKitId> = arena
             .roots()
             .iter()
             .map(|&child| {
-                self.build_node(arena, child, bounds, &mut nodes, &mut reverse, &mut seen)
+                self.build_node(
+                    arena,
+                    child,
+                    bounds,
+                    &id_index,
+                    &mut nodes,
+                    &mut reverse,
+                    &mut forward,
+                    &mut index_by_ak_id,
+                    &mut seen,
+                    &mut label_targets,
+                )
             })
             .collect();
 
         let mut root = Node::new(Role::Window);
         root.set_children(root_children);
+        let root_index = nodes.len();
         nodes.push((ROOT_ID, root));
+        index_by_ak_id.insert(ROOT_ID, root_index);
+
+        for (label_ak_id, target_florui_id) in label_targets {
+            if let Some(&target_ak_id) = forward.get(&target_florui_id)
+                && let Some(&target_index) = index_by_ak_id.get(&target_ak_id)
+            {
+                nodes[target_index].1.push_labelled_by(label_ak_id);
+            }
+        }
 
         self.interner.retain(|path, _| seen.contains(path));
 
@@ -106,19 +143,25 @@ impl AccessibilityTree {
         (update, reverse)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_node(
         &mut self,
         arena: &Arena,
         id: NodeId,
         bounds: &NodeBounds,
+        id_index: &HashMap<&str, NodeId>,
         nodes: &mut Vec<(AccessKitId, Node)>,
         reverse: &mut HashMap<AccessKitId, NodeId>,
+        forward: &mut HashMap<NodeId, AccessKitId>,
+        index_by_ak_id: &mut HashMap<AccessKitId, usize>,
         seen: &mut HashSet<FocusPath>,
+        label_targets: &mut Vec<(AccessKitId, NodeId)>,
     ) -> AccessKitId {
         let path = FocusPath::of(arena, id);
         seen.insert(path.clone());
         let ak_id = self.stable_id(&path);
         reverse.insert(ak_id, id);
+        forward.insert(id, ak_id);
 
         let children = arena.children(id);
         let mut node = Node::new(Role::GenericContainer);
@@ -141,6 +184,16 @@ impl AccessibilityTree {
                 node.set_value(arena.value_attr(id).unwrap_or_default());
                 if is_focusable(arena, id) {
                     node.add_action(Action::Focus);
+                }
+            }
+            "label" => {
+                let text = arena.text_content(id);
+                if !text.is_empty() {
+                    node.set_role(Role::Label);
+                    node.set_value(text);
+                }
+                if let Some(target) = arena.label_for(id).and_then(|for_id| id_index.get(for_id)) {
+                    label_targets.push((ak_id, *target));
                 }
             }
             _ if children.is_empty() => {
@@ -169,10 +222,24 @@ impl AccessibilityTree {
         let child_ids: Vec<AccessKitId> = children
             .iter()
             .copied()
-            .map(|child| self.build_node(arena, child, bounds, nodes, reverse, seen))
+            .map(|child| {
+                self.build_node(
+                    arena,
+                    child,
+                    bounds,
+                    id_index,
+                    nodes,
+                    reverse,
+                    forward,
+                    index_by_ak_id,
+                    seen,
+                    label_targets,
+                )
+            })
             .collect();
         node.set_children(child_ids);
 
+        index_by_ak_id.insert(ak_id, nodes.len());
         nodes.push((ak_id, node));
         ak_id
     }
@@ -202,6 +269,43 @@ mod tests {
             .find(|(node_id, _)| *node_id == id)
             .map(|(_, node)| node.role())
             .expect("node must be present in the update")
+    }
+
+    #[test]
+    fn a_label_with_a_for_attribute_labels_its_targets_accesskit_node() {
+        let tree: Element = view! {
+            <div>
+                <label for="name-input">{"Name"}</label>
+                <input id="name-input" type="text" value="hi" />
+            </div>
+        };
+        let (update, reverse, arena) = build(&tree, None);
+        let label = arena.find_all(|a, id| a.tag(id) == "label")[0];
+        let input = arena.find_all(|a, id| a.tag(id) == "input")[0];
+        let label_ak_id = *reverse.iter().find(|&(_, &n)| n == label).unwrap().0;
+        let input_ak_id = *reverse.iter().find(|&(_, &n)| n == input).unwrap().0;
+        let input_node = &update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == input_ak_id)
+            .unwrap()
+            .1;
+        assert_eq!(input_node.labelled_by(), &[label_ak_id]);
+    }
+
+    #[test]
+    fn a_label_with_no_matching_for_target_associates_nothing() {
+        let tree: Element = view! { <label for="missing">{"Name"}</label> };
+        let (update, reverse, arena) = build(&tree, None);
+        let label = arena.roots()[0];
+        let label_ak_id = *reverse.iter().find(|&(_, &n)| n == label).unwrap().0;
+        let label_node = &update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == label_ak_id)
+            .unwrap()
+            .1;
+        assert!(label_node.labelled_by().is_empty());
     }
 
     #[test]
