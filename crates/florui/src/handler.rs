@@ -1,5 +1,8 @@
 //! A stored callback for a declarative event-handler attribute
-//! (`onclick={move || ...}`) on an [`crate::ElementNode`].
+//! (`onclick={move || ...}`) on an [`crate::ElementNode`]. Also
+//! [`ValueHandler`]: the same idea for the explicit (non-`Binding`)
+//! controlled-value contract — see slots-and-bindings.md's "Optional
+//! convenience and explicit control."
 
 use std::fmt;
 use std::rc::Rc;
@@ -37,9 +40,61 @@ impl PartialEq for Handler {
 
 impl Eq for Handler {}
 
+/// A callback captured from a value-change attribute (`oninput={...}` on
+/// an editable primitive using the explicit controlled-value contract) —
+/// like [`Handler`], but the control reports what the new value *is*
+/// rather than nothing. This is the other half of the mutual-exclusivity
+/// rule with a `Binding`: `view!`'s own codegen only ever emits one or
+/// the other for a given `value` attribute, never both — see
+/// `florui-macros`'s own `primitive_element`.
+///
+/// Real `Binding<String>` combined with `oninput` is rejected at compile
+/// time, not silently resolved — `oninput`'s presence makes codegen treat
+/// `value` as a plain value (calling `.to_string()` on it), and
+/// `Binding<String>` has no such method:
+///
+/// ```compile_fail
+/// use florui::prelude::*;
+///
+/// fn ambiguous_contract(binding: Binding<String>) -> Element {
+///     // `binding` is a real `Binding`, not a plain value — `oninput`'s
+///     // presence forces the explicit contract's `.to_string()` call,
+///     // which `Binding<String>` does not implement. Must not compile.
+///     view! { <input type="text" value={binding} oninput={|_: String| ()} /> }
+/// }
+/// ```
+#[derive(Clone)]
+pub struct ValueHandler(Rc<dyn Fn(String)>);
+
+impl ValueHandler {
+    pub fn new(f: impl Fn(String) + 'static) -> Self {
+        Self(Rc::new(f))
+    }
+
+    /// Reports that the value changed to `value`.
+    pub fn call(&self, value: String) {
+        (self.0)(value);
+    }
+}
+
+impl fmt::Debug for ValueHandler {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ValueHandler(..)")
+    }
+}
+
+impl PartialEq for ValueHandler {
+    /// Same "identity, not content" reasoning as [`Handler`]'s own.
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ValueHandler {}
+
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     use super::*;
 
@@ -68,6 +123,23 @@ mod tests {
     fn independently_constructed_handlers_are_not_equal() {
         let a = Handler::new(|| ());
         let b = Handler::new(|| ());
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn value_handler_call_passes_the_new_value_through() {
+        let received = Rc::new(RefCell::new(None));
+        let received_in_closure = Rc::clone(&received);
+        let handler =
+            ValueHandler::new(move |value| *received_in_closure.borrow_mut() = Some(value));
+        handler.call("hello".to_string());
+        assert_eq!(*received.borrow(), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn independently_constructed_value_handlers_are_not_equal() {
+        let a = ValueHandler::new(|_| ());
+        let b = ValueHandler::new(|_| ());
         assert_ne!(a, b);
     }
 }

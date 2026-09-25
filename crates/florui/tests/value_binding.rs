@@ -62,3 +62,48 @@ fn writing_through_the_carried_binding_reaches_the_owner() {
     carried_binding.request_update("Grace".to_string());
     assert_eq!(*owner.borrow(), "Grace");
 }
+
+#[test]
+fn oninput_alongside_a_plain_value_uses_the_explicit_contract_not_a_binding() {
+    let current_name = "Ada".to_string();
+    let el: Element = view! {
+        <input type="text" value={current_name.clone()} oninput={|_: String| ()} />
+    };
+
+    let Element::Node(node) = &el else {
+        panic!("expected a node");
+    };
+    assert_eq!(
+        node.attrs
+            .iter()
+            .find(|(k, _)| k == "value")
+            .map(|(_, v)| v.as_str()),
+        Some("Ada")
+    );
+    assert!(
+        node.bindings.is_empty(),
+        "a plain value with oninput must not be treated as a Binding"
+    );
+    assert_eq!(node.value_handlers.len(), 1);
+    assert_eq!(node.value_handlers[0].0, "value");
+}
+
+#[test]
+fn the_carried_value_handler_reports_the_new_value() {
+    let received = Rc::new(RefCell::new(None));
+    let received_in_handler = Rc::clone(&received);
+    let el: Element = view! {
+        <input
+            type="text"
+            value={"Ada".to_string()}
+            oninput={move |value: String| *received_in_handler.borrow_mut() = Some(value)}
+        />
+    };
+
+    let Element::Node(node) = &el else {
+        panic!("expected a node");
+    };
+    let (_key, handler) = &node.value_handlers[0];
+    handler.call("Grace".to_string());
+    assert_eq!(*received.borrow(), Some("Grace".to_string()));
+}

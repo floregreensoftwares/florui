@@ -106,16 +106,41 @@ fn primitive_element(
             });
     let effective_scope = own_scope.as_ref().or(inherited_scope);
 
+    // `oninput`'s presence decides which contract `value` uses below --
+    // see slots-and-bindings.md's "Optional convenience and explicit
+    // control": a bare `value={expr}` is the `Binding<String>` contract,
+    // `value={expr}` alongside `oninput={...}` is the explicit
+    // value/callback contract instead. The macro has no type information
+    // to tell a `Binding<String>` apart from a plain string expression,
+    // so it dispatches on this syntactic signal; the two contracts are
+    // still mutually exclusive in practice because a real `Binding` has
+    // no `.to_string()` (the explicit path's own codegen below) and a
+    // plain string has no `.get()` (the binding path's) -- whichever one
+    // doesn't match what was actually passed simply fails to compile.
+    let has_value_change_handler = attrs.iter().any(|(name, _)| name == "oninput");
+
     let mut attr_pairs = Vec::new();
     let mut handler_pairs = Vec::new();
     let mut binding_pairs = Vec::new();
+    let mut value_handler_pairs = Vec::new();
 
     for (name, value) in attrs {
         if is_scope_attr(name) {
             continue;
         }
         let name_str = name.to_string();
-        if let Some(event) = event_name(&name_str) {
+        if name_str == "oninput" {
+            value_handler_pairs.push(match value {
+                AttrValue::Expr(expr) => {
+                    quote! { ("value".to_string(), ::florui::ValueHandler::new(#expr)) }
+                }
+                AttrValue::Lit(lit) => {
+                    let message = "`oninput` needs a Rust expression in braces, e.g. \
+                                    `oninput={move |value: String| ...}`, not a string literal";
+                    quote_spanned! { lit.span() => compile_error!(#message) }
+                }
+            });
+        } else if let Some(event) = event_name(&name_str) {
             handler_pairs.push(match value {
                 AttrValue::Expr(expr) => {
                     quote! { (#event.to_string(), ::florui::Handler::new(#expr)) }
@@ -129,18 +154,23 @@ fn primitive_element(
                 }
             });
         } else if name_str == "value" && matches!(value, AttrValue::Expr(_)) {
-            // A `value={binding}` expression is a `Binding<String>` write-back
-            // channel, not a plain string -- `value="literal"` (an
-            // `AttrValue::Lit`) stays a plain attribute below, since there is
-            // nothing to write back to. `attrs` still gets the current
-            // snapshot string alongside, so every existing string-only
-            // consumer (measurement, paint) needs no `<input>`-specific
-            // lookup just to read the displayed text.
             let AttrValue::Expr(expr) = value else {
                 unreachable!("matched above")
             };
-            attr_pairs.push(quote! { (#name_str.to_string(), (#expr).get()) });
-            binding_pairs.push(quote! { (#name_str.to_string(), (#expr).clone()) });
+            if has_value_change_handler {
+                // The explicit contract: `expr` is a plain value (often a
+                // `Signal::get()` result), not a `Binding` -- `oninput`
+                // above already carries the write-back half.
+                attr_pairs.push(quote! { (#name_str.to_string(), (#expr).to_string()) });
+            } else {
+                // The `Binding<String>` convenience contract -- `attrs`
+                // still gets the current snapshot string alongside, so
+                // every existing string-only consumer (measurement,
+                // paint) needs no `<input>`-specific lookup just to read
+                // the displayed text.
+                attr_pairs.push(quote! { (#name_str.to_string(), (#expr).get()) });
+                binding_pairs.push(quote! { (#name_str.to_string(), (#expr).clone()) });
+            }
         } else {
             let value_expr = match value {
                 AttrValue::Lit(lit) => quote! { (#lit).to_string() },
@@ -161,7 +191,18 @@ fn primitive_element(
     }
     let children = children_vec(children, effective_scope);
 
-    if !binding_pairs.is_empty() {
+    if !value_handler_pairs.is_empty() {
+        quote! {
+            ::florui::Element::node_with_value_handlers(
+                #tag_str,
+                ::std::vec![ #(#attr_pairs),* ],
+                ::std::vec![ #(#handler_pairs),* ],
+                ::std::vec![ #(#binding_pairs),* ],
+                ::std::vec![ #(#value_handler_pairs),* ],
+                #children,
+            )
+        }
+    } else if !binding_pairs.is_empty() {
         quote! {
             ::florui::Element::node_with_bindings(
                 #tag_str,
