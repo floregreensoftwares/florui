@@ -44,6 +44,9 @@ struct ArenaNode {
     /// `"checkbox"`/`"radio"` — the only values `view!` accepts at all).
     /// See [`Arena::input_type`].
     input_type: Option<String>,
+    /// The `for` attribute on `<label>` — the id of the control it
+    /// captions. See [`Arena::label_for`].
+    label_for: Option<String>,
     /// The node's own direct text, for text measurement — not inherited
     /// from or propagated to any other node.
     text: String,
@@ -145,6 +148,7 @@ impl Arena {
                         style: attr_value(&node.attrs, "style"),
                         value: attr_value(&node.attrs, "value"),
                         input_type: attr_value(&node.attrs, "type"),
+                        label_for: attr_value(&node.attrs, "for"),
                         text: collect_text(&node.children),
                         inline_items: Vec::new(),
                         handlers: node.handlers.clone(),
@@ -255,6 +259,14 @@ impl Arena {
     /// `None` for any tag that never declared one.
     pub fn input_type(&self, id: NodeId) -> Option<&str> {
         self.nodes[id].input_type.as_deref()
+    }
+
+    /// This node's `for` attribute — meaningful only on `<label>`: the
+    /// `id` of the control it captions, resolved by whoever consumes this
+    /// (e.g. the accessibility bridge's `labelled_by` association), not
+    /// by `Arena` itself.
+    pub fn label_for(&self, id: NodeId) -> Option<&str> {
+        self.nodes[id].label_for.as_deref()
     }
 
     /// This node's own direct text, for measurement: its direct
@@ -599,6 +611,20 @@ mod tests {
         let input = arena.roots()[0];
         assert_eq!(arena.value_attr(input), Some("on"));
         assert_eq!(arena.input_type(input), Some("checkbox"));
+    }
+
+    #[test]
+    fn label_for_reads_the_plain_string_form() {
+        let tree: Element = view! { <label for="name-input">{"Name"}</label> };
+        let arena = Arena::build(&tree);
+        assert_eq!(arena.label_for(arena.roots()[0]), Some("name-input"));
+    }
+
+    #[test]
+    fn label_for_is_none_without_the_attribute() {
+        let tree: Element = view! { <label>{"Name"}</label> };
+        let arena = Arena::build(&tree);
+        assert_eq!(arena.label_for(arena.roots()[0]), None);
     }
 
     #[test]
