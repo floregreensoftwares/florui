@@ -65,11 +65,15 @@
 //! next real thing to verify, not yet done.
 //!
 //! A lost/reset GPU device is handled defensively —
-//! [`GpuPresenter::present`] treats anything other than a successful
-//! texture acquisition as "skip this frame," not a panic — but this
-//! crate does not yet exercise an actual induced device-loss (e.g. a
-//! driver reset) as a real test; that remains an open, tracked gap, not
-//! a silent assumption. Memory footprint was not measured against an
+//! [`GpuPresenter::present`] reconfigures and retries once on a real
+//! `Outdated` surface (confirmed live: resizing the window down to
+//! near-zero and back through `DesktopHost` recovers cleanly, no panic,
+//! no stuck stale-frame state) and treats anything else non-successful
+//! as "skip this frame," not a panic — but this crate does not yet
+//! exercise an actual induced device-loss (e.g. a driver reset, which
+//! would need a brand-new `Surface`/`Instance` this presenter has no
+//! access to today) as a real test; that remains an open, tracked gap,
+//! not a silent assumption. Memory footprint was not measured against an
 //! automated budget; color/alpha fidelity was checked by eye against
 //! real screenshots (this module's own probe and the `counter` run
 //! above), not an automated reference image.
@@ -257,10 +261,11 @@ impl GpuPresenter {
     /// condition, so this asserts rather than silently corrupting the
     /// frame.
     ///
-    /// A lost/outdated/occluded surface, or any other non-success
-    /// texture-acquisition result, skips this frame instead of
-    /// panicking — see this module's own doc for what's and isn't
-    /// exercised here around real device loss.
+    /// An `Outdated` surface reconfigures and retries once (a real
+    /// recovery, not just a skip); a lost/timed-out/occluded/invalid
+    /// surface, or a retry that still doesn't succeed, skips this frame
+    /// instead of panicking — see this module's own doc for what's and
+    /// isn't exercised here around real device loss.
     pub fn present(&mut self, rgba: &[u8]) {
         let (width, height) = self.upload_size;
         assert_eq!(
@@ -293,6 +298,24 @@ impl GpuPresenter {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
             | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
+            // `Outdated` means the surface itself is stale but the device
+            // and adapter are still fine -- wgpu's own documented
+            // recovery is reconfigure-and-retry. A plain `self.resize()`
+            // call would wrongly no-op here on an unchanged `(width,
+            // height)` (its own guard is for the ordinary resize-event
+            // path, not this one), so this reconfigures unconditionally
+            // instead. `Lost` needs a brand-new `Surface` from a real
+            // `Instance` this presenter has no access to (see this
+            // module's own doc) and stays a skipped frame, same as
+            // `Timeout`/`Occluded`/`Validation`.
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                self.surface.configure(&self.device, &self.config);
+                match self.surface.get_current_texture() {
+                    wgpu::CurrentSurfaceTexture::Success(texture)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
+                    _ => return,
+                }
+            }
             _ => return,
         };
 
