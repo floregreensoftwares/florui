@@ -21,9 +21,11 @@ use taffy::prelude::*;
 
 use crate::focus;
 use crate::portal::PortalRegistry;
+use crate::position_observer::PositionObserverRegistry;
 use crate::scroll::ScrollRegistry;
 use crate::size_observer::SizeObserverRegistry;
 use crate::text_input::TextInputRegistry;
+use crate::viewport::ViewportSize;
 
 pub struct UiRuntime {
     scope: ComponentScope,
@@ -87,6 +89,9 @@ pub struct UiRuntime {
     /// way `executor` is. Notified after each [`Self::update`]'s own
     /// layout, once real geometry for that render exists.
     size_observers: Rc<SizeObserverRegistry>,
+    /// Reachable by [`crate::use_committed_position`] via context, same
+    /// as `size_observers` — notified right alongside it.
+    position_observers: Rc<PositionObserverRegistry>,
     /// Reachable by [`crate::use_scroll_offset`] via context, the same way
     /// `size_observers` is — synced right after it, once this render's own
     /// real layout and content extents exist.
@@ -203,6 +208,7 @@ impl UiRuntime {
             font: florui_text::Font::load_embedded(),
             executor: Rc::new(LocalExecutor::new()),
             size_observers: Rc::new(SizeObserverRegistry::new()),
+            position_observers: Rc::new(PositionObserverRegistry::new()),
             scroll_registry: Rc::new(ScrollRegistry::new()),
             portal_registry: Rc::new(PortalRegistry::new()),
             text_input_registry: Rc::new(TextInputRegistry::new()),
@@ -305,13 +311,21 @@ impl UiRuntime {
     pub fn update(&mut self, viewport: Size<AvailableSpace>) {
         let executor = Rc::clone(&self.executor);
         let size_observers = Rc::clone(&self.size_observers);
+        let position_observers = Rc::clone(&self.position_observers);
         let scroll_registry = Rc::clone(&self.scroll_registry);
         let portal_registry = Rc::clone(&self.portal_registry);
+        // Resolved once so use_viewport_size sees the same value layout uses.
+        let resolved_viewport = media_viewport(viewport);
         let tree = self.scope.render(|| {
             provide_context(Rc::clone(&executor) as Rc<dyn Executor>);
             provide_context(Rc::clone(&size_observers));
+            provide_context(Rc::clone(&position_observers));
             provide_context(Rc::clone(&scroll_registry));
             provide_context(Rc::clone(&portal_registry));
+            provide_context(ViewportSize {
+                width: resolved_viewport.width,
+                height: resolved_viewport.height,
+            });
             for provider in &self.extra_context_providers {
                 provider();
             }
@@ -334,16 +348,17 @@ impl UiRuntime {
             &self.arena,
             &self.rules,
             &self.interaction,
-            media_viewport(viewport),
+            resolved_viewport,
             &mut self.animation_timeline,
             viewport,
         )
         .expect("this tree's explicit sizes never produce a layout failure");
         self.styles = styles;
         self.layouts = layouts;
-        // After layout, not before: a committed-size observer must see
-        // this render's own real geometry, not the previous one's.
+        // After layout, not before: a committed-size/-position observer
+        // must see this render's own real geometry, not the previous one's.
         self.size_observers.notify(&self.arena, &self.layouts);
+        self.position_observers.notify(&self.arena, &self.layouts);
         self.scroll_registry
             .sync(&self.arena, &self.layouts, &content_extents);
         self.text_input_registry

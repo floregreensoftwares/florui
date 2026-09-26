@@ -11,18 +11,26 @@
 
 mod dialog;
 mod focus;
+mod popover;
 mod portal;
+mod position_observer;
 mod runtime;
 mod scroll;
 mod size_observer;
 mod text_input;
+mod viewport;
 mod virtual_list;
 
 pub use dialog::{Dialog, DialogProps, MODAL_ROOT_CLASS};
+pub use popover::{
+    Align, POPOVER_ROOT_CLASS, POPOVER_TRIGGER_CLASS, Placement, Popover, PopoverProps, Side,
+};
 pub use portal::{Portal, PortalProps, PortalRegistry};
+pub use position_observer::{PositionObserverRegistry, use_committed_position};
 pub use runtime::UiRuntime;
 pub use scroll::{ScrollHandle, ScrollRegistry, use_scroll_offset};
 pub use size_observer::{SizeObserverRegistry, use_committed_size};
+pub use viewport::{ViewportSize, use_viewport_size};
 pub use virtual_list::{ItemHeight, Overscan, VirtualListHandle, use_virtual_list};
 
 #[cfg(feature = "desktop")]

@@ -44,6 +44,7 @@ use crate::dpi::{self, ViewportScale};
 use crate::drag_drop::{self, DragDropRegistration};
 use crate::file_dialog::{OpenFileDialogOutcome, SaveFileDialogOutcome};
 use crate::gpu::{self, GpuPresenter};
+use crate::popover;
 use crate::single_instance::{self, HandoffOutcome, InstanceRole};
 use crate::window_controls::{InputMode, ScreenRect, WindowControls};
 use crate::window_state::{self, WindowPersistence};
@@ -1235,6 +1236,16 @@ impl WindowState {
         let (x, y) = self.to_logical_cursor(self.last_cursor.0, self.last_cursor.1);
         let hit = self.runtime.hit_test(x, y);
 
+        // Checked before any early return below -- must fire regardless
+        // of what `hit` turns out to be.
+        let dismissed = {
+            let (arena, ..) = self.runtime.geometry();
+            popover::dismissed_by_click(arena, hit)
+        };
+        for root in dismissed {
+            self.runtime.dispatch_event(root, "dismiss");
+        }
+
         if hit.is_some_and(|node| self.is_drag_region(node)) {
             self.controls.drag();
             return;
@@ -1480,6 +1491,15 @@ impl WindowState {
                 };
                 if let Some(root) = modal_root {
                     self.runtime.dispatch_event(root, "close");
+                }
+                // Independent of the modal check above -- both can be
+                // open at once.
+                let popover_root = {
+                    let (arena, ..) = self.runtime.geometry();
+                    popover::dismissed_by_escape(arena)
+                };
+                if let Some(root) = popover_root {
+                    self.runtime.dispatch_event(root, "dismiss");
                 }
             }
             _ => {}
