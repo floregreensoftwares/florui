@@ -25,7 +25,7 @@ pub use dialog::{Dialog, DialogProps, MODAL_ROOT_CLASS};
 pub use popover::{
     Align, POPOVER_ROOT_CLASS, POPOVER_TRIGGER_CLASS, Placement, Popover, PopoverProps, Side,
 };
-pub use portal::{Portal, PortalProps, PortalRegistry};
+pub use portal::{Portal, PortalProps};
 pub use position_observer::{PositionObserverRegistry, use_committed_position};
 pub use runtime::UiRuntime;
 pub use scroll::{ScrollHandle, ScrollRegistry, use_scroll_offset};
