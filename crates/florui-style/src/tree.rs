@@ -47,6 +47,13 @@ struct ArenaNode {
     /// The `for` attribute on `<label>` — the id of the control it
     /// captions. See [`Arena::label_for`].
     label_for: Option<String>,
+    /// The `accessible_label` attribute — an explicit accessible name for
+    /// an element whose visible content isn't a useful spoken name (an
+    /// icon-only button's glyph text, say). Underscored rather than
+    /// hyphenated like HTML's `aria-label`: `view!` attribute names are
+    /// plain `syn::Ident`s, which can't contain `-`. See
+    /// [`Arena::accessible_label`].
+    accessible_label: Option<String>,
     /// The node's own direct text, for text measurement — not inherited
     /// from or propagated to any other node.
     text: String,
@@ -179,6 +186,7 @@ impl Arena {
                         value: attr_value(&node.attrs, "value"),
                         input_type: attr_value(&node.attrs, "type"),
                         label_for: attr_value(&node.attrs, "for"),
+                        accessible_label: attr_value(&node.attrs, "accessible_label"),
                         text: collect_text(&node.children),
                         inline_items: Vec::new(),
                         handlers: node.handlers.clone(),
@@ -300,6 +308,14 @@ impl Arena {
     /// by `Arena` itself.
     pub fn label_for(&self, id: NodeId) -> Option<&str> {
         self.nodes[id].label_for.as_deref()
+    }
+
+    /// This node's `accessible_label` attribute, if declared — an
+    /// accessibility consumer (e.g. `accessibility::tree`'s own button
+    /// arm) should prefer this over the node's visible text content when
+    /// present.
+    pub fn accessible_label(&self, id: NodeId) -> Option<&str> {
+        self.nodes[id].accessible_label.as_deref()
     }
 
     /// This node's own direct text, for measurement: its direct
@@ -705,6 +721,20 @@ mod tests {
         let tree: Element = view! { <label>{"Name"}</label> };
         let arena = Arena::build(&tree);
         assert_eq!(arena.label_for(arena.roots()[0]), None);
+    }
+
+    #[test]
+    fn accessible_label_reads_the_plain_string_form() {
+        let tree: Element = view! { <button accessible_label="Close">{"x"}</button> };
+        let arena = Arena::build(&tree);
+        assert_eq!(arena.accessible_label(arena.roots()[0]), Some("Close"));
+    }
+
+    #[test]
+    fn accessible_label_is_none_without_the_attribute() {
+        let tree: Element = view! { <button>{"x"}</button> };
+        let arena = Arena::build(&tree);
+        assert_eq!(arena.accessible_label(arena.roots()[0]), None);
     }
 
     #[test]

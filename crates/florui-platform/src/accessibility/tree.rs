@@ -169,7 +169,14 @@ impl AccessibilityTree {
         match arena.tag(id) {
             "button" => {
                 node.set_role(Role::Button);
-                node.set_label(arena.text_content(id));
+                // An icon-only button's own text (a glyph like "x") is
+                // useless as a spoken name -- `accessible_label` overrides
+                // it when the author declared one.
+                node.set_label(
+                    arena
+                        .accessible_label(id)
+                        .unwrap_or_else(|| arena.text_content(id)),
+                );
                 if is_focusable(arena, id) {
                     node.add_action(Action::Focus);
                     node.add_action(Action::Click);
@@ -317,6 +324,16 @@ mod tests {
         assert_eq!(role_of(&update, ak_id), Role::Button);
         let node = update.nodes.iter().find(|(id, _)| *id == ak_id).unwrap();
         assert_eq!(node.1.label(), Some("Go"));
+    }
+
+    #[test]
+    fn an_accessible_label_overrides_an_icon_only_buttons_own_glyph_text() {
+        let tree: Element = view! { <button accessible_label="Close">{"x"}</button> };
+        let (update, reverse, arena) = build(&tree, None);
+        let button = arena.roots()[0];
+        let ak_id = *reverse.iter().find(|&(_, &n)| n == button).unwrap().0;
+        let node = update.nodes.iter().find(|(id, _)| *id == ak_id).unwrap();
+        assert_eq!(node.1.label(), Some("Close"));
     }
 
     #[test]
