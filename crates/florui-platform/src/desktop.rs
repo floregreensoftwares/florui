@@ -1323,6 +1323,22 @@ impl WindowState {
         self.pressed = hit.filter(|&node| !self.is_disabled(node));
     }
 
+    /// A real right-button press on [`crate::WINDOW_DRAG_REGION_ID`] opens
+    /// the real OS system menu — the same gesture a native title bar
+    /// supports, only meaningful for [`DecorationMode::Custom`] (a
+    /// `System`-decorated window's own OS title bar already has this for
+    /// free).
+    fn handle_right_press(&mut self) {
+        if self.decorations != DecorationMode::Custom {
+            return;
+        }
+        let (x, y) = self.to_logical_cursor(self.last_cursor.0, self.last_cursor.1);
+        let hit = self.runtime.hit_test(x, y);
+        if hit.is_some_and(|node| self.is_drag_region(node)) {
+            self.controls.show_system_menu_at_cursor();
+        }
+    }
+
     fn is_editable_text_input(&self, node: NodeId) -> bool {
         let (arena, ..) = self.runtime.geometry();
         arena.tag(node) == "input" && crate::focus::is_editable_input_type(arena.input_type(node))
@@ -1530,6 +1546,20 @@ impl WindowState {
                     self.window
                         .set_ime_allowed(now_focused.is_some_and(|node| self.allows_ime(node)));
                     self.update_and_request_redraw();
+                }
+            }
+            // Real Alt+Space, before the plain Space arm below claims it as
+            // a click instead -- only meaningful for `DecorationMode::Custom`,
+            // same as the real right-click gesture in `handle_right_press`.
+            Key::Named(NamedKey::Space)
+                if self.modifiers.alt_key() && self.decorations == DecorationMode::Custom =>
+            {
+                if let Ok(origin) = self.window.outer_position() {
+                    let scale = self.viewport_scale().scale_factor;
+                    let offset_x = (8.0 * scale).round() as i32;
+                    let offset_y = (30.0 * scale).round() as i32;
+                    self.controls
+                        .show_system_menu_at(origin.x + offset_x, origin.y + offset_y);
                 }
             }
             Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
@@ -2299,6 +2329,11 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 button: MouseButton::Left,
                 ..
             } => state.handle_release(),
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => state.handle_right_press(),
             WindowEvent::MouseWheel { delta, .. } => state.handle_mouse_wheel(delta),
             WindowEvent::ModifiersChanged(modifiers) => state.modifiers = modifiers.state(),
             // `is_synthetic: true` is winit re-synthesizing "this key was
