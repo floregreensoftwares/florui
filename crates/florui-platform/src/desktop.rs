@@ -39,6 +39,7 @@ use winit::window::{Window, WindowId};
 use crate::UiRuntime;
 use crate::accessibility;
 use crate::activation::{ActivationEvent, ActivationEvents, ActivationQueue, SingleInstance};
+use crate::appearance;
 use crate::appearance::DecorationMode;
 use crate::dpi::{self, ViewportScale};
 use crate::drag_drop::{self, DragDropRegistration};
@@ -2045,6 +2046,18 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 window.scale_factor(),
             ));
 
+            // A real capability probe against this actual production
+            // window, not just the standalone `appearance_probe` example —
+            // see `appearance::probe_appearance`'s own doc for why it takes
+            // a plain `&Window` and is safe to call here too.
+            let appearance_report = appearance::probe_appearance(
+                &window,
+                appearance::AppearanceRequest {
+                    decorations: spec.options.decorations,
+                    transparent: spec.options.transparent,
+                },
+            );
+
             // Reachable from the component tree via `crate::use_window_controls`
             // from this runtime's very first render onward — see
             // `UiRuntime::with_rules_and_context`'s own doc for why that needs
@@ -2066,6 +2079,7 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                     let _ = save_dialog_proxy
                         .send_event(UserEvent::SaveFileDialogResult(window_id, outcome));
                 },
+                appearance_report,
             ));
             let drag_drop_registration = drag_drop::register(&window, Rc::clone(&controls));
             let mut context_providers: Vec<Box<dyn Fn()>> = {

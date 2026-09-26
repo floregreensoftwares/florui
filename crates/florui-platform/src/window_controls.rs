@@ -29,6 +29,7 @@ use std::sync::Arc;
 use florui_reactive::use_context;
 use winit::window::{BadIcon, Icon, Window};
 
+use crate::appearance::AppearanceReport;
 use crate::drag_drop::{DragEvent, DragPayload};
 use crate::file_dialog::{
     OpenFileDialogOptions, OpenFileDialogOutcome, SaveFileDialogOptions, SaveFileDialogOutcome,
@@ -182,6 +183,11 @@ pub struct WindowControls {
     /// `winit` gives no synchronous way to ask a window's current focus
     /// state at construction time.
     focused: Cell<bool>,
+    /// What [`crate::appearance::probe_appearance`] found for this real
+    /// window at creation time — fixed for the window's whole lifetime,
+    /// unlike `focused`/`input_mode` above, since decorations/transparency
+    /// aren't changed after creation.
+    appearance_report: AppearanceReport,
     /// `Arc`, not `Box` like `request_close` -- a *clone* of this needs to
     /// move into the background thread [`Self::open_file_dialog`] spawns,
     /// while the original stays here for the next call.
@@ -201,6 +207,7 @@ impl WindowControls {
         request_close: impl Fn() + 'static,
         notify_open_dialog_result: impl Fn(OpenFileDialogOutcome) + Send + Sync + 'static,
         notify_save_dialog_result: impl Fn(SaveFileDialogOutcome) + Send + Sync + 'static,
+        appearance_report: AppearanceReport,
     ) -> Self {
         Self {
             window,
@@ -208,6 +215,7 @@ impl WindowControls {
             close_guard: CloseGuard::default(),
             input_mode: Cell::new(InputMode::Normal),
             focused: Cell::new(true),
+            appearance_report,
             notify_open_dialog_result: Arc::new(notify_open_dialog_result),
             notify_save_dialog_result: Arc::new(notify_save_dialog_result),
             pending_open_dialog: RefCell::new(None),
@@ -324,6 +332,13 @@ impl WindowControls {
     /// `WindowEvent::Focused`.
     pub(crate) fn set_focused(&self, focused: bool) {
         self.focused.set(focused);
+    }
+
+    /// What this window actually got vs. what [`crate::run_with_options`]
+    /// requested, per capability — see [`AppearanceReport`]'s own doc.
+    /// Probed once, against this real window, at creation time.
+    pub fn appearance_report(&self) -> &AppearanceReport {
+        &self.appearance_report
     }
 
     pub fn set_always_on_top(&self, enabled: bool) {

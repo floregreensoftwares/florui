@@ -56,6 +56,19 @@ fn title_bar_demo() -> Element {
         });
     }
 
+    // Real production evidence, not just the standalone `appearance_probe`
+    // example: what this actual window got back once `DecorationMode::Custom`
+    // reached a live `winit` window, printed once on mount.
+    {
+        let controls = controls.clone();
+        use_effect((), move || {
+            if let Some(controls) = &controls {
+                eprintln!("appearance report: {:#?}", controls.appearance_report());
+            }
+            None
+        });
+    }
+
     let minimize = controls.clone();
     let toggle_maximize = controls.clone();
     let close = controls.clone();
