@@ -27,7 +27,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use florui_reactive::use_context;
-use winit::window::{BadIcon, Icon, Window};
+use winit::window::{BadIcon, Icon, ResizeDirection, Window};
 
 use crate::drag_drop::{DragEvent, DragPayload};
 use crate::file_dialog::{
@@ -78,6 +78,40 @@ pub(crate) struct ScreenRect {
 impl ScreenRect {
     pub(crate) fn contains(&self, x: i32, y: i32) -> bool {
         x >= self.left && x < self.right && y >= self.top && y < self.bottom
+    }
+}
+
+/// How close to a [`crate::appearance::DecorationMode::Custom`] window's
+/// own outer edge (logical pixels) counts as its resize border — there is
+/// no OS-drawn border to provide one, so this crate's own margin is the
+/// only resize affordance such a window has at all.
+pub(crate) const RESIZE_MARGIN: f32 = 8.0;
+
+/// Which edge/corner `(x, y)` (logical, window-relative) falls within
+/// [`RESIZE_MARGIN`] of, if any, given the window's own current logical
+/// `(width, height)` — `None` anywhere in the interior. A corner takes
+/// priority over either single edge it touches.
+pub(crate) fn resize_direction_at(
+    width: f32,
+    height: f32,
+    x: f32,
+    y: f32,
+) -> Option<ResizeDirection> {
+    let near_left = x < RESIZE_MARGIN;
+    let near_right = x > width - RESIZE_MARGIN;
+    let near_top = y < RESIZE_MARGIN;
+    let near_bottom = y > height - RESIZE_MARGIN;
+
+    match (near_left, near_right, near_top, near_bottom) {
+        (true, _, true, _) => Some(ResizeDirection::NorthWest),
+        (_, true, true, _) => Some(ResizeDirection::NorthEast),
+        (true, _, _, true) => Some(ResizeDirection::SouthWest),
+        (_, true, _, true) => Some(ResizeDirection::SouthEast),
+        (true, _, _, _) => Some(ResizeDirection::West),
+        (_, true, _, _) => Some(ResizeDirection::East),
+        (_, _, true, _) => Some(ResizeDirection::North),
+        (_, _, _, true) => Some(ResizeDirection::South),
+        _ => None,
     }
 }
 
@@ -286,6 +320,26 @@ impl WindowControls {
         let _ = self.window.drag_window();
     }
 
+    /// Starts an OS-native resize-drag in `direction` from the current
+    /// mouse position — same shape as [`Self::drag`]. A `winit`-level
+    /// failure is silently ignored.
+    pub(crate) fn start_resize(&self, direction: ResizeDirection) {
+        let _ = self.window.drag_resize_window(direction);
+    }
+
+    /// Applies the real OS resize cursor for `direction`, or the default
+    /// arrow when `None` — called on every cursor move over a
+    /// [`crate::appearance::DecorationMode::Custom`] window so the border
+    /// looks resizable even though nothing is actually being dragged yet.
+    pub(crate) fn set_resize_cursor(&self, direction: Option<ResizeDirection>) {
+        match direction {
+            Some(direction) => self
+                .window
+                .set_cursor(winit::window::CursorIcon::from(direction)),
+            None => self.window.set_cursor(winit::window::CursorIcon::Default),
+        }
+    }
+
     /// Shows a real native context menu at the current cursor position,
     /// blocking this thread until it closes -- the same synchronous shape
     /// as [`Self::drag`], not the async open/save-dialog pattern: a
@@ -469,6 +523,61 @@ pub fn use_window_controls() -> Option<Rc<WindowControls>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_interior_is_never_a_resize_direction() {
+        assert_eq!(resize_direction_at(400.0, 300.0, 200.0, 150.0), None);
+    }
+
+    #[test]
+    fn each_edges_own_middle_resizes_along_that_single_axis() {
+        assert_eq!(
+            resize_direction_at(400.0, 300.0, 1.0, 150.0),
+            Some(ResizeDirection::West)
+        );
+        assert_eq!(
+            resize_direction_at(400.0, 300.0, 399.0, 150.0),
+            Some(ResizeDirection::East)
+        );
+        assert_eq!(
+            resize_direction_at(400.0, 300.0, 200.0, 1.0),
+            Some(ResizeDirection::North)
+        );
+        assert_eq!(
+            resize_direction_at(400.0, 300.0, 200.0, 299.0),
+            Some(ResizeDirection::South)
+        );
+    }
+
+    #[test]
+    fn a_corner_takes_priority_over_either_edge_it_touches() {
+        assert_eq!(
+            resize_direction_at(400.0, 300.0, 1.0, 1.0),
+            Some(ResizeDirection::NorthWest)
+        );
+        assert_eq!(
+            resize_direction_at(400.0, 300.0, 399.0, 1.0),
+            Some(ResizeDirection::NorthEast)
+        );
+        assert_eq!(
+            resize_direction_at(400.0, 300.0, 1.0, 299.0),
+            Some(ResizeDirection::SouthWest)
+        );
+        assert_eq!(
+            resize_direction_at(400.0, 300.0, 399.0, 299.0),
+            Some(ResizeDirection::SouthEast)
+        );
+    }
+
+    #[test]
+    fn exactly_at_the_margin_boundary_is_already_interior() {
+        // RESIZE_MARGIN is 8.0 -- a point exactly on it is not "closer
+        // than" the margin, matching ScreenRect's own half-open convention.
+        assert_eq!(
+            resize_direction_at(400.0, 300.0, RESIZE_MARGIN, 150.0),
+            None
+        );
+    }
 
     fn raw_icon(rgba: Vec<u8>, width: u32, height: u32) -> florui_icon::RawIcon {
         florui_icon::RawIcon {

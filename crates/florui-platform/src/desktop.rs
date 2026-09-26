@@ -34,7 +34,7 @@ use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
-use winit::window::{Window, WindowId};
+use winit::window::{ResizeDirection, Window, WindowId};
 
 use crate::UiRuntime;
 use crate::accessibility;
@@ -46,7 +46,7 @@ use crate::file_dialog::{OpenFileDialogOutcome, SaveFileDialogOutcome};
 use crate::gpu::{self, GpuPresenter};
 use crate::popover;
 use crate::single_instance::{self, HandoffOutcome, InstanceRole};
-use crate::window_controls::{InputMode, ScreenRect, WindowControls};
+use crate::window_controls::{InputMode, ScreenRect, WindowControls, resize_direction_at};
 use crate::window_state::{self, WindowPersistence};
 
 #[derive(Debug)]
@@ -800,6 +800,13 @@ struct WindowState {
     /// override is set; see [`crate::theme`]'s own module doc), checked in
     /// [`Self::handle_theme_changed`].
     theme_preference: crate::theme::ThemePreference,
+    /// What this window was created with — a `Custom`-decorated window has
+    /// no OS-drawn resize border at all, so [`Self::handle_press`]/
+    /// [`Self::handle_cursor_moved`] only hit-test [`resize_direction_at`]
+    /// when this is [`DecorationMode::Custom`]; a `System`-decorated window
+    /// already gets real OS resize edges for free and must not have this
+    /// crate's own margin double up on top of them.
+    decorations: DecorationMode,
     /// `Some` when this window opted into bounds persistence — read at
     /// close time (see [`DesktopHost::close_if_confirmed`]) to flush a
     /// final save.
@@ -868,6 +875,17 @@ impl WindowState {
     fn to_logical_cursor(&self, x: f64, y: f64) -> (f32, f32) {
         let factor = self.viewport_scale().scale_factor;
         ((x / factor) as f32, (y / factor) as f32)
+    }
+
+    /// Only [`DecorationMode::Custom`] ever hit-tests a resize border —
+    /// see [`Self::decorations`]'s own doc for why a `System`-decorated
+    /// window must not.
+    fn resize_direction_at_cursor(&self, x: f32, y: f32) -> Option<ResizeDirection> {
+        if self.decorations != DecorationMode::Custom {
+            return None;
+        }
+        let logical = self.viewport_scale().logical;
+        resize_direction_at(logical.width, logical.height, x, y)
     }
 
     /// A real wheel/trackpad event's delta, converted to the logical
@@ -1158,6 +1176,10 @@ impl WindowState {
     fn handle_cursor_moved(&mut self, x: f64, y: f64) {
         self.last_cursor = (x, y);
         let (x, y) = self.to_logical_cursor(x, y);
+        if self.decorations == DecorationMode::Custom {
+            self.controls
+                .set_resize_cursor(self.resize_direction_at_cursor(x, y));
+        }
         if let Some(node) = self.text_selecting {
             let Some(id) = ({
                 let (arena, ..) = self.runtime.geometry();
@@ -1254,6 +1276,14 @@ impl WindowState {
         };
         for root in dismissed {
             self.runtime.dispatch_event(root, "dismiss");
+        }
+
+        // Checked before the drag region: a `Custom` window's own top few
+        // pixels are still a resize border first, exactly like a real
+        // title bar's top edge on a system-decorated window.
+        if let Some(direction) = self.resize_direction_at_cursor(x, y) {
+            self.controls.start_resize(direction);
+            return;
         }
 
         if hit.is_some_and(|node| self.is_drag_region(node)) {
@@ -2131,6 +2161,7 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 _css_watcher: css_watcher,
                 _drag_drop: drag_drop_registration,
                 theme_preference,
+                decorations: spec.options.decorations,
                 persistence: spec.options.persistence.clone(),
                 pending_geometry_save: None,
                 modifiers: ModifiersState::empty(),
