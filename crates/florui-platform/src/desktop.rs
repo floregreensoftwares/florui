@@ -834,6 +834,11 @@ struct WindowState {
     /// real double-click makes. No existing double-click detection exists
     /// anywhere else in this file to reuse.
     last_text_input_click: Option<(NodeId, std::time::Instant)>,
+    /// The instant of the last real left-button press on
+    /// [`crate::WINDOW_DRAG_REGION_ID`] — a second press within
+    /// [`DOUBLE_CLICK_INTERVAL`] toggles maximize instead of starting
+    /// another drag, the same distinction a real title bar makes.
+    last_drag_region_click: Option<std::time::Instant>,
     /// Real AccessKit wiring for this window -- see `resumed`'s own doc
     /// for why it must be constructed before the window is first shown.
     accessibility_adapter: accesskit_winit::Adapter,
@@ -1261,10 +1266,12 @@ impl WindowState {
     /// back on this same node (so dragging off a button and releasing
     /// elsewhere cancels it). A press that lands exactly on
     /// [`crate::WINDOW_DRAG_REGION_ID`] is a different gesture entirely —
-    /// see that constant's own doc — and starts a real window drag
-    /// instead of ever becoming a click candidate; `winit`'s own
-    /// `drag_window` takes over the mouse for the rest of this gesture,
-    /// so there is no matching press to remember here.
+    /// see that constant's own doc — and starts a real window drag instead
+    /// of ever becoming a click candidate, unless it's a second press
+    /// within [`DOUBLE_CLICK_INTERVAL`], which toggles maximize instead;
+    /// `winit`'s own `drag_window` takes over the mouse for the rest of a
+    /// single-click drag gesture, so there is no matching press to
+    /// remember here.
     fn handle_press(&mut self) {
         let (x, y) = self.to_logical_cursor(self.last_cursor.0, self.last_cursor.1);
         let hit = self.runtime.hit_test(x, y);
@@ -1288,7 +1295,16 @@ impl WindowState {
         }
 
         if hit.is_some_and(|node| self.is_drag_region(node)) {
-            self.controls.drag();
+            let now = std::time::Instant::now();
+            let is_double_click = self
+                .last_drag_region_click
+                .is_some_and(|at| now - at < DOUBLE_CLICK_INTERVAL);
+            self.last_drag_region_click = Some(now);
+            if is_double_click {
+                self.controls.toggle_maximize();
+            } else {
+                self.controls.drag();
+            }
             return;
         }
         if let Some(node) = hit
@@ -2181,6 +2197,7 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
                 modifiers: ModifiersState::empty(),
                 text_selecting: None,
                 last_text_input_click: None,
+                last_drag_region_click: None,
                 accessibility_adapter,
                 accessibility_tree: accessibility::tree::AccessibilityTree::new(),
                 accessibility_reverse: HashMap::new(),
