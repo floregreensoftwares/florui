@@ -446,6 +446,35 @@ mod tests {
     }
 
     #[test]
+    fn a_submenu_triggers_button_matches_its_sibling_rows_own_height() {
+        // A bare `<button>` is `display: inline-block` by default. Its own
+        // box used to come from raw text metrics alone (see
+        // `florui_layout::measure_inline_block_intrinsic_size`'s own
+        // fix) -- confirmed as a real bug by two buttons with *different*
+        // declared padding coming out at the identical height, proving
+        // padding wasn't contributing to it at all. This guards the fix.
+        let open = Rc::new(Cell::new(false));
+        let submenu_open = Rc::new(Cell::new(false));
+        let mut runtime = nested_menu_runtime(Rc::clone(&open), Rc::clone(&submenu_open));
+        open.set(true);
+        runtime.update(viewport());
+        runtime.update(viewport());
+
+        let (arena, _, layouts) = runtime.geometry();
+        let button = arena
+            .find(|a, n| a.id_attr(n) == Some("submenu-trigger"))
+            .unwrap();
+        let item_one = arena.find(|a, n| a.id_attr(n) == Some("item-one")).unwrap();
+        assert!(
+            (layouts[&button].height - layouts[&item_one].height).abs() < 2.0,
+            "the submenu trigger button ({}) must be as tall as its sibling rows ({}), \
+             including its own padding",
+            layouts[&button].height,
+            layouts[&item_one].height
+        );
+    }
+
+    #[test]
     fn a_submenu_lands_beside_its_parent_panel_not_overlapping_it() {
         let open = Rc::new(Cell::new(false));
         let submenu_open = Rc::new(Cell::new(false));

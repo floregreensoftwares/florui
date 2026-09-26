@@ -285,13 +285,21 @@ fn needs_inline_layout(
     has_real_inline_content
 }
 
-/// An inline-block child's own intrinsic content size: its own explicit
-/// `width`/`height` where set, falling back to its own unwrapped text
-/// measurement — a bounded shrink-to-fit (real CSS's actual shrink-to-fit
-/// algorithm also considers the line's own remaining space; this crate
-/// does not yet, the same kind of documented bound as
-/// [`needs_inline_layout`]'s own one-level restriction). `measure_inline_block_intrinsic_size`
-/// only runs for a child [`needs_inline_layout`] already required to be a
+/// An inline-block child's own intrinsic *border-box* size: its own
+/// explicit `width`/`height` where set, falling back to its own unwrapped
+/// text measurement — a bounded shrink-to-fit (real CSS's actual
+/// shrink-to-fit algorithm also considers the line's own remaining space;
+/// this crate does not yet, the same kind of documented bound as
+/// [`needs_inline_layout`]'s own one-level restriction) — plus the
+/// child's own padding and border, since both `width`/`height` are
+/// content-box (this crate's own top-level scope doc) and this function's
+/// result becomes the child's *whole* [`BoxLayout`] directly (line
+/// formatting has no separate box-model resolution pass the way Taffy's
+/// own block/flex algorithms do for every other node). Omitting this
+/// addition was a real bug: two buttons with different declared padding
+/// came out the exact same height, since only their identical text
+/// metrics were ever counted. `measure_inline_block_intrinsic_size` only
+/// runs for a child [`needs_inline_layout`] already required to be a
 /// leaf, so its own direct text (not `inline_items`) is exactly what it
 /// has to measure.
 fn measure_inline_block_intrinsic_size(
@@ -316,9 +324,24 @@ fn measure_inline_block_intrinsic_size(
     } else {
         font.measure(font_family, text, font_size, font_weight)
     };
-    let width = style.and_then(|s| s.width).unwrap_or(measured.width);
-    let height = style.and_then(|s| s.height).unwrap_or(measured.height);
-    (width, height)
+    let content_width = style.and_then(|s| s.width).unwrap_or(measured.width);
+    let content_height = style.and_then(|s| s.height).unwrap_or(measured.height);
+    let (padding_x, padding_y) = style.map_or((0.0, 0.0), |s| {
+        (
+            s.padding.left + s.padding.right,
+            s.padding.top + s.padding.bottom,
+        )
+    });
+    let (border_x, border_y) = style.map_or((0.0, 0.0), |s| {
+        (
+            s.border.left.width + s.border.right.width,
+            s.border.top.width + s.border.bottom.width,
+        )
+    });
+    (
+        content_width + padding_x + border_x,
+        content_height + padding_y + border_y,
+    )
 }
 
 /// Builds `node`'s own [`InlineContentItem`] sequence from
@@ -2613,9 +2636,11 @@ mod tests {
         let button = arena.children(p)[0];
 
         // Sized to its own content, not stretched to the container's width
-        // the way a block child would be.
-        assert_close(layouts[&button].width, button_text.width);
-        assert_close(layouts[&button].height, button_text.height);
+        // the way a block child would be -- plus the 1px default border
+        // every `<button>` gets (`default_stylesheet.rs`'s own rule),
+        // which now correctly contributes to its own box.
+        assert_close(layouts[&button].width, button_text.width + 2.0);
+        assert_close(layouts[&button].height, button_text.height + 2.0);
 
         // Flowing inline: positioned after the preceding text on the same
         // line, not stacked below it as its own block box.
@@ -2630,6 +2655,33 @@ mod tests {
              own (y = {})",
             layouts[&button].y
         );
+    }
+
+    #[test]
+    fn an_inline_blocks_own_padding_and_border_add_to_its_content_size() {
+        let tree = Element::node(
+            "p",
+            vec![],
+            vec![Element::node(
+                "button",
+                vec![("class".to_string(), "padded".to_string())],
+                vec![Element::text("here")],
+            )],
+        );
+        let mut font = florui_text::Font::load_embedded();
+        let text = font.measure(florui_text::FontFamily::SansSerif, "here", 16.0, 400.0);
+
+        let (arena, layouts) = layout_for(
+            &tree,
+            ".padded { padding-top: 8px; padding-right: 14px; padding-bottom: 8px; \
+                       padding-left: 14px; border-width: 2px; border-style: solid; \
+                       border-color: #000000; }",
+        );
+        let p = arena.roots()[0];
+        let button = arena.children(p)[0];
+
+        assert_close(layouts[&button].width, text.width + 14.0 + 14.0 + 2.0 + 2.0);
+        assert_close(layouts[&button].height, text.height + 8.0 + 8.0 + 2.0 + 2.0);
     }
 
     #[test]
