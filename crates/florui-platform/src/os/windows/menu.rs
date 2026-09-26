@@ -19,9 +19,9 @@ use std::ffi::c_void;
 
 use windows_sys::Win32::Foundation::{HWND, POINT};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, HMENU, MF_CHECKED, MF_GRAYED,
-    MF_SEPARATOR, MF_STRING, PostMessageW, SetForegroundWindow, TPM_LEFTALIGN, TPM_RETURNCMD,
-    TPM_TOPALIGN, TrackPopupMenuEx, WM_NULL,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetSystemMenu, HMENU, MF_CHECKED,
+    MF_GRAYED, MF_SEPARATOR, MF_STRING, PostMessageW, SetForegroundWindow, TPM_LEFTALIGN,
+    TPM_RETURNCMD, TPM_TOPALIGN, TrackPopupMenuEx, WM_NULL, WM_SYSCOMMAND,
 };
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
@@ -137,4 +137,70 @@ pub(crate) fn show_context_menu(window: &Window, items: &[MenuEntry]) -> Context
         0 => ContextMenuOutcome::Dismissed,
         id => ContextMenuOutcome::Selected(MenuCommandId(id)),
     }
+}
+
+/// Shows the real Windows system menu (Restore/Move/Size/Minimize/
+/// Maximize/Close, already correctly enabled/greyed for this window's
+/// current state) at `(x, y)` in screen coordinates. Unlike
+/// [`show_context_menu`], the returned command is posted right back as a
+/// real `WM_SYSCOMMAND` -- Windows itself then executes it exactly as if
+/// its own title bar had been used, so this crate never reimplements
+/// what "Minimize" or "Move" should do.
+fn show_system_menu(hwnd: HWND, x: i32, y: i32) {
+    // Safety: hwnd is a real, live window handle. `revert: false` returns
+    // the window's own real system menu handle, not a caller-owned copy --
+    // it must never be passed to `DestroyMenu` (unlike `build_menu`'s own
+    // `CreatePopupMenu` result above).
+    let hmenu = unsafe { GetSystemMenu(hwnd, false.into()) };
+    if hmenu.is_null() {
+        return;
+    }
+
+    // Safety: hwnd is real and live -- see `show_context_menu`'s own doc
+    // for why this precedes `TrackPopupMenuEx`.
+    unsafe { SetForegroundWindow(hwnd) };
+
+    // Safety: hmenu and hwnd are both real and live; a null lptpm is
+    // documented-valid.
+    let result = unsafe {
+        TrackPopupMenuEx(
+            hmenu,
+            TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN,
+            x,
+            y,
+            hwnd,
+            std::ptr::null(),
+        )
+    };
+    if result != 0 {
+        // Safety: hwnd is real and live; WM_SYSCOMMAND's own documented
+        // shape (command id in wParam, 0 in lParam for a menu-originated
+        // command).
+        unsafe { PostMessageW(hwnd, WM_SYSCOMMAND, result as usize, 0) };
+    }
+    // Safety: hwnd is real and live -- same documented follow-up nudge as
+    // `show_context_menu`.
+    unsafe { PostMessageW(hwnd, WM_NULL, 0, 0) };
+}
+
+/// See [`show_system_menu`]'s own doc -- positioned at the current cursor,
+/// for a real right-click on the drag region.
+pub(crate) fn show_system_menu_at_cursor(window: &Window) {
+    let Some(hwnd) = raw_hwnd(window) else {
+        return;
+    };
+    let mut cursor = POINT { x: 0, y: 0 };
+    // Safety: cursor is a valid out-pointer.
+    unsafe { GetCursorPos(&mut cursor) };
+    show_system_menu(hwnd, cursor.x, cursor.y);
+}
+
+/// See [`show_system_menu`]'s own doc -- positioned at `(screen_x,
+/// screen_y)`, for a keyboard-triggered Alt+Space (no cursor position to
+/// anchor to, unlike [`show_system_menu_at_cursor`]).
+pub(crate) fn show_system_menu_at(window: &Window, screen_x: i32, screen_y: i32) {
+    let Some(hwnd) = raw_hwnd(window) else {
+        return;
+    };
+    show_system_menu(hwnd, screen_x, screen_y);
 }

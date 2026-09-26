@@ -351,6 +351,21 @@ impl WindowControls {
         crate::menu::show_context_menu(&self.window, items)
     }
 
+    /// Shows the real OS system menu (Restore/Move/Size/Minimize/Maximize/
+    /// Close) at the current cursor position -- called by
+    /// [`crate::desktop::DesktopHost`] on a real right-click of
+    /// [`WINDOW_DRAG_REGION_ID`]. No-op outside Windows -- see
+    /// [`crate::menu`]'s own stub.
+    pub(crate) fn show_system_menu_at_cursor(&self) {
+        crate::menu::show_system_menu_at_cursor(&self.window);
+    }
+
+    /// See [`Self::show_system_menu_at_cursor`]'s own doc -- positioned at
+    /// an explicit screen point instead, for a keyboard-triggered Alt+Space.
+    pub(crate) fn show_system_menu_at(&self, screen_x: i32, screen_y: i32) {
+        crate::menu::show_system_menu_at(&self.window, screen_x, screen_y);
+    }
+
     /// Live query, not a cached guess — picks up snap/double-click too.
     pub fn is_maximized(&self) -> bool {
         self.window.is_maximized()
