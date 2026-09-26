@@ -1602,6 +1602,44 @@ mod tests {
         assert_eq!(layouts[&overlay_root].height, 30.0);
     }
 
+    /// The load-bearing claim `florui-platform`'s `Popover` relies on:
+    /// combining an overlay root's own viewport-origin placement (proven
+    /// above) with a plain `position: absolute` child's own inset
+    /// resolution against its parent (proven by
+    /// `position_absolute_lands_at_its_own_explicit_inset_offset`) must
+    /// add up to true viewport pixel coordinates -- neither existing test
+    /// proves that composition directly.
+    #[test]
+    fn an_absolutely_positioned_child_of_an_overlay_root_lands_at_true_viewport_coordinates() {
+        let document: Element = view! { <div class="doc" /> };
+        let overlay: Element = view! {
+            <div class="overlay-root">
+                <div class="anchored" />
+            </div>
+        };
+        let available = Size {
+            width: AvailableSpace::Definite(300.0),
+            height: AvailableSpace::Definite(200.0),
+        };
+        let (arena, layouts) = layout_with_overlays_for(
+            &document,
+            &overlay,
+            ".doc { width: 300px; height: 900px; } \
+             .anchored { position: absolute; top: 40px; left: 25px; width: 10px; height: 10px; }",
+            available,
+        );
+        let overlay_root = arena.overlay_roots()[0];
+        let anchored = arena.children(overlay_root)[0];
+        assert_eq!(
+            absolute_position(&arena, &layouts, anchored),
+            (25.0, 40.0),
+            "an absolutely-positioned child of an overlay root must land at true viewport pixel \
+             coordinates -- the same space a document-tree trigger's own absolute_position \
+             reports -- regardless of document content or the overlay root's own lack of \
+             explicit sizing"
+        );
+    }
+
     #[test]
     fn an_arena_built_without_overlays_never_runs_the_second_layout_pass() {
         let tree: Element = view! { <div /> };
