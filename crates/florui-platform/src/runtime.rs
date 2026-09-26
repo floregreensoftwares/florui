@@ -20,7 +20,6 @@ use florui_style::{
 use taffy::prelude::*;
 
 use crate::focus;
-use crate::portal::PortalRegistry;
 use crate::position_observer::PositionObserverRegistry;
 use crate::scroll::ScrollRegistry;
 use crate::size_observer::SizeObserverRegistry;
@@ -96,13 +95,6 @@ pub struct UiRuntime {
     /// `size_observers` is — synced right after it, once this render's own
     /// real layout and content extents exist.
     scroll_registry: Rc<ScrollRegistry>,
-    /// Reachable by [`crate::Portal`] via context, the same way
-    /// `size_observers` is. Drained once per [`Self::update`], right
-    /// after this render's own `scope.render` call returns and before
-    /// [`Arena::build_with_overlays`] sees the result — see
-    /// [`PortalRegistry::take`]'s own doc for why no unmount lifecycle is
-    /// needed here, unlike `size_observers`.
-    portal_registry: Rc<PortalRegistry>,
     /// Real editing state (caret/selection/undo-redo) for every currently
     /// editable `<input>` — never reachable via `use_context`, unlike
     /// every other registry here: nothing inside a render ever needs it,
@@ -210,7 +202,6 @@ impl UiRuntime {
             size_observers: Rc::new(SizeObserverRegistry::new()),
             position_observers: Rc::new(PositionObserverRegistry::new()),
             scroll_registry: Rc::new(ScrollRegistry::new()),
-            portal_registry: Rc::new(PortalRegistry::new()),
             text_input_registry: Rc::new(TextInputRegistry::new()),
             extra_context_providers,
         };
@@ -313,7 +304,6 @@ impl UiRuntime {
         let size_observers = Rc::clone(&self.size_observers);
         let position_observers = Rc::clone(&self.position_observers);
         let scroll_registry = Rc::clone(&self.scroll_registry);
-        let portal_registry = Rc::clone(&self.portal_registry);
         // Resolved once so use_viewport_size sees the same value layout uses.
         let resolved_viewport = media_viewport(viewport);
         let tree = self.scope.render(|| {
@@ -321,7 +311,6 @@ impl UiRuntime {
             provide_context(Rc::clone(&size_observers));
             provide_context(Rc::clone(&position_observers));
             provide_context(Rc::clone(&scroll_registry));
-            provide_context(Rc::clone(&portal_registry));
             provide_context(ViewportSize {
                 width: resolved_viewport.width,
                 height: resolved_viewport.height,
@@ -331,11 +320,10 @@ impl UiRuntime {
             }
             (self.root)()
         });
-        let portals = self.portal_registry.take();
         // Lets any resource the render just started (or a prior task's
         // waker already requeued) make progress before this frame commits.
         self.executor.run_until_stalled();
-        self.arena = Arena::build_with_overlays(&tree, &Element::Fragment(portals));
+        self.arena = Arena::build(&tree);
         self.resolve_focus();
         self.animation_timeline
             .advance_to(self.animation_epoch.elapsed().as_secs_f64());
@@ -1433,7 +1421,7 @@ mod tests {
         runtime.update(viewport());
         assert!(
             runtime.geometry().0.overlay_roots().is_empty(),
-            "the registry must not leave stale content once nothing renders a Portal"
+            "a fresh render with no Portal in the tree must leave no stale overlay root"
         );
 
         show.set(true);
@@ -1526,6 +1514,24 @@ mod tests {
             },
             viewport(),
         )
+    }
+
+    #[test]
+    fn an_open_dialog_produces_exactly_one_overlay_root() {
+        let open = Rc::new(Cell::new(true));
+        let mut runtime = dialog_runtime(open, Rc::new(Cell::new(false)));
+        runtime.update(viewport());
+
+        let (arena, ..) = runtime.geometry();
+        assert_eq!(arena.overlay_roots().len(), 1);
+        let root = arena.overlay_roots()[0];
+        assert!(
+            arena
+                .classes(root)
+                .iter()
+                .any(|class| class == crate::dialog::MODAL_ROOT_CLASS),
+            "Dialog's own single-level Portal usage must be unaffected by nested-portal extraction"
+        );
     }
 
     #[test]

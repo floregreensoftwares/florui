@@ -16,6 +16,10 @@ pub enum Element {
     Node(ElementNode),
     Text(String),
     Fragment(Vec<Element>),
+    /// A `<Portal>`'s own content — see `crates/florui-style/src/tree.rs`'s
+    /// `Arena::build` for how this becomes an independent overlay root
+    /// instead of being spliced in place like `Fragment`.
+    Portal(Vec<Element>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,13 +103,15 @@ impl Drop for Element {
     fn drop(&mut self) {
         let mut pending: Vec<Element> = match self {
             Element::Node(node) => std::mem::take(&mut node.children),
-            Element::Fragment(children) => std::mem::take(children),
+            Element::Fragment(children) | Element::Portal(children) => std::mem::take(children),
             Element::Text(_) => return,
         };
         while let Some(mut element) = pending.pop() {
             match &mut element {
                 Element::Node(node) => pending.extend(std::mem::take(&mut node.children)),
-                Element::Fragment(children) => pending.extend(std::mem::take(children)),
+                Element::Fragment(children) | Element::Portal(children) => {
+                    pending.extend(std::mem::take(children))
+                }
                 Element::Text(_) => {}
             }
         }

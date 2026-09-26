@@ -24,11 +24,11 @@
 //! subtree — pairwise wrongly closes a parent menu on a click inside its
 //! own submenu, since a submenu's `Portal` content is a sibling overlay
 //! root, not a descendant of the parent's arena node. `dismissed_by_
-//! escape` closes only the *first* popover root in document order: a
-//! nested submenu's own `<Portal>` call runs while building its parent
-//! Popover's own `children` argument, so it registers (and appears in
-//! `arena.overlay_roots()`) *before* its parent's — confirmed by a real
-//! test, not assumed.
+//! escape` closes only the *last* popover root in document order: a
+//! nested submenu's own overlay root is extracted in a later pass than
+//! its parent's (`florui_style::Arena::build`'s own doc), so it always
+//! lands later in `arena.overlay_roots()` — "last" is the innermost/
+//! most-recently-opened one.
 //!
 //! Not done here: focus-on-open, placements beyond flip/shift (no
 //! `autoPlacement`, arrow element, or `size` middleware).
@@ -196,9 +196,9 @@ pub(crate) fn dismissed_by_click(arena: &Arena, hit: Option<NodeId>) -> Vec<Node
     if inside_any { Vec::new() } else { roots }
 }
 
-/// The one popover root Escape closes (see module doc for why "first").
+/// The one popover root Escape closes (see module doc for why "last").
 pub(crate) fn dismissed_by_escape(arena: &Arena) -> Option<NodeId> {
-    popover_roots(arena).into_iter().next()
+    popover_roots(arena).into_iter().last()
 }
 
 /// The content's final `(x, y)` for `placement`, given `trigger`'s
@@ -542,6 +542,42 @@ mod tests {
     }
 
     #[test]
+    fn a_submenus_overlay_root_paints_after_its_parent_menus_own() {
+        let open = Rc::new(Cell::new(false));
+        let submenu_open = Rc::new(Cell::new(false));
+        let mut runtime = nested_menu_runtime(Rc::clone(&open), Rc::clone(&submenu_open));
+        open.set(true);
+        runtime.update(viewport());
+        runtime.update(viewport());
+        submenu_open.set(true);
+        runtime.update(viewport());
+        runtime.update(viewport());
+
+        let (arena, ..) = runtime.geometry();
+        let roots = popover_roots(arena);
+        let parent_root = roots
+            .iter()
+            .find(|&&root| {
+                trigger_for(arena, root).is_some_and(|t| arena.id_attr(t) == Some("menu"))
+            })
+            .expect("the parent menu's own overlay root must exist");
+        let submenu_root = roots
+            .iter()
+            .find(|&&root| {
+                trigger_for(arena, root).is_some_and(|t| arena.id_attr(t) == Some("submenu"))
+            })
+            .expect("the submenu's own overlay root must exist");
+        let all_roots = arena.roots();
+        let parent_index = all_roots.iter().position(|r| r == parent_root).unwrap();
+        let submenu_index = all_roots.iter().position(|r| r == submenu_root).unwrap();
+        assert!(
+            submenu_index > parent_index,
+            "the submenu's overlay root ({submenu_index}) must land after its parent menu's own \
+             ({parent_index}) so it paints/hit-tests on top, not behind it"
+        );
+    }
+
+    #[test]
     fn an_open_popovers_content_lands_directly_below_its_trigger_with_no_gap() {
         let open = Rc::new(Cell::new(false));
         let mut runtime = menu_runtime(Rc::clone(&open));
@@ -723,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn dismissed_by_escape_picks_the_first_in_document_order() {
+    fn dismissed_by_escape_picks_the_last_in_document_order() {
         let tree: Element = view! {
             <div>
                 <div id="a-popover-root" class={POPOVER_ROOT_CLASS} />
@@ -731,8 +767,8 @@ mod tests {
             </div>
         };
         let arena = arena_with(tree);
-        let first = popover_roots(&arena)[0];
-        assert_eq!(dismissed_by_escape(&arena), Some(first));
+        let last = popover_roots(&arena)[1];
+        assert_eq!(dismissed_by_escape(&arena), Some(last));
     }
 
     #[test]

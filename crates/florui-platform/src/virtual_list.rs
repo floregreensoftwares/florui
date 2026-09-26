@@ -312,7 +312,7 @@ pub fn use_virtual_list(
                     node.attrs.retain(|(name, _)| name != "id");
                     node.attrs.push(("id".to_string(), row_id));
                 }
-                Element::Text(_) | Element::Fragment(_) => {
+                Element::Text(_) | Element::Fragment(_) | Element::Portal(_) => {
                     element = Element::node("div", vec![("id".to_string(), row_id)], vec![element]);
                 }
             }

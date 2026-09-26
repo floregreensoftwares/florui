@@ -39,7 +39,7 @@ pub fn from_element(root: &Element, fallback: Rgba) -> Scene {
 fn first_styled_child(element: &Element) -> Option<&Element> {
     let children = match element {
         Element::Node(ElementNode { children, .. }) => children,
-        Element::Fragment(children) => children,
+        Element::Fragment(children) | Element::Portal(children) => children,
         Element::Text(_) => return None,
     };
     children

@@ -73,13 +73,13 @@ pub struct Arena {
     nodes: Vec<ArenaNode>,
     roots: Vec<NodeId>,
     /// How many of `roots`' leading entries are document roots — the
-    /// rest (built by [`Self::build_with_overlays`], if any) are portal
-    /// overlay roots. `roots()` itself stays one flat, ordered list on
-    /// purpose: paint (later root paints on top, unclipped) and hit-test
-    /// (later root wins) both already treat a later root as "above" an
-    /// earlier one with no changes needed — only layout needs to tell
-    /// the two groups apart, via [`Self::document_roots`]/
-    /// [`Self::overlay_roots`].
+    /// rest (extracted from any [`Element::Portal`] found while building,
+    /// if any) are portal overlay roots. `roots()` itself stays one flat,
+    /// ordered list on purpose: paint (later root paints on top,
+    /// unclipped) and hit-test (later root wins) both already treat a
+    /// later root as "above" an earlier one with no changes needed —
+    /// only layout needs to tell the two groups apart, via
+    /// [`Self::document_roots`]/[`Self::overlay_roots`].
     document_root_count: usize,
 }
 
@@ -92,37 +92,67 @@ struct Frame<'a> {
 }
 
 impl Arena {
+    /// Walks `root`, discovering any [`Element::Portal`] structurally
+    /// (no side-channel registry) and extracting each one into its own
+    /// overlay root — level by level, so a portal nested inside another
+    /// portal's own content always lands in a *later* pass than its
+    /// ancestor, and so always later in [`Self::roots`] ("later root
+    /// wins/paints on top" — see [`Self::document_root_count`]'s own
+    /// doc). `document_root_count` is captured after the very first
+    /// pass, before any portal becomes a real root, so every document
+    /// root precedes every portal root regardless of nesting depth.
     pub fn build(root: &Element) -> Self {
         let mut arena = Arena {
             nodes: Vec::new(),
             roots: Vec::new(),
             document_root_count: 0,
         };
-        arena.push_all(std::slice::from_ref(root));
+        let mut next_level = Vec::new();
+        arena.push_all(std::slice::from_ref(root), &mut next_level);
         arena.document_root_count = arena.roots.len();
+        arena.drain_levels(next_level);
         arena
     }
 
     /// Like [`Self::build`], but `overlays` becomes a second group of
-    /// roots — [`Self::overlay_roots`] — appended after `document`'s own.
-    /// A portal-hosting runtime builds `overlays` from whatever its own
-    /// portal registry collected this render; every other caller keeps
-    /// using [`Self::build`], which leaves [`Self::overlay_roots`] empty.
+    /// roots — [`Self::overlay_roots`] — appended after `document`'s
+    /// own, for a caller that already has two independently-built trees
+    /// rather than a single one with `Portal`s inside it. `overlays`
+    /// itself may still contain `Portal`s of its own.
     pub fn build_with_overlays(document: &Element, overlays: &Element) -> Self {
         let mut arena = Arena {
             nodes: Vec::new(),
             roots: Vec::new(),
             document_root_count: 0,
         };
-        arena.push_all(std::slice::from_ref(document));
+        let mut next_level = Vec::new();
+        arena.push_all(std::slice::from_ref(document), &mut next_level);
         arena.document_root_count = arena.roots.len();
-        arena.push_all(std::slice::from_ref(overlays));
+        next_level.push(std::slice::from_ref(overlays));
+        arena.drain_levels(next_level);
         arena
+    }
+
+    /// Runs one more [`Self::push_all`] pass per entry already queued,
+    /// then repeats for whatever `Portal`s that pass itself discovers,
+    /// until a pass finds none — see [`Self::build`]'s own doc for why
+    /// this level-by-level order is what makes nesting paint correctly.
+    fn drain_levels(&mut self, mut next_level: Vec<&[Element]>) {
+        while !next_level.is_empty() {
+            let this_level = std::mem::take(&mut next_level);
+            for children in this_level {
+                self.push_all(children, &mut next_level);
+            }
+        }
     }
 
     /// Iterative pre-order walk: an explicit stack instead of one call
     /// frame per tree level, so a deep tree can't overflow the stack.
-    fn push_all(&mut self, root_elements: &[Element]) {
+    /// A [`Element::Portal`] contributes nothing at its own position
+    /// (like an empty [`Element::Fragment`]) and instead queues its own
+    /// content into `next_level` for [`Self::drain_levels`] to expand
+    /// into a real root afterward.
+    fn push_all<'a>(&mut self, root_elements: &'a [Element], next_level: &mut Vec<&'a [Element]>) {
         let mut stack = vec![Frame {
             elements: root_elements,
             index: 0,
@@ -176,6 +206,9 @@ impl Arena {
                         index: 0,
                         parent,
                     });
+                }
+                Element::Portal(children) => {
+                    next_level.push(children.as_slice());
                 }
                 Element::Text(value) => {
                     if let Some(p) = parent {
@@ -389,7 +422,7 @@ fn append_text(element: &Element, out: &mut String) {
                 append_text(child, out);
             }
         }
-        Element::Node(_) => {}
+        Element::Node(_) | Element::Portal(_) => {}
     }
 }
 
@@ -466,6 +499,53 @@ mod tests {
             arena.overlay_roots()[0],
             "overlay roots come after every document root in roots()"
         );
+    }
+
+    #[test]
+    fn a_portal_nested_three_levels_deep_lands_in_ancestor_before_descendant_order() {
+        let c = Element::node("div", vec![("id".to_string(), "c".to_string())], vec![]);
+        let b = Element::node(
+            "div",
+            vec![("id".to_string(), "b".to_string())],
+            vec![Element::Portal(vec![c])],
+        );
+        let a = Element::node(
+            "div",
+            vec![("id".to_string(), "a".to_string())],
+            vec![Element::Portal(vec![b])],
+        );
+        let document = Element::node("div", vec![], vec![Element::Portal(vec![a])]);
+
+        let arena = Arena::build(&document);
+
+        assert_eq!(arena.document_roots().len(), 1);
+        let overlays = arena.overlay_roots();
+        assert_eq!(overlays.len(), 3);
+        assert_eq!(arena.id_attr(overlays[0]), Some("a"));
+        assert_eq!(arena.id_attr(overlays[1]), Some("b"));
+        assert_eq!(
+            arena.id_attr(overlays[2]),
+            Some("c"),
+            "a portal nested inside another must land after its ancestor, however deep"
+        );
+    }
+
+    #[test]
+    fn two_unrelated_sibling_portals_keep_their_own_document_order() {
+        let a = Element::node("div", vec![("id".to_string(), "a".to_string())], vec![]);
+        let b = Element::node("div", vec![("id".to_string(), "b".to_string())], vec![]);
+        let document = Element::node(
+            "div",
+            vec![],
+            vec![Element::Portal(vec![a]), Element::Portal(vec![b])],
+        );
+
+        let arena = Arena::build(&document);
+
+        let overlays = arena.overlay_roots();
+        assert_eq!(overlays.len(), 2);
+        assert_eq!(arena.id_attr(overlays[0]), Some("a"));
+        assert_eq!(arena.id_attr(overlays[1]), Some("b"));
     }
 
     #[test]
