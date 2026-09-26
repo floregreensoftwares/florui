@@ -1223,6 +1223,16 @@ impl WindowState {
         self.refresh_animation_schedule();
     }
 
+    /// Reacts to a real `WindowEvent::Focused`: records it on
+    /// [`WindowControls`] (the live-query value [`WindowControls::is_focused`]
+    /// reads back) and re-renders so a component styling itself from that
+    /// query — e.g. dimming a custom caption while inactive — picks up the
+    /// change immediately rather than waiting for an unrelated redraw.
+    fn handle_focus_changed(&mut self, focused: bool) {
+        self.controls.set_focused(focused);
+        self.update_and_request_redraw();
+    }
+
     /// Remembers whichever node is under the cursor at press time — the
     /// click itself only fires on release, and only if that release lands
     /// back on this same node (so dragging off a button and releasing
@@ -2202,6 +2212,7 @@ impl ApplicationHandler<UserEvent> for DesktopHost {
             // all this needs.
             WindowEvent::ScaleFactorChanged { .. } => state.update_and_request_redraw(),
             WindowEvent::ThemeChanged(theme) => state.handle_theme_changed(theme),
+            WindowEvent::Focused(focused) => state.handle_focus_changed(focused),
             // A pure move (dragging the window, snapping it) changes
             // nothing about its content, only where `InputMode::Selective`'s
             // own screen-space regions sit -- resyncing them here, from
