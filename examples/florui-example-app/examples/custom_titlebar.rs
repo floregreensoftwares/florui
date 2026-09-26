@@ -73,6 +73,7 @@ fn title_bar_demo() -> Element {
                 <div class="window-buttons">
                     <button
                         class="window-button"
+                        accessible_label="Minimize"
                         onclick={move || if let Some(controls) = &minimize {
                             controls.minimize();
                         }}
@@ -81,6 +82,7 @@ fn title_bar_demo() -> Element {
                     </button>
                     <button
                         class="window-button"
+                        accessible_label={if maximized { "Restore" } else { "Maximize" }}
                         onclick={move || if let Some(controls) = &toggle_maximize {
                             controls.toggle_maximize();
                         }}
@@ -89,6 +91,7 @@ fn title_bar_demo() -> Element {
                     </button>
                     <button
                         class="close-button"
+                        accessible_label="Close"
                         onclick={move || if let Some(controls) = &close {
                             controls.close();
                         }}
