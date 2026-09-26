@@ -177,6 +177,11 @@ pub struct WindowControls {
     request_close: Box<dyn Fn()>,
     close_guard: CloseGuard,
     input_mode: Cell<InputMode>,
+    /// Last value reported by a real `WindowEvent::Focused` — a freshly
+    /// created window is assumed focused until told otherwise, since
+    /// `winit` gives no synchronous way to ask a window's current focus
+    /// state at construction time.
+    focused: Cell<bool>,
     /// `Arc`, not `Box` like `request_close` -- a *clone* of this needs to
     /// move into the background thread [`Self::open_file_dialog`] spawns,
     /// while the original stays here for the next call.
@@ -202,6 +207,7 @@ impl WindowControls {
             request_close: Box::new(request_close),
             close_guard: CloseGuard::default(),
             input_mode: Cell::new(InputMode::Normal),
+            focused: Cell::new(true),
             notify_open_dialog_result: Arc::new(notify_open_dialog_result),
             notify_save_dialog_result: Arc::new(notify_save_dialog_result),
             pending_open_dialog: RefCell::new(None),
@@ -303,6 +309,21 @@ impl WindowControls {
     pub fn toggle_maximize(&self) {
         let maximized = self.window.is_maximized();
         self.window.set_maximized(!maximized);
+    }
+
+    /// Whether this window currently has OS input focus — reflects the
+    /// last real `WindowEvent::Focused`, not a live OS query (`winit`
+    /// exposes no synchronous way to ask), so a component reading this
+    /// during the very first render before any such event has arrived
+    /// sees the assumed-focused default from [`Self::new`].
+    pub fn is_focused(&self) -> bool {
+        self.focused.get()
+    }
+
+    /// Called by [`crate::desktop::DesktopHost`] on a real
+    /// `WindowEvent::Focused`.
+    pub(crate) fn set_focused(&self, focused: bool) {
+        self.focused.set(focused);
     }
 
     pub fn set_always_on_top(&self, enabled: bool) {

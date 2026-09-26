@@ -34,6 +34,7 @@ fn main() {
 fn title_bar_demo() -> Element {
     let controls = use_window_controls();
     let maximized = controls.as_ref().is_some_and(|c| c.is_maximized());
+    let focused = controls.as_ref().is_none_or(|c| c.is_focused());
 
     // Demonstrates close cancellation: while unsaved, closing (via this
     // button or the real OS close) is vetoed.
@@ -62,7 +63,7 @@ fn title_bar_demo() -> Element {
 
     view! {
         <div class="app">
-            <div class="titlebar">
+            <div class={if focused { "titlebar" } else { "titlebar inactive" }}>
                 <span class="titlebar-title">{"Florui"}</span>
                 <div id={WINDOW_DRAG_REGION_ID} class="drag-region" />
                 <div class="titlebar-extra">

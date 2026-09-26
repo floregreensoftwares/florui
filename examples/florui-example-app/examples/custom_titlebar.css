@@ -20,6 +20,13 @@
     color: #c8c8cc;
 }
 
+/* Dims the title when the window last reported itself unfocused via a
+   real `WindowEvent::Focused` -- see `use_window_controls().is_focused()`
+   in custom_titlebar.rs. */
+.titlebar.inactive .titlebar-title {
+    color: #6a6a70;
+}
+
 /* The one leaf element `DesktopHost` recognizes as a native drag handle —
    see `florui_platform::WINDOW_DRAG_REGION_ID`'s own doc. Its `flex-grow`
    is what actually gives it the width to press on, filling whatever room
